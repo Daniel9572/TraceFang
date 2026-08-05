@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-analysis-platform"
+version = "0.1.0"
+description = "Provider-neutral market data and trading analysis platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "tzdata>=2025.2",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.scripts]
+market-analysis = "market_analysis.cli:main"
+market-analysis-server = "market_analysis.api:run"
+
+[dependency-groups]
+dev = [
+  "ruff>=0.12,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"market_analysis.infrastructure.providers.jin10_desktop" = ["*.ps1"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
