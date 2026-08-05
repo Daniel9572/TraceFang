@@ -22,13 +22,16 @@
 
 ## 快速开始
 
-首次运行，双击 `setup.cmd` 安装并构建。然后在当前 PowerShell 会话中设置 Token（只使用本地软件源时可跳过）：
+首次运行，双击 `setup.cmd` 安装并构建。只使用本地软件源时，之后可直接双击 `start.cmd`。
+
+如需官方 MCP 与 K 线，请在 PowerShell 中设置 Token，并在**同一个窗口**启动：
 
 ```powershell
 $env:JIN10_MCP_BEARER_TOKEN = "<your-token>"
+.\start.cmd
 ```
 
-双击 `start.cmd`，浏览器会打开 `http://127.0.0.1:8000`。也可以从终端启动：
+浏览器会打开 `http://127.0.0.1:8000`。也可以完全从终端安装和启动：
 
 ```powershell
 uv sync --python 3.13
