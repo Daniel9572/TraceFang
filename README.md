@@ -18,7 +18,7 @@
 | 金十官方 MCP | 报价、分钟 K 线、目录、资讯、日历 | 结构化、字段完整、可验证 | 配置 Bearer Token；不需要启动金十软件 |
 | 本地金十软件 | XAUUSD/XAGUSD 实时报价 | 成本低，普通分析够用 | Windows 上启动金十软件，打开行情页，窗口不能最小化；被其他窗口遮挡不影响 |
 
-当前本地适配器只做窗口采样，不拦截 HTTPS、不安装证书、不绕过鉴权，也不会从蜡烛图像素反推 K 线。详细边界见 [docs/jin10-desktop.md](docs/jin10-desktop.md)。
+当前本地适配器只做窗口采样，不拦截 HTTPS、不安装证书、不绕过鉴权，也不会从蜡烛图像素反推 K 线。后续加速路线会作为独立适配器验证，见 [docs/local-data-acceleration.md](docs/local-data-acceleration.md)。
 
 ## 快速开始
 
