@@ -80,11 +80,25 @@ class Jin10DesktopProvider:
             )
         if sys.platform != "win32":
             raise ProviderUnavailableError("jin10 desktop capture requires Windows")
-        payload = await asyncio.to_thread(self._runner, code, False)
-        if not payload.get("success"):
-            raise ProviderUnavailableError(
-                str(payload.get("error") or "jin10 desktop capture failed")
-            )
+        for attempt in range(2):
+            payload = await asyncio.to_thread(self._runner, code, False)
+            if not payload.get("success"):
+                raise ProviderUnavailableError(
+                    str(payload.get("error") or "jin10 desktop capture failed")
+                )
+            try:
+                return self._normalize_quote(instrument, code, payload)
+            except ProviderDataError:
+                if attempt == 1:
+                    raise
+        raise AssertionError("desktop quote retry loop ended unexpectedly")
+
+    def _normalize_quote(
+        self,
+        instrument: Instrument,
+        code: str,
+        payload: dict[str, Any],
+    ) -> QuoteSnapshot:
         capture = _DesktopCapture(
             symbol=code,
             raw_price=str(payload.get("raw_price", "")),

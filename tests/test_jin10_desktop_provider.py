@@ -43,6 +43,37 @@ class Jin10DesktopProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(quote.low)
         self.assertEqual(quote.source.provider, "jin10_desktop")
 
+    async def test_retries_once_after_transient_ocr_data_error(self) -> None:
+        captured_at = datetime(2026, 8, 6, tzinfo=UTC)
+        payloads = iter(
+            (
+                {
+                    "success": True,
+                    "raw_price": "4278 还 3",
+                    "captured_at": captured_at.isoformat(),
+                },
+                {
+                    "success": True,
+                    "raw_price": "4278 · 03",
+                    "captured_at": captured_at.isoformat(),
+                },
+            )
+        )
+        calls = 0
+
+        def runner(symbol, probe_only):
+            nonlocal calls
+            calls += 1
+            self.assertFalse(probe_only)
+            self.assertEqual(symbol, "XAUUSD")
+            return next(payloads)
+
+        provider = Jin10DesktopProvider(runner=runner)
+        quote = await provider.get_quote(SPOT_GOLD)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(quote.last, Decimal("4278.03"))
+
 
 if __name__ == "__main__":
     unittest.main()
