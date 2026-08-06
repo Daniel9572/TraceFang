@@ -44,6 +44,12 @@ const capabilityLabels: Record<string, string> = {
   calendar: "财经日历",
 };
 
+const sourceKindLabels: Record<SourceId, string> = {
+  jin10_local: "LOCAL",
+  jin10_web: "WEB",
+  jin10_mcp: "MCP",
+};
+
 function formatQuotaReset(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "北京时间自然日重置";
@@ -115,7 +121,7 @@ export function SourceDrawer({
             return (
               <section className={`source-card ${selectedSource === source.source_id ? "is-primary" : ""}`} key={source.source_id}>
                 <div className="source-card-head">
-                  <span className="source-kind">{source.source_id === "jin10_local" ? "LOCAL" : "MCP"}</span>
+                  <span className="source-kind">{sourceKindLabels[source.source_id]}</span>
                   <div className="source-title">
                     <div>
                       <h3>{source.display_name}</h3>

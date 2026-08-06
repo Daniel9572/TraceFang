@@ -65,8 +65,8 @@ export function MarketChart({
   const [isFollowing, setIsFollowing] = useState(true);
 
   const bars = useMemo(
-    () => buildChartBars(candles, period, livePrice, observedAt),
-    [candles, livePrice, observedAt, period],
+    () => buildChartBars(candles, period, timelineSamples, livePrice, observedAt),
+    [candles, livePrice, observedAt, period, timelineSamples],
   );
   const latestBar = bars.at(-1) ?? null;
   latestPriceRef.current = livePrice;

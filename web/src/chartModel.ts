@@ -80,17 +80,56 @@ export function mergeLivePrice(
 export function buildChartBars(
   candles: Candle[],
   period: ChartPeriod,
+  samples: TimelineSample[],
   livePrice: number | null,
   observedAt: string | null,
   nowMilliseconds = Date.now(),
 ): HoverCandle[] {
-  return mergeLivePrice(
-    aggregateCandles(candles, period),
-    period,
-    livePrice,
-    observedAt,
-    nowMilliseconds,
-  );
+  const withSamples = mergeLiveSamples(aggregateCandles(candles, period), period, samples);
+  const latestSample = samples.at(-1);
+  if (latestSample && latestSample.value === livePrice) return withSamples;
+  return mergeLivePrice(withSamples, period, livePrice, observedAt, nowMilliseconds);
+}
+
+export function mergeLiveSamples(
+  bars: HoverCandle[],
+  period: ChartPeriod,
+  samples: TimelineSample[],
+): HoverCandle[] {
+  const result = bars.map((bar) => ({ ...bar }));
+  for (const sample of samples) {
+    if (!Number.isFinite(sample.value)) continue;
+    const observed = Math.floor(sample.observedTime ?? sample.time);
+    if (!Number.isFinite(observed)) continue;
+    const bucket = periodBucketSeconds(period, observed);
+    const latest = result.at(-1);
+    if (!latest) {
+      result.push({
+        time: bucket,
+        open: sample.value,
+        high: sample.value,
+        low: sample.value,
+        close: sample.value,
+      });
+      continue;
+    }
+    if (bucket < latest.time) continue;
+    if (bucket === latest.time) {
+      latest.high = Math.max(latest.high, sample.value);
+      latest.low = Math.min(latest.low, sample.value);
+      latest.close = sample.value;
+      continue;
+    }
+    const open = latest.close;
+    result.push({
+      time: bucket,
+      open,
+      high: Math.max(open, sample.value),
+      low: Math.min(open, sample.value),
+      close: sample.value,
+    });
+  }
+  return result;
 }
 
 export function appendTimelineSample(
@@ -100,21 +139,15 @@ export function appendTimelineSample(
 ): TimelineSample[] {
   if (!Number.isFinite(sample.time) || !Number.isFinite(sample.value)) return samples;
   const latest = samples.at(-1);
-  if (latest && latest.time === sample.time) {
-    const next = samples.slice();
-    next[next.length - 1] = sample;
-    return next;
-  }
-  if (!latest || latest.time < sample.time) {
-    const next = [...samples, sample];
-    return next.length > maxSamples ? next.slice(next.length - maxSamples) : next;
-  }
-
-  const rows = new Map(samples.map((item) => [item.time, item]));
-  rows.set(sample.time, sample);
-  return [...rows.values()]
-    .sort((left, right) => left.time - right.time)
-    .slice(-maxSamples);
+  if (
+    sample.eventId
+    && samples.slice(-32).some((item) => item.eventId === sample.eventId)
+  ) return samples;
+  const normalized = latest && sample.time <= latest.time
+    ? { ...sample, time: latest.time + 0.001 }
+    : sample;
+  const next = [...samples, normalized];
+  return next.length > maxSamples ? next.slice(next.length - maxSamples) : next;
 }
 
 export function buildTimelineSeries(
@@ -134,8 +167,12 @@ export function buildTimelineSeries(
     if (Number.isFinite(sample.time) && Number.isFinite(sample.value)) rows.set(sample.time, sample);
   }
   if (livePrice !== null && Number.isFinite(livePrice)) {
-    const time = epochSeconds(observedAt) ?? Math.floor(nowMilliseconds / 1000);
-    rows.set(time, { time, value: livePrice });
+    const latest = samples.at(-1);
+    if (!latest || latest.value !== livePrice) {
+      const observed = epochSeconds(observedAt) ?? Math.floor(nowMilliseconds / 1000);
+      const time = latest ? Math.max(observed, latest.time + 0.001) : observed;
+      rows.set(time, { time, observedTime: observed, value: livePrice });
+    }
   }
   return [...rows.values()].sort((left, right) => left.time - right.time);
 }

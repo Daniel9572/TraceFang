@@ -1,4 +1,4 @@
-export type SourceId = "jin10_mcp" | "jin10_local";
+export type SourceId = "jin10_mcp" | "jin10_local" | "jin10_web";
 export type SourceAccessModel = "unmetered" | "limited" | "metered";
 
 export interface SourceQuota {
@@ -117,4 +117,6 @@ export interface HoverCandle {
 export interface TimelineSample {
   time: number;
   value: number;
+  observedTime?: number;
+  eventId?: string;
 }

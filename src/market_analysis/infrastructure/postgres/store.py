@@ -36,7 +36,7 @@ INSERT INTO quote_events (
     last, open, high, low, volume, change, change_percent, raw_payload
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
-ON CONFLICT (source_id, provider_symbol, observed_at, last) DO NOTHING
+ON CONFLICT (source_id, provider_symbol, received_at) DO NOTHING
 """
 
 _UPSERT_LATEST_QUOTE = """

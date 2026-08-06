@@ -54,6 +54,7 @@ const defaultInstruments: InstrumentEntry[] = [
 const sourceLabels: Record<SourceId, string> = {
   jin10_mcp: "金十官方 MCP",
   jin10_local: "金十本地行情",
+  jin10_web: "金十极速行情",
 };
 
 const errorTranslations: Array<[RegExp, string]> = [
@@ -285,11 +286,27 @@ export default function App() {
           setQuote(event.quote);
           setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteSnapshot }));
           const sampleValue = numeric(event.quote.last);
-          const sampleTime = Math.floor(new Date(event.quote.source.observed_at).getTime() / 1_000);
-          if (sampleValue !== null && Number.isFinite(sampleTime)) {
+          const observedTime = new Date(event.quote.source.observed_at).getTime() / 1_000;
+          const receivedTime = new Date(event.quote.source.received_at).getTime() / 1_000;
+          if (
+            sampleValue !== null
+            && Number.isFinite(observedTime)
+            && Number.isFinite(receivedTime)
+          ) {
             setTimelineSamples((current) => appendTimelineSample(
               current,
-              { time: sampleTime, value: sampleValue },
+              {
+                time: receivedTime,
+                observedTime,
+                value: sampleValue,
+                eventId: [
+                  event.quote?.source.provider,
+                  event.quote?.source.provider_symbol,
+                  event.quote?.source.observed_at,
+                  event.quote?.source.received_at,
+                  String(event.quote?.last),
+                ].join("|"),
+              },
             ));
           }
           setQuoteError(null);
@@ -438,8 +455,14 @@ export default function App() {
   const livePrice = numeric(quote?.last);
   const quoteObservedAt = quote?.source.observed_at ?? null;
   const chartBars = useMemo(
-    () => buildChartBars(candles, selectedPeriod, livePrice, quoteObservedAt),
-    [candles, livePrice, quoteObservedAt, selectedPeriod],
+    () => buildChartBars(
+      candles,
+      selectedPeriod,
+      timelineSamples,
+      livePrice,
+      quoteObservedAt,
+    ),
+    [candles, livePrice, quoteObservedAt, selectedPeriod, timelineSamples],
   );
   const displayBar = hover ?? chartBars.at(-1) ?? null;
   const timelineReferencePrice = useMemo(() => {

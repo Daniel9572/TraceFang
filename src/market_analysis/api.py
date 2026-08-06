@@ -53,6 +53,10 @@ from market_analysis.infrastructure.providers.jin10_local import (
     Jin10LocalProvider,
     Jin10LocalSettings,
 )
+from market_analysis.infrastructure.providers.jin10_web import (
+    Jin10WebProvider,
+    Jin10WebSettings,
+)
 from market_analysis.infrastructure.quota import DailyToolBudget
 from market_analysis.infrastructure.source_config import JsonSourceConfigurationStore
 
@@ -64,6 +68,7 @@ class Runtime:
     def __init__(self) -> None:
         self.mcp_provider: Jin10Provider | None = None
         self.local_provider: Jin10LocalProvider | None = None
+        self.web_provider: Jin10WebProvider | None = None
         self.manager: MarketSourceManager | None = None
         self.persistence: BufferedMarketDataWriter | None = None
         self.database_store: PostgresMarketDataStore | None = None
@@ -135,6 +140,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             await local_provider.close()
         local_provider = None
 
+    web_provider: Jin10WebProvider | None = None
+    web_setup_error: str | None = None
+    try:
+        web_settings = Jin10WebSettings.from_env()
+        web_provider = Jin10WebProvider(web_settings)
+        await web_provider.open()
+    except (ValueError, ProviderError) as error:
+        web_setup_error = str(error)
+        if web_provider is not None:
+            await web_provider.close()
+        web_provider = None
+
     async def probe_local_provider() -> ProviderProbe:
         if local_provider is None:
             return ProviderProbe(
@@ -144,6 +161,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 checked_at=datetime.now(UTC),
             )
         available, state, detail = local_provider.health()
+        return ProviderProbe(
+            available=available,
+            state=state,
+            detail=detail,
+            checked_at=datetime.now(UTC),
+        )
+
+    async def probe_web_provider() -> ProviderProbe:
+        if web_provider is None:
+            return ProviderProbe(
+                available=False,
+                state="setup_required",
+                detail=web_setup_error,
+                checked_at=datetime.now(UTC),
+            )
+        available, state, detail = web_provider.health()
         return ProviderProbe(
             available=available,
             state=state,
@@ -245,9 +278,32 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             probe=probe_local_provider if local_provider is not None else None,
             setup_error=local_setup_error,
         ),
+        SourceRegistration(
+            source_id="jin10_web",
+            display_name="金十极速行情",
+            description=(
+                "金十官网公开的结构化行情推送。价格变化后即时到达。"
+                "不消耗 MCP 额度。无需运行桌面客户端。"
+            ),
+            capabilities=frozenset({SourceCapability.QUOTE}),
+            default_enabled=True,
+            default_priority=15,
+            delayed=False,
+            requires_running_app=False,
+            history_priority=15,
+            structured=True,
+            quote_poll_interval_seconds=0,
+            quote_streaming=True,
+            access_model=SourceAccessModel.UNMETERED,
+            access_note="公开网页通道。无调用次数额度。接口升级时需要重新验证协议。",
+            quote_provider=web_provider,
+            probe=probe_web_provider if web_provider is not None else None,
+            setup_error=web_setup_error,
+        ),
     )
     runtime.mcp_provider = mcp_provider
     runtime.local_provider = local_provider
+    runtime.web_provider = web_provider
     runtime.manager = MarketSourceManager(
         registrations,
         store=JsonSourceConfigurationStore(_source_store_path()),
@@ -318,10 +374,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if local_provider is not None:
         local_quote_listener = runtime.quote_stream.publish_quote
         local_provider.add_quote_listener(local_quote_listener)
+    web_quote_listener = None
+    if web_provider is not None:
+        web_quote_listener = runtime.quote_stream.publish_quote
+        web_provider.add_quote_listener(web_quote_listener)
     runtime.clear_caches()
     yield
     if local_provider is not None and local_quote_listener is not None:
         local_provider.remove_quote_listener(local_quote_listener)
+    if web_provider is not None and web_quote_listener is not None:
+        web_provider.remove_quote_listener(web_quote_listener)
     if runtime.quote_stream is not None:
         await runtime.quote_stream.close()
     if runtime.candle_history is not None:
@@ -332,8 +394,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await runtime.mcp_provider.close()
     if runtime.local_provider is not None:
         await runtime.local_provider.close()
+    if runtime.web_provider is not None:
+        await runtime.web_provider.close()
     runtime.mcp_provider = None
     runtime.local_provider = None
+    runtime.web_provider = None
     runtime.manager = None
     runtime.persistence = None
     runtime.database_store = None

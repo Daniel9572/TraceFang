@@ -29,9 +29,13 @@ CREATE TABLE IF NOT EXISTS quote_events (
     volume NUMERIC(38, 18),
     change NUMERIC(38, 18),
     change_percent NUMERIC(38, 18),
-    raw_payload JSONB NOT NULL,
-    CONSTRAINT uq_quote_event UNIQUE (source_id, provider_symbol, observed_at, last)
+    raw_payload JSONB NOT NULL
 );
+
+ALTER TABLE quote_events DROP CONSTRAINT IF EXISTS uq_quote_event;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quote_event_received
+    ON quote_events (source_id, provider_symbol, received_at);
 
 CREATE INDEX IF NOT EXISTS ix_quote_events_instrument_observed
     ON quote_events (instrument_symbol, observed_at DESC);

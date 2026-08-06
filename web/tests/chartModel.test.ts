@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   aggregateCandles,
   appendTimelineSample,
+  buildChartBars,
   buildTimelineSeries,
   formatBarCountdown,
   mergeLivePrice,
@@ -126,4 +127,45 @@ test("builds timeline history from minute closes and native quote samples", () =
   );
 
   assert.deepEqual(series.slice(-3).map((point) => point.value), [101, 101.25, 101.5]);
+});
+
+test("preserves multiple quote events received inside the same source second", () => {
+  const sourceSecond = Date.parse("2026-08-06T01:47:02Z") / 1_000;
+  const first = appendTimelineSample([], {
+    time: sourceSecond + 0.125,
+    observedTime: sourceSecond,
+    value: 101.25,
+    eventId: "first",
+  });
+  const second = appendTimelineSample(first, {
+    time: sourceSecond + 0.125,
+    observedTime: sourceSecond,
+    value: 99.75,
+    eventId: "second",
+  });
+
+  assert.equal(second.length, 2);
+  assert.equal(second[0].value, 101.25);
+  assert.equal(second[1].value, 99.75);
+  assert.ok(second[1].time > second[0].time);
+});
+
+test("uses every live quote when growing the current candle", () => {
+  const minute = Date.parse("2026-08-06T01:47:00Z") / 1_000;
+  const bars = buildChartBars(
+    [candle("2026-08-06T01:47:00Z", 100, 100, 100, 100)],
+    chartPeriodById("1m"),
+    [
+      { time: minute + 1.1, observedTime: minute + 1, value: 103, eventId: "one" },
+      { time: minute + 1.2, observedTime: minute + 1, value: 97, eventId: "two" },
+      { time: minute + 1.3, observedTime: minute + 1, value: 101, eventId: "three" },
+    ],
+    101,
+    "2026-08-06T01:47:01Z",
+  );
+
+  assert.deepEqual(
+    { open: bars[0].open, high: bars[0].high, low: bars[0].low, close: bars[0].close },
+    { open: 100, high: 103, low: 97, close: 101 },
+  );
 });
