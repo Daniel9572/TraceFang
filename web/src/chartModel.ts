@@ -1,4 +1,5 @@
-import type { Candle, HoverCandle } from "./types";
+import type { Candle, HoverCandle, TimelineSample } from "./types";
+import { periodBucketSeconds, type ChartPeriod } from "./chartPeriods.ts";
 
 function numberOf(value: number | string): number {
   return Number(value);
@@ -10,15 +11,14 @@ function epochSeconds(value: string | null): number | null {
   return Number.isFinite(milliseconds) ? Math.floor(milliseconds / 1000) : null;
 }
 
-export function aggregateCandles(candles: Candle[], intervalMinutes: number): HoverCandle[] {
-  const bucketSeconds = intervalMinutes * 60;
+export function aggregateCandles(candles: Candle[], period: ChartPeriod): HoverCandle[] {
   const rows = new Map<number, HoverCandle>();
 
   for (const candle of candles) {
     const epoch = epochSeconds(candle.open_time);
     if (epoch === null) continue;
 
-    const bucket = Math.floor(epoch / bucketSeconds) * bucketSeconds;
+    const bucket = periodBucketSeconds(period, epoch);
     const open = numberOf(candle.open);
     const high = numberOf(candle.high);
     const low = numberOf(candle.low);
@@ -41,7 +41,7 @@ export function aggregateCandles(candles: Candle[], intervalMinutes: number): Ho
 
 export function mergeLivePrice(
   bars: HoverCandle[],
-  intervalMinutes: number,
+  period: ChartPeriod,
   livePrice: number | null,
   observedAt: string | null,
   nowMilliseconds = Date.now(),
@@ -49,9 +49,8 @@ export function mergeLivePrice(
   if (livePrice === null || !Number.isFinite(livePrice)) return bars;
 
   const result = bars.map((bar) => ({ ...bar }));
-  const bucketSeconds = intervalMinutes * 60;
   const observed = epochSeconds(observedAt) ?? Math.floor(nowMilliseconds / 1000);
-  const bucket = Math.floor(observed / bucketSeconds) * bucketSeconds;
+  const bucket = periodBucketSeconds(period, observed);
   const latest = result.at(-1);
 
   if (!latest) {
@@ -80,25 +79,65 @@ export function mergeLivePrice(
 
 export function buildChartBars(
   candles: Candle[],
-  intervalMinutes: number,
+  period: ChartPeriod,
   livePrice: number | null,
   observedAt: string | null,
   nowMilliseconds = Date.now(),
 ): HoverCandle[] {
   return mergeLivePrice(
-    aggregateCandles(candles, intervalMinutes),
-    intervalMinutes,
+    aggregateCandles(candles, period),
+    period,
     livePrice,
     observedAt,
     nowMilliseconds,
   );
 }
 
-export function secondsUntilBarClose(intervalMinutes: number, nowMilliseconds = Date.now()): number {
-  const intervalSeconds = intervalMinutes * 60;
-  const nowSeconds = Math.floor(nowMilliseconds / 1000);
-  const elapsed = nowSeconds % intervalSeconds;
-  return elapsed === 0 ? intervalSeconds : intervalSeconds - elapsed;
+export function appendTimelineSample(
+  samples: TimelineSample[],
+  sample: TimelineSample,
+  maxSamples = 20_000,
+): TimelineSample[] {
+  if (!Number.isFinite(sample.time) || !Number.isFinite(sample.value)) return samples;
+  const latest = samples.at(-1);
+  if (latest && latest.time === sample.time) {
+    const next = samples.slice();
+    next[next.length - 1] = sample;
+    return next;
+  }
+  if (!latest || latest.time < sample.time) {
+    const next = [...samples, sample];
+    return next.length > maxSamples ? next.slice(next.length - maxSamples) : next;
+  }
+
+  const rows = new Map(samples.map((item) => [item.time, item]));
+  rows.set(sample.time, sample);
+  return [...rows.values()]
+    .sort((left, right) => left.time - right.time)
+    .slice(-maxSamples);
+}
+
+export function buildTimelineSeries(
+  candles: Candle[],
+  samples: TimelineSample[],
+  livePrice: number | null,
+  observedAt: string | null,
+  nowMilliseconds = Date.now(),
+): TimelineSample[] {
+  const rows = new Map<number, TimelineSample>();
+  for (const candle of candles) {
+    const time = epochSeconds(candle.open_time);
+    const value = numberOf(candle.close);
+    if (time !== null && Number.isFinite(value)) rows.set(time, { time, value });
+  }
+  for (const sample of samples) {
+    if (Number.isFinite(sample.time) && Number.isFinite(sample.value)) rows.set(sample.time, sample);
+  }
+  if (livePrice !== null && Number.isFinite(livePrice)) {
+    const time = epochSeconds(observedAt) ?? Math.floor(nowMilliseconds / 1000);
+    rows.set(time, { time, value: livePrice });
+  }
+  return [...rows.values()].sort((left, right) => left.time - right.time);
 }
 
 export function formatBarCountdown(totalSeconds: number): string {

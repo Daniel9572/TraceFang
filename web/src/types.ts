@@ -1,4 +1,19 @@
-export type SourceId = "auto" | "jin10_mcp" | "jin10_desktop";
+export type SourceId = "jin10_mcp" | "jin10_local";
+export type SourceAccessModel = "unmetered" | "limited" | "metered";
+
+export interface SourceQuota {
+  key: string;
+  label: string;
+  used: number;
+  limit: number;
+  reserve: number;
+  available: number;
+  usage_percent: number;
+  warning_percent: number;
+  period: "daily" | string;
+  resets_at: string;
+  scope: "application_process" | string;
+}
 
 export interface SourceMetadata {
   provider: string;
@@ -47,7 +62,7 @@ export interface Candle {
 }
 
 export interface SourceDescriptor {
-  source_id: Exclude<SourceId, "auto">;
+  source_id: SourceId;
   display_name: string;
   description: string;
   capabilities: string[];
@@ -55,6 +70,14 @@ export interface SourceDescriptor {
   priority: number;
   delayed: boolean;
   requires_running_app: boolean;
+  structured: boolean;
+  quote_poll_interval_seconds: number;
+  quote_streaming: boolean;
+  access_model: SourceAccessModel;
+  access_note: string | null;
+  manual_connection_required: boolean;
+  connection_active: boolean;
+  quotas: SourceQuota[];
   health: "healthy" | "degraded" | "unavailable" | "unconfigured" | "unknown";
   state: string;
   error: string | null;
@@ -63,11 +86,24 @@ export interface SourceDescriptor {
 }
 
 export interface SourceConnectionTest {
-  source_id: Exclude<SourceId, "auto">;
+  source_id: SourceId;
   code: string;
   last: number | string;
   observed_at: string;
   latency_ms: number;
+}
+
+export interface InstrumentSourceSelection {
+  code: string;
+  source_id: SourceId;
+}
+
+export interface QuoteStreamEvent {
+  kind: "quote" | "status";
+  state: "connecting" | "live" | "unavailable";
+  emitted_at: string;
+  quote: QuoteSnapshot | null;
+  error: string | null;
 }
 
 export interface HoverCandle {
@@ -76,4 +112,9 @@ export interface HoverCandle {
   high: number;
   low: number;
   close: number;
+}
+
+export interface TimelineSample {
+  time: number;
+  value: number;
 }

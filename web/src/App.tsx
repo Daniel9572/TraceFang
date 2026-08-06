@@ -3,35 +3,37 @@ import {
   Bell,
   CandlestickChart,
   ChevronDown,
+  ChevronRight,
   CircleHelp,
-  Database,
   Gauge,
   Maximize2,
   Newspaper,
   PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightOpen,
   Pin,
   PinOff,
   RefreshCw,
   Search,
-  Settings2,
   Sparkles,
   Waypoints,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { marketApi } from "./api";
-import { buildChartBars } from "./chartModel";
+import { marketApi, mergeCandleRows } from "./api";
+import { appendTimelineSample, buildChartBars } from "./chartModel";
+import { chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import { MarketChart } from "./MarketChart";
+import { PeriodToolbar } from "./PeriodToolbar";
 import { SourceDrawer, type SourceTestFeedback } from "./SourceDrawer";
+import { SourcePicker } from "./SourcePicker";
 import type {
   Candle,
   HoverCandle,
   InstrumentEntry,
   QuoteSnapshot,
+  QuoteStreamEvent,
   SourceDescriptor,
   SourceId,
+  TimelineSample,
 } from "./types";
 
 const defaultInstruments: InstrumentEntry[] = [
@@ -50,17 +52,13 @@ const defaultInstruments: InstrumentEntry[] = [
 ];
 
 const sourceLabels: Record<SourceId, string> = {
-  auto: "本地优先",
   jin10_mcp: "金十官方 MCP",
-  jin10_desktop: "本地金十软件",
+  jin10_local: "金十本地行情",
 };
 
-type ConcreteSourceId = Exclude<SourceId, "auto">;
-
 const errorTranslations: Array<[RegExp, string]> = [
-  [/Jin10 desktop process is not running/i, "金十数据软件未运行"],
-  [/market window is minimized/i, "金十行情窗口已最小化，请先恢复窗口"],
-  [/market window was not found/i, "未找到金十行情页，请在软件中打开行情窗口"],
+  [/local structured realtime capture channel/i, "本地结构化实时通道尚未接通"],
+  [/本地结构化实时采集通道尚未接通/i, "本地结构化实时通道尚未接通"],
   [/JIN10_MCP_BEARER_TOKEN is required/i, "官方 MCP Token 尚未配置"],
 ];
 
@@ -112,34 +110,53 @@ function LiveClock() {
 export default function App() {
   const [instruments, setInstruments] = useState(defaultInstruments);
   const [selectedCode, setSelectedCode] = useState("XAUUSD");
-  const [selectedSource, setSelectedSource] = useState<SourceId>("auto");
+  const [instrumentSources, setInstrumentSources] = useState<Record<string, SourceId>>({});
+  const [instrumentSourcesLoaded, setInstrumentSourcesLoaded] = useState(false);
   const [quote, setQuote] = useState<QuoteSnapshot | null>(null);
   const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteSnapshot>>({});
   const [candles, setCandles] = useState<Candle[]>([]);
+  const [timelineSamples, setTimelineSamples] = useState<TimelineSample[]>([]);
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
+  const [sourcesLoaded, setSourcesLoaded] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [watchOpen, setWatchOpen] = useState(true);
   const [watchPinned, setWatchPinned] = useState(true);
-  const [intervalMinutes, setIntervalMinutes] = useState(1);
+  const [periodId, setPeriodId] = useState<ChartPeriodId>("1m");
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [candleError, setCandleError] = useState<string | null>(null);
   const [sourceBusy, setSourceBusy] = useState(false);
   const [testMessage, setTestMessage] = useState<string | null>(null);
-  const [testingSourceId, setTestingSourceId] = useState<ConcreteSourceId | null>(null);
+  const [testingSourceId, setTestingSourceId] = useState<SourceId | null>(null);
   const [sourceTestResults, setSourceTestResults] = useState<
-    Partial<Record<ConcreteSourceId, SourceTestFeedback>>
+    Partial<Record<SourceId, SourceTestFeedback>>
   >({});
   const [loadingQuote, setLoadingQuote] = useState(true);
   const [loadingCandles, setLoadingCandles] = useState(true);
+  const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "unavailable">("connecting");
+  const candleRequestRef = useRef(0);
 
   const selectedInstrument =
     instruments.find((instrument) => instrument.provider_code === selectedCode) ?? defaultInstruments[0];
+  const selectedSource = instrumentSources[selectedCode] ?? "jin10_local";
+  const selectedPeriod = chartPeriodById(periodId);
+  const sourceById = useMemo(
+    () => new Map(sources.map((source) => [source.source_id, source])),
+    [sources],
+  );
+  const selectedSourceDescriptor = sourceById.get(selectedSource);
+  const selectedSourceReady = Boolean(
+    sourcesLoaded
+    && selectedSourceDescriptor
+    && (!selectedSourceDescriptor.manual_connection_required || selectedSourceDescriptor.connection_active),
+  );
+  const selectedSourceSupportsCandles = selectedSourceDescriptor?.capabilities.includes("candles") ?? false;
 
   const loadSources = useCallback(async () => {
     setSourceBusy(true);
     try {
       setSources(await marketApi.sources());
+      setSourcesLoaded(true);
     } catch (error) {
       setTestMessage(`来源检测失败：${translateError(error)}`);
     } finally {
@@ -147,32 +164,71 @@ export default function App() {
     }
   }, []);
 
-  const loadQuote = useCallback(async () => {
-    setLoadingQuote(true);
+  const refreshSourceSnapshot = useCallback(async () => {
     try {
-      const value = await marketApi.quote(selectedCode, selectedSource);
-      setQuote(value);
-      setWatchQuotes((current) => ({ ...current, [selectedCode]: value }));
-      setQuoteError(null);
-    } catch (error) {
-      setQuoteError(translateError(error));
-    } finally {
-      setLoadingQuote(false);
+      setSources(await marketApi.sources(false));
+      setSourcesLoaded(true);
+    } catch {
+      // Keep the last known source state when a lightweight status refresh fails.
     }
-  }, [selectedCode, selectedSource]);
+  }, []);
 
   const loadCandles = useCallback(async () => {
+    const requestId = ++candleRequestRef.current;
+    if (!selectedSourceReady) {
+      setCandles([]);
+      setLoadingCandles(false);
+      setCandleError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在行情源管理中点击连接并测试`);
+      return;
+    }
+    if (!selectedSourceSupportsCandles) {
+      setCandles([]);
+      setLoadingCandles(false);
+      setCandleError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}不提供 K 线数据，系统不会改用其他来源`);
+      return;
+    }
     setLoadingCandles(true);
+    setCandles([]);
     try {
-      setCandles(await marketApi.candles(selectedCode));
+      const recent = await marketApi.candles(selectedCode, selectedSource);
+      if (requestId !== candleRequestRef.current) return;
+      setCandles(recent);
       setCandleError(null);
+      if (recent.length < 100) {
+        void (async () => {
+          for (const delay of [150, 500, 1_500]) {
+            await new Promise((resolve) => window.setTimeout(resolve, delay));
+            if (requestId !== candleRequestRef.current) return;
+            try {
+              const localRows = await marketApi.candles(selectedCode, selectedSource);
+              if (requestId !== candleRequestRef.current) return;
+              setCandles((current) => mergeCandleRows(current, localRows));
+              if (localRows.length >= 100) return;
+            } catch {
+              // Backfill is optional; the live quote stream remains authoritative.
+            }
+          }
+        })();
+      }
     } catch (error) {
+      if (requestId !== candleRequestRef.current) return;
       setCandles([]);
       setCandleError(translateError(error));
     } finally {
-      setLoadingCandles(false);
+      if (requestId === candleRequestRef.current) setLoadingCandles(false);
     }
-  }, [selectedCode]);
+  }, [selectedCode, selectedSource, selectedSourceDescriptor?.display_name, selectedSourceReady, selectedSourceSupportsCandles]);
+
+  const refreshCandles = useCallback(async () => {
+    if (!selectedSourceReady || !selectedSourceSupportsCandles) return;
+    try {
+      const recent = await marketApi.candles(selectedCode, selectedSource);
+      setCandles((current) => mergeCandleRows(current, recent));
+      setCandleError(null);
+    } catch (error) {
+      setCandleError(translateError(error));
+    }
+  }, [selectedCode, selectedSource, selectedSourceReady, selectedSourceSupportsCandles]);
 
   useEffect(() => {
     void marketApi
@@ -183,32 +239,163 @@ export default function App() {
   }, [loadSources]);
 
   useEffect(() => {
+    let disposed = false;
+    setInstrumentSourcesLoaded(false);
+    void Promise.all(
+      instruments.map(async (instrument) => {
+        try {
+          const value = await marketApi.instrumentSource(instrument.provider_code);
+          return [instrument.provider_code, value.source_id] as const;
+        } catch {
+          return [instrument.provider_code, "jin10_local" as SourceId] as const;
+        }
+      }),
+    ).then((values) => {
+      if (disposed) return;
+      setInstrumentSources(Object.fromEntries(values));
+      setWatchQuotes({});
+      setInstrumentSourcesLoaded(true);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [instruments]);
+
+  useEffect(() => {
+    if (!sourcesLoaded) return;
     setQuote(null);
-    void loadQuote();
+    if (!selectedSourceReady) {
+      setCandles([]);
+      setLoadingCandles(false);
+      setCandleError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在行情源管理中点击连接并测试`);
+      return;
+    }
     void loadCandles();
-  }, [loadQuote, loadCandles]);
+  }, [loadCandles, selectedSourceDescriptor?.display_name, selectedSourceReady, sourcesLoaded]);
 
   useEffect(() => {
-    const delay = quote?.source.provider === "jin10_desktop" ? 5_000 : 65_000;
-    const timer = window.setInterval(() => void loadQuote(), delay);
+    if (!instrumentSourcesLoaded || !sourcesLoaded) return;
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let retryTimer: number | null = null;
+    let retryCount = 0;
+
+    setLoadingQuote(true);
+    setQuote(null);
+    setQuoteError(null);
+    setQuoteStreamState("connecting");
+
+    if (!selectedSourceReady) {
+      setQuoteStreamState("unavailable");
+      setQuoteError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在行情源管理中点击连接并测试`);
+      setLoadingQuote(false);
+      return;
+    }
+
+    const connect = () => {
+      if (disposed) return;
+      socket = marketApi.openQuoteStream(selectedCode, selectedSource);
+      socket.onopen = () => {
+        retryCount = 0;
+        setQuoteStreamState("connecting");
+      };
+      socket.onmessage = (message) => {
+        if (disposed) return;
+        const event = JSON.parse(String(message.data)) as QuoteStreamEvent;
+        setQuoteStreamState(event.state);
+        if (event.kind === "quote" && event.quote) {
+          setQuote(event.quote);
+          setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteSnapshot }));
+          const sampleValue = numeric(event.quote.last);
+          const sampleTime = Math.floor(new Date(event.quote.source.observed_at).getTime() / 1_000);
+          if (sampleValue !== null && Number.isFinite(sampleTime)) {
+            setTimelineSamples((current) => appendTimelineSample(
+              current,
+              { time: sampleTime, value: sampleValue },
+            ));
+          }
+          setQuoteError(null);
+          setLoadingQuote(false);
+        } else if (event.state === "unavailable") {
+          setQuoteError(translateError(event.error ?? "当前行情源不可用"));
+          setLoadingQuote(false);
+        }
+      };
+      socket.onerror = () => socket?.close();
+      socket.onclose = () => {
+        if (disposed) return;
+        setQuoteStreamState("unavailable");
+        setQuoteError("实时报价连接已断开，正在重连");
+        setLoadingQuote(false);
+        const delay = Math.min(1_000, 100 * 2 ** retryCount);
+        retryCount += 1;
+        retryTimer = window.setTimeout(connect, delay);
+      };
+    };
+
+    connect();
+    return () => {
+      disposed = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      socket?.close();
+    };
+  }, [instrumentSourcesLoaded, selectedCode, selectedSource, selectedSourceDescriptor?.display_name, selectedSourceReady, sourcesLoaded]);
+
+  useEffect(() => {
+    setTimelineSamples([]);
+  }, [selectedCode, selectedSource]);
+
+  useEffect(() => {
+    if (!selectedSourceReady || !selectedSourceSupportsCandles) return;
+    let disposed = false;
+    let timer: number | null = null;
+    const scheduleNextMinute = () => {
+      const delay = 60_000 - (Date.now() % 60_000) + 25;
+      timer = window.setTimeout(async () => {
+        if (disposed) return;
+        await refreshCandles();
+        if (!disposed) scheduleNextMinute();
+      }, delay);
+    };
+    scheduleNextMinute();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [refreshCandles, selectedSourceReady, selectedSourceSupportsCandles]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    void refreshSourceSnapshot();
+    const timer = window.setInterval(() => void refreshSourceSnapshot(), 5_000);
     return () => window.clearInterval(timer);
-  }, [loadQuote, quote?.source.provider]);
+  }, [drawerOpen, refreshSourceSnapshot]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => void loadCandles(), 65_000);
+    const hasActiveLimitedSource = sources.some(
+      (source) => source.access_model !== "unmetered" && source.connection_active,
+    );
+    if (!hasActiveLimitedSource) return;
+    const timer = window.setInterval(() => void refreshSourceSnapshot(), 15_000);
     return () => window.clearInterval(timer);
-  }, [loadCandles]);
+  }, [refreshSourceSnapshot, sources]);
 
   useEffect(() => {
-    const missing = instruments.filter((item) => !watchQuotes[item.provider_code]);
+    if (!instrumentSourcesLoaded || !sourcesLoaded) return;
+    const missing = instruments.filter(
+      (item) => item.provider_code !== selectedCode && !watchQuotes[item.provider_code],
+    );
     if (missing.length === 0) return;
     void Promise.allSettled(
       missing.map(async (item) => {
-        const value = await marketApi.quote(item.provider_code, selectedSource);
+        const source = instrumentSources[item.provider_code] ?? "jin10_local";
+        const descriptor = sourceById.get(source);
+        if (!descriptor || (descriptor.manual_connection_required && !descriptor.connection_active)) return;
+        const value = await marketApi.quote(item.provider_code, source);
         setWatchQuotes((current) => ({ ...current, [item.provider_code]: value }));
       }),
     );
-  }, [instruments, selectedSource, watchQuotes]);
+  }, [instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded, watchQuotes]);
 
   const updateSource = async (
     source: SourceDescriptor,
@@ -218,7 +405,6 @@ export default function App() {
     try {
       await marketApi.updateSource(source.source_id, update);
       await loadSources();
-      await loadQuote();
     } catch (error) {
       setTestMessage(`更新失败：${translateError(error)}`);
     } finally {
@@ -229,15 +415,16 @@ export default function App() {
   const preferSource = async (source: SourceDescriptor) => {
     setSourceBusy(true);
     try {
-      await Promise.all(
-        sources.map((item) =>
-          marketApi.updateSource(item.source_id, { priority: item.source_id === source.source_id ? 5 : 20 }),
-        ),
-      );
-      await loadSources();
-      await loadQuote();
+      const value = await marketApi.updateInstrumentSource(selectedCode, source.source_id);
+      setInstrumentSources((current) => ({ ...current, [selectedCode]: value.source_id }));
+      setWatchQuotes((current) => {
+        const next = { ...current };
+        delete next[selectedCode];
+        return next;
+      });
+      setTestMessage(`${selectedCode} 的全部行情已切换为 ${source.display_name}`);
     } catch (error) {
-      setTestMessage(`排序失败：${translateError(error)}`);
+      setTestMessage(`合约来源更新失败：${translateError(error)}`);
     } finally {
       setSourceBusy(false);
     }
@@ -266,6 +453,7 @@ export default function App() {
         [source.source_id]: { tone: "error", message: translateError(error) },
       }));
     } finally {
+      await refreshSourceSnapshot();
       setTestingSourceId(null);
     }
   };
@@ -273,10 +461,38 @@ export default function App() {
   const livePrice = numeric(quote?.last);
   const quoteObservedAt = quote?.source.observed_at ?? null;
   const chartBars = useMemo(
-    () => buildChartBars(candles, intervalMinutes, livePrice, quoteObservedAt),
-    [candles, intervalMinutes, livePrice, quoteObservedAt],
+    () => buildChartBars(candles, selectedPeriod, livePrice, quoteObservedAt),
+    [candles, livePrice, quoteObservedAt, selectedPeriod],
   );
   const displayBar = hover ?? chartBars.at(-1) ?? null;
+  const timelineReferencePrice = useMemo(() => {
+    const last = numeric(quote?.last);
+    const change = numeric(quote?.change);
+    if (last !== null && change !== null) return last - change;
+    return chartBars[0]?.open ?? null;
+  }, [chartBars, quote?.change, quote?.last]);
+  const timelineChange = displayBar && timelineReferencePrice !== null
+    ? displayBar.close - timelineReferencePrice
+    : null;
+  const timelinePercent = timelineChange !== null && timelineReferencePrice
+    ? (timelineChange / timelineReferencePrice) * 100
+    : null;
+  const timelineTrend = timelineChange === null
+    ? "trend-neutral"
+    : timelineChange >= 0
+      ? "trend-up"
+      : "trend-down";
+  const quoteStreaming = selectedSourceDescriptor?.quote_streaming ?? false;
+  const timelineSamplingSeconds = quoteStreaming
+    ? 1
+    : selectedSourceDescriptor?.quote_poll_interval_seconds ?? 60;
+  const timelineResolutionLabel = quoteStreaming
+    ? "推送"
+    : timelineSamplingSeconds <= 2
+      ? "秒级"
+      : timelineSamplingSeconds < 60
+        ? `${Math.round(timelineSamplingSeconds)}秒`
+        : "分钟级";
 
   const quoteTrend = trendClass(quote);
   const quoteProvider = quote?.source.provider as SourceId | undefined;
@@ -296,7 +512,6 @@ export default function App() {
           <button type="button" title="策略观察"><Waypoints size={18} /></button>
           <button type="button" className="is-active" title="行情图表"><CandlestickChart size={18} /></button>
           <button type="button" title="资讯"><Newspaper size={18} /></button>
-          <button type="button" title="数据源" onClick={() => setDrawerOpen(true)}><Database size={18} /></button>
         </nav>
         <div className="content-tabs">
           <button type="button" className="is-active">图表</button>
@@ -321,6 +536,15 @@ export default function App() {
         className={`watch-panel ${watchOpen ? "is-open" : "is-collapsed"} ${watchPinned ? "is-pinned" : "is-floating"}`}
         aria-label="行情列表"
         aria-hidden={!watchOpen}
+        inert={!watchOpen}
+        onPointerLeave={() => {
+          if (!watchPinned) setWatchOpen(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !watchPinned) {
+            setWatchOpen(false);
+          }
+        }}
       >
         <div className="market-tabs">
           <div className="market-tab-list">
@@ -335,7 +559,15 @@ export default function App() {
               className={watchPinned ? "is-active" : ""}
               title={watchPinned ? "取消固定，改为悬浮侧栏" : "固定侧栏"}
               aria-pressed={watchPinned}
-              onClick={() => setWatchPinned((current) => !current)}
+              onClick={() => {
+                if (watchPinned) {
+                  setWatchPinned(false);
+                  setWatchOpen(false);
+                } else {
+                  setWatchPinned(true);
+                  setWatchOpen(true);
+                }
+              }}
             >
               {watchPinned ? <Pin size={14} /> : <PinOff size={14} />}
             </button>
@@ -377,59 +609,57 @@ export default function App() {
           })}
         </div>
 
-        <button type="button" className="source-quick" onClick={() => setDrawerOpen(true)}>
-          <div className="source-quick-icon"><Database size={18} /></div>
-          <div>
-            <strong>数据来源</strong>
-            <span>{sources.filter((source) => source.enabled).length} 个已启用 · 点击管理</span>
-          </div>
-          <PanelRightOpen size={17} />
-        </button>
       </aside>
 
       {!watchOpen ? (
         <button
           type="button"
-          className="watch-reveal-button"
+          className={`watch-reveal-button ${watchPinned ? "is-docked" : "is-floating"}`}
           title={watchPinned ? "展开并固定行情列表" : "展开悬浮行情列表"}
           aria-label="展开行情列表"
+          aria-expanded={watchOpen}
+          onPointerEnter={() => {
+            if (!watchPinned) setWatchOpen(true);
+          }}
           onClick={() => setWatchOpen(true)}
         >
-          <PanelLeftOpen size={16} />
-          <span>行情</span>
+          <ChevronRight size={14} />
         </button>
       ) : null}
 
       <main className="market-main">
         <div className="chart-toolbar">
           <div className="indicator-button"><span>指标</span><ChevronDown size={14} /></div>
-          {[1, 5, 15, 30, 60].map((minutes) => (
-            <button type="button" key={minutes} className={intervalMinutes === minutes ? "is-active" : ""} onClick={() => setIntervalMinutes(minutes)}>
-              {minutes < 60 ? `${minutes}分` : "1小时"}
-            </button>
-          ))}
-          <button type="button" disabled title="等待长周期历史数据源">4小时</button>
-          <button type="button" disabled title="等待长周期历史数据源">日K</button>
-          <div className="toolbar-spacer" />
-          <span
-            className={`live-chart-state ${quoteError || livePrice === null ? "is-offline" : ""}`}
-            title={quoteError ?? (quote ? `报价采样于 ${new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待报价")}
-          >
-            <i />
-            {quoteError || livePrice === null ? "等待报价" : "实时"}
-          </span>
-          <label className="source-select toolbar-source-select">
-            <Database size={14} />
-            <span>报价源</span>
-            <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value as SourceId)}>
-              <option value="auto">本地优先（自动回退）</option>
-              <option value="jin10_desktop">本地金十软件</option>
-              <option value="jin10_mcp">金十官方 MCP</option>
-            </select>
-          </label>
-          <button type="button" className="toolbar-icon-button" title="刷新报价" onClick={() => void loadQuote()}><RefreshCw size={15} className={loadingQuote ? "spin" : ""} /></button>
+          <PeriodToolbar
+            selectedId={periodId}
+            onSelect={(id) => {
+              setHover(null);
+              setPeriodId(id);
+            }}
+          />
+          {selectedPeriod.mode === "timeline" ? (
+            <span
+              className="timeline-resolution-badge"
+              title={quoteStreaming
+                ? "当前报价源在行情帧到达时立即推送；历史段由分钟 K 线补齐"
+                : `当前报价源约每 ${timelineSamplingSeconds} 秒请求一次；历史段由分钟 K 线补齐`}
+            >
+              {timelineResolutionLabel}
+            </span>
+          ) : null}
+          <SourcePicker
+            sources={sources}
+            selectedSource={selectedSource}
+            fallbackLabel={sourceLabels[selectedSource]}
+            busy={sourceBusy}
+            connectionState={quoteStreamState}
+            connectionError={quoteError}
+            quoteObservedAt={quoteProvider === selectedSource ? quote?.source.observed_at ?? null : null}
+            quoteReceivedAt={quoteProvider === selectedSource ? quote?.source.received_at ?? null : null}
+            onSelect={preferSource}
+            onManage={() => setDrawerOpen(true)}
+          />
           <button type="button" className="draw-button"><Activity size={15} />画线</button>
-          <button type="button" className="draw-button" onClick={() => setDrawerOpen(true)}><Settings2 size={15} />设置</button>
         </div>
 
         <section className="chart-area">
@@ -468,19 +698,32 @@ export default function App() {
             </div>
           </div>
           {displayBar ? (
-            <div className="ohlc-overlay">
+            <div className={`ohlc-overlay ${selectedPeriod.mode === "timeline" ? "is-timeline" : ""}`}>
               <span>{new Date(displayBar.time * 1000).toLocaleString("zh-CN", { hour12: false })}</span>
-              <span>开 <b>{formatPrice(displayBar.open, selectedCode)}</b></span>
-              <span>高 <b className="trend-up">{formatPrice(displayBar.high, selectedCode)}</b></span>
-              <span>低 <b className="trend-down">{formatPrice(displayBar.low, selectedCode)}</b></span>
-              <span>收 <b>{formatPrice(displayBar.close, selectedCode)}</b></span>
+              {selectedPeriod.mode === "timeline" ? (
+                <>
+                  <span>价格 <b>{formatPrice(displayBar.close, selectedCode)}</b></span>
+                  <span>涨跌 <b className={timelineTrend}>{formatSigned(timelineChange, digitsFor(selectedCode))}</b></span>
+                  <span>涨幅 <b className={timelineTrend}>{formatSigned(timelinePercent)}%</b></span>
+                </>
+              ) : (
+                <>
+                  <span>开 <b>{formatPrice(displayBar.open, selectedCode)}</b></span>
+                  <span>高 <b className="trend-up">{formatPrice(displayBar.high, selectedCode)}</b></span>
+                  <span>低 <b className="trend-down">{formatPrice(displayBar.low, selectedCode)}</b></span>
+                  <span>收 <b>{formatPrice(displayBar.close, selectedCode)}</b></span>
+                </>
+              )}
             </div>
           ) : null}
           <MarketChart
             candles={candles}
-            intervalMinutes={intervalMinutes}
+            period={selectedPeriod}
+            timelineSamples={timelineSamples}
             livePrice={livePrice}
             observedAt={quoteObservedAt}
+            referencePrice={timelineReferencePrice}
+            timelineResolutionSeconds={timelineSamplingSeconds}
             priceDigits={digitsFor(selectedCode)}
             onHover={setHover}
           />
@@ -494,6 +737,8 @@ export default function App() {
         sources={sources}
         busy={sourceBusy}
         notice={testMessage}
+        contractCode={selectedCode}
+        selectedSource={selectedSource}
         testingSourceId={testingSourceId}
         testResults={sourceTestResults}
         onClose={() => {
@@ -501,7 +746,6 @@ export default function App() {
           setTestMessage(null);
           setSourceTestResults({});
         }}
-        onRefresh={() => void loadSources()}
         onToggle={(source) => void updateSource(source, { enabled: !source.enabled })}
         onPrefer={(source) => void preferSource(source)}
         onTest={(source) => void testSource(source)}
