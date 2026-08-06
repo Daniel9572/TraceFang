@@ -17,6 +17,10 @@ class Jin10DesktopProviderTests(unittest.IsolatedAsyncioTestCase):
             Jin10DesktopProvider.parse_price("61 \uff0e 993", decimal_places=3),
             Decimal("61.993"),
         )
+        self.assertEqual(
+            Jin10DesktopProvider.parse_price("4277 还 3", decimal_places=2),
+            Decimal("4277.93"),
+        )
 
     def test_rejects_unparseable_ocr_text(self) -> None:
         with self.assertRaises(ProviderDataError):
@@ -49,7 +53,7 @@ class Jin10DesktopProviderTests(unittest.IsolatedAsyncioTestCase):
             (
                 {
                     "success": True,
-                    "raw_price": "4278 还 3",
+                    "raw_price": "现货黄金",
                     "captured_at": captured_at.isoformat(),
                 },
                 {

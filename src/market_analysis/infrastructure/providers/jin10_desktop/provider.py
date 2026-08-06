@@ -142,6 +142,7 @@ class Jin10DesktopProvider:
                     "\uff0c": ",",
                     "\u2212": "-",
                     "\u2014": "-",
+                    "\u8fd8": "9",
                 }
             )
         )
@@ -150,10 +151,11 @@ class Jin10DesktopProvider:
             candidate = f"{explicit.group(1)}.{explicit.group(2)}"
         else:
             tokens = re.findall(r"\d+", normalized)
+            fractional_tokens = "".join(tokens[1:])
             if len(tokens) == 1 and len(tokens[0]) > decimal_places:
                 candidate = f"{tokens[0][:-decimal_places]}.{tokens[0][-decimal_places:]}"
-            elif len(tokens) >= 2 and len(tokens[1]) == decimal_places:
-                candidate = f"{tokens[0]}.{tokens[1]}"
+            elif len(tokens) >= 2 and len(fractional_tokens) == decimal_places:
+                candidate = f"{tokens[0]}.{fractional_tokens}"
             else:
                 raise ProviderDataError(f"cannot parse desktop OCR price from {raw!r}")
         try:
