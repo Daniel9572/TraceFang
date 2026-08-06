@@ -1,49 +1,44 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping
 from datetime import datetime
 
 from market_analysis.application.ports import CandleProvider, QuoteProvider
-from market_analysis.domain.errors import ProviderChainExhaustedError, ProviderError
+from market_analysis.domain.errors import ProviderUnavailableError
 from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot
 
 
 class MarketDataService:
-    """Routes domain requests through ordered, replaceable provider chains."""
+    """Routes each request to one explicitly selected provider without fallback."""
 
     def __init__(
         self,
         *,
-        quote_providers: Sequence[QuoteProvider],
-        candle_providers: Sequence[CandleProvider],
+        quote_providers: Mapping[str, QuoteProvider],
+        candle_providers: Mapping[str, CandleProvider],
     ) -> None:
         if not quote_providers:
             raise ValueError("at least one quote provider is required")
         if not candle_providers:
             raise ValueError("at least one candle provider is required")
-        self._quote_providers = tuple(quote_providers)
-        self._candle_providers = tuple(candle_providers)
+        self._quote_providers = dict(quote_providers)
+        self._candle_providers = dict(candle_providers)
 
-    async def get_quote(self, instrument: Instrument) -> QuoteSnapshot:
-        failures: list[tuple[str, ProviderError]] = []
-        for provider in self._quote_providers:
-            try:
-                return await provider.get_quote(instrument)
-            except ProviderError as error:
-                failures.append((provider.name, error))
-        raise ProviderChainExhaustedError("quote", failures)
+    async def get_quote(self, instrument: Instrument, *, source: str) -> QuoteSnapshot:
+        provider = self._quote_providers.get(source)
+        if provider is None:
+            raise ProviderUnavailableError(f"quote source {source!r} is unavailable")
+        return await provider.get_quote(instrument)
 
     async def get_candles(
         self,
         instrument: Instrument,
         *,
+        source: str,
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]:
-        failures: list[tuple[str, ProviderError]] = []
-        for provider in self._candle_providers:
-            try:
-                return await provider.get_candles(instrument, start=start, count=count)
-            except ProviderError as error:
-                failures.append((provider.name, error))
-        raise ProviderChainExhaustedError("candle", failures)
+        provider = self._candle_providers.get(source)
+        if provider is None:
+            raise ProviderUnavailableError(f"candle source {source!r} is unavailable")
+        return await provider.get_candles(instrument, start=start, count=count)

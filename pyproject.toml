@@ -9,11 +9,13 @@ description = "Provider-neutral market data and trading analysis platform"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "asyncpg>=0.30,<1",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "python-dotenv>=1.1,<2",
   "tzdata>=2025.2",
   "uvicorn[standard]>=0.35,<1",
+  "websockets>=15,<18",
 ]
 
 [project.scripts]
@@ -27,9 +29,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-"market_analysis.infrastructure.providers.jin10_desktop" = ["*.ps1"]
 
 [tool.ruff]
 line-length = 100

@@ -14,6 +14,12 @@ class Jin10Settings:
     timeout_seconds: float = 20.0
     daily_tool_limit: int = 1500
     quota_reserve: int = 25
+    quota_timezone: str = "Asia/Shanghai"
+    quota_warning_percent: float = 80.0
+
+    def __post_init__(self) -> None:
+        if not 0 < self.quota_warning_percent <= 100:
+            raise ValueError("JIN10_MCP_QUOTA_WARNING_PERCENT must be between 0 and 100")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Jin10Settings:
@@ -27,4 +33,6 @@ class Jin10Settings:
             timeout_seconds=float(values.get("JIN10_MCP_TIMEOUT_SECONDS", "20")),
             daily_tool_limit=int(values.get("JIN10_MCP_DAILY_TOOL_LIMIT", "1500")),
             quota_reserve=int(values.get("JIN10_MCP_QUOTA_RESERVE", "25")),
+            quota_timezone=values.get("JIN10_MCP_QUOTA_TIMEZONE", "Asia/Shanghai"),
+            quota_warning_percent=float(values.get("JIN10_MCP_QUOTA_WARNING_PERCENT", "80")),
         )

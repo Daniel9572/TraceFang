@@ -9,7 +9,6 @@ from typing import Protocol
 
 from market_analysis.application.ports import CandleProvider, QuoteProvider
 from market_analysis.domain.errors import (
-    ProviderChainExhaustedError,
     ProviderError,
     ProviderUnavailableError,
 )
@@ -32,6 +31,12 @@ class SourceHealth(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SourceAccessModel(StrEnum):
+    UNMETERED = "unmetered"
+    LIMITED = "limited"
+    METERED = "metered"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderProbe:
     available: bool
@@ -47,6 +52,25 @@ class SourceConfigurationStore(Protocol):
 
 
 Probe = Callable[[], Awaitable[ProviderProbe]]
+Connector = Callable[[], Awaitable[ProviderProbe]]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceQuota:
+    key: str
+    label: str
+    used: int
+    limit: int
+    reserve: int
+    available: int
+    usage_percent: float
+    warning_percent: float
+    period: str
+    resets_at: datetime
+    scope: str
+
+
+QuotaReporter = Callable[[], Awaitable[tuple[SourceQuota, ...]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +83,14 @@ class SourceRegistration:
     default_priority: int
     delayed: bool
     requires_running_app: bool
+    structured: bool = True
+    quote_poll_interval_seconds: float = 60.0
+    quote_streaming: bool = False
+    access_model: SourceAccessModel = SourceAccessModel.UNMETERED
+    access_note: str | None = None
+    manual_connection_required: bool = False
+    connector: Connector | None = None
+    quota_reporter: QuotaReporter | None = None
     quote_provider: QuoteProvider | None = None
     candle_provider: CandleProvider | None = None
     probe: Probe | None = None
@@ -75,6 +107,14 @@ class SourceDescriptor:
     priority: int
     delayed: bool
     requires_running_app: bool
+    structured: bool
+    quote_poll_interval_seconds: float
+    quote_streaming: bool
+    access_model: SourceAccessModel
+    access_note: str | None
+    manual_connection_required: bool
+    connection_active: bool
+    quotas: tuple[SourceQuota, ...]
     health: SourceHealth
     state: str
     error: str | None
@@ -84,6 +124,7 @@ class SourceDescriptor:
 
 @dataclass(slots=True)
 class _RuntimeState:
+    connection_active: bool = True
     health: SourceHealth = SourceHealth.UNKNOWN
     state: str = "not_checked"
     error: str | None = None
@@ -92,7 +133,7 @@ class _RuntimeState:
 
 
 class MarketSourceManager:
-    """Selects providers by capability, persisted priority, and explicit overrides."""
+    """Validates explicitly selected market-data sources and their capabilities."""
 
     def __init__(
         self,
@@ -107,17 +148,31 @@ class MarketSourceManager:
             raise ValueError("source ids must be unique")
         self._store = store
         self._configuration = self._merged_configuration(store.load())
-        self._runtime = {source_id: _RuntimeState() for source_id in self._registrations}
+        self._runtime = {
+            source_id: _RuntimeState(
+                connection_active=not registration.manual_connection_required,
+            )
+            for source_id, registration in self._registrations.items()
+        }
+        self._connection_locks = {source_id: asyncio.Lock() for source_id in self._registrations}
         for source_id, registration in self._registrations.items():
             if registration.setup_error:
                 self._runtime[source_id] = _RuntimeState(
+                    connection_active=False,
                     health=SourceHealth.UNCONFIGURED,
                     state="setup_required",
                     error=registration.setup_error,
                     checked_at=datetime.now(UTC),
                 )
+            elif registration.manual_connection_required:
+                self._runtime[source_id] = _RuntimeState(
+                    connection_active=False,
+                    health=SourceHealth.UNKNOWN,
+                    state="manual_connection_required",
+                )
             elif registration.probe is None:
                 self._runtime[source_id] = _RuntimeState(
+                    connection_active=True,
                     health=SourceHealth.HEALTHY,
                     state="ready",
                     checked_at=datetime.now(UTC),
@@ -144,6 +199,11 @@ class MarketSourceManager:
         for source_id, registration in self._registrations.items():
             configured = self._configuration[source_id]
             runtime = self._runtime[source_id]
+            quotas = (
+                await registration.quota_reporter()
+                if registration.quota_reporter is not None
+                else ()
+            )
             rows.append(
                 SourceDescriptor(
                     source_id=source_id,
@@ -154,6 +214,14 @@ class MarketSourceManager:
                     priority=int(configured["priority"]),
                     delayed=registration.delayed,
                     requires_running_app=registration.requires_running_app,
+                    structured=registration.structured,
+                    quote_poll_interval_seconds=registration.quote_poll_interval_seconds,
+                    quote_streaming=registration.quote_streaming,
+                    access_model=registration.access_model,
+                    access_note=registration.access_note,
+                    manual_connection_required=registration.manual_connection_required,
+                    connection_active=runtime.connection_active,
+                    quotas=quotas,
                     health=runtime.health,
                     state=runtime.state,
                     error=runtime.error,
@@ -166,6 +234,11 @@ class MarketSourceManager:
 
     async def _refresh_probe(self, registration: SourceRegistration) -> None:
         if registration.probe is None or registration.setup_error:
+            return
+        if (
+            registration.manual_connection_required
+            and not self._runtime[registration.source_id].connection_active
+        ):
             return
         try:
             probe = await registration.probe()
@@ -191,88 +264,123 @@ class MarketSourceManager:
         value = self._configuration[source_id]
         if enabled is not None:
             value["enabled"] = enabled
+            if not enabled and self._registrations[source_id].manual_connection_required:
+                runtime = self._runtime[source_id]
+                runtime.connection_active = False
+                runtime.health = SourceHealth.UNKNOWN
+                runtime.state = "manual_connection_required"
+                runtime.error = None
+                runtime.checked_at = datetime.now(UTC)
         if priority is not None:
             value["priority"] = priority
         self._store.save(self._configuration)
+
+    async def connect_source(self, source_id: str) -> None:
+        registration = self._registration(source_id)
+        if not bool(self._configuration[source_id]["enabled"]):
+            raise ProviderUnavailableError(f"{source_id} is disabled")
+        if not registration.manual_connection_required:
+            await self._refresh_probe(registration)
+            return
+        if registration.setup_error:
+            raise ProviderUnavailableError(registration.setup_error)
+        state = self._runtime[source_id]
+        if state.connection_active:
+            return
+        if registration.connector is None:
+            raise ProviderUnavailableError(f"{source_id} has no connection handler")
+        async with self._connection_locks[source_id]:
+            if state.connection_active:
+                return
+            try:
+                probe = await registration.connector()
+            except ProviderError as error:
+                self._mark_failure(source_id, error)
+                raise
+            if not probe.available:
+                error = ProviderUnavailableError(probe.detail or f"{source_id} connection failed")
+                self._mark_failure(source_id, error)
+                raise error
+            state.connection_active = True
+            state.health = SourceHealth.HEALTHY
+            state.state = probe.state
+            state.error = probe.detail
+            state.checked_at = probe.checked_at or datetime.now(UTC)
+
+    def is_connected(self, source_id: str) -> bool:
+        self._registration(source_id)
+        return self._runtime[source_id].connection_active
 
     async def get_quote(
         self,
         instrument: Instrument,
         *,
-        source: str = "auto",
+        source: str,
     ) -> QuoteSnapshot:
-        failures: list[tuple[str, ProviderError]] = []
-        for registration in self._candidates(SourceCapability.QUOTE, source):
-            provider = registration.quote_provider
-            if provider is None:
-                error = ProviderUnavailableError(
-                    registration.setup_error or f"{registration.source_id} is unavailable"
-                )
-                failures.append((registration.source_id, error))
-                self._mark_failure(registration.source_id, error)
-                continue
-            try:
-                value = await provider.get_quote(instrument)
-            except ProviderError as error:
-                failures.append((registration.source_id, error))
-                self._mark_failure(registration.source_id, error)
-                if source != "auto":
-                    raise
-            else:
-                self._mark_success(registration.source_id)
-                return value
-        raise ProviderChainExhaustedError("quote", failures)
+        registration = self._selected(SourceCapability.QUOTE, source)
+        provider = registration.quote_provider
+        if provider is None:
+            error = ProviderUnavailableError(
+                registration.setup_error or f"{registration.source_id} is unavailable"
+            )
+            self._mark_failure(registration.source_id, error)
+            raise error
+        try:
+            value = await provider.get_quote(instrument)
+        except ProviderError as error:
+            self._mark_failure(registration.source_id, error)
+            raise
+        self._mark_success(registration.source_id)
+        return value
 
     async def get_candles(
         self,
         instrument: Instrument,
         *,
-        source: str = "auto",
+        source: str,
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]:
-        failures: list[tuple[str, ProviderError]] = []
-        for registration in self._candidates(SourceCapability.CANDLES, source):
-            provider = registration.candle_provider
-            if provider is None:
-                error = ProviderUnavailableError(
-                    registration.setup_error or f"{registration.source_id} is unavailable"
-                )
-                failures.append((registration.source_id, error))
-                self._mark_failure(registration.source_id, error)
-                continue
-            try:
-                value = await provider.get_candles(instrument, start=start, count=count)
-            except ProviderError as error:
-                failures.append((registration.source_id, error))
-                self._mark_failure(registration.source_id, error)
-                if source != "auto":
-                    raise
-            else:
-                self._mark_success(registration.source_id)
-                return value
-        raise ProviderChainExhaustedError("candle", failures)
+        registration = self._selected(SourceCapability.CANDLES, source)
+        provider = registration.candle_provider
+        if provider is None:
+            error = ProviderUnavailableError(
+                registration.setup_error or f"{registration.source_id} is unavailable"
+            )
+            self._mark_failure(registration.source_id, error)
+            raise error
+        try:
+            value = await provider.get_candles(instrument, start=start, count=count)
+        except ProviderError as error:
+            self._mark_failure(registration.source_id, error)
+            raise
+        self._mark_success(registration.source_id)
+        return value
 
-    def _candidates(
-        self, capability: SourceCapability, source: str
-    ) -> tuple[SourceRegistration, ...]:
-        if source != "auto":
-            registration = self._registration(source)
-            if capability not in registration.capabilities:
-                raise ProviderUnavailableError(f"{source} does not provide {capability.value} data")
-            if not bool(self._configuration[source]["enabled"]):
-                raise ProviderUnavailableError(f"{source} is disabled")
-            return (registration,)
-        rows = [
-            item
-            for item in self._registrations.values()
-            if capability in item.capabilities
-            and bool(self._configuration[item.source_id]["enabled"])
-        ]
-        rows.sort(
-            key=lambda item: (int(self._configuration[item.source_id]["priority"]), item.source_id)
-        )
-        return tuple(rows)
+    def quote_poll_interval(self, source: str) -> float:
+        registration = self._selected(SourceCapability.QUOTE, source)
+        return registration.quote_poll_interval_seconds
+
+    def quote_is_streaming(self, source: str) -> bool:
+        registration = self._selected(SourceCapability.QUOTE, source)
+        return registration.quote_streaming
+
+    def validate_source(self, capability: SourceCapability, source: str) -> None:
+        self._selected(capability, source)
+
+    def _selected(self, capability: SourceCapability, source: str) -> SourceRegistration:
+        if source == "auto":
+            raise ValueError("automatic source fallback is disabled; select a concrete source")
+        registration = self._registration(source)
+        if capability not in registration.capabilities:
+            raise ProviderUnavailableError(f"{source} does not provide {capability.value} data")
+        if not bool(self._configuration[source]["enabled"]):
+            raise ProviderUnavailableError(f"{source} is disabled")
+        if registration.manual_connection_required and not self._runtime[source].connection_active:
+            raise ProviderUnavailableError(
+                f"{registration.display_name} 尚未连接, 请先在行情源管理中点击连接并测试"
+            )
+        return registration
 
     def _registration(self, source_id: str) -> SourceRegistration:
         try:
@@ -283,6 +391,7 @@ class MarketSourceManager:
     def _mark_success(self, source_id: str) -> None:
         now = datetime.now(UTC)
         state = self._runtime[source_id]
+        state.connection_active = True
         state.health = SourceHealth.HEALTHY
         state.state = "ready"
         state.error = None

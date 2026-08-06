@@ -45,12 +45,14 @@ class WorkingProvider:
 
 
 class MarketDataServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_uses_next_provider_after_expected_provider_failure(self) -> None:
+    async def test_uses_only_the_explicit_provider(self) -> None:
         service = MarketDataService(
-            quote_providers=[FailingProvider(), WorkingProvider()],
-            candle_providers=[FailingProvider(), WorkingProvider()],
+            quote_providers={"primary": FailingProvider(), "fallback": WorkingProvider()},
+            candle_providers={"primary": FailingProvider(), "fallback": WorkingProvider()},
         )
-        quote = await service.get_quote(SPOT_GOLD)
+        with self.assertRaisesRegex(ProviderUnavailableError, "offline"):
+            await service.get_quote(SPOT_GOLD, source="primary")
+        quote = await service.get_quote(SPOT_GOLD, source="fallback")
         self.assertEqual(quote.source.provider, "fallback")
 
 

@@ -4,6 +4,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $webIndex = Join-Path $projectRoot "web\dist\index.html"
 $envFile = Join-Path $projectRoot ".env"
+$localEnvFile = Join-Path $projectRoot ".env.local"
 
 if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $webIndex)) {
     throw "The project is not installed. Run setup.cmd first."
@@ -18,7 +19,21 @@ if (
         } | Select-Object -First 1)
     )
 ) {
-    Write-Warning "JIN10_MCP_BEARER_TOKEN is not set. MCP candles are unavailable; the local desktop quote source can still run."
+    Write-Warning "JIN10_MCP_BEARER_TOKEN is not set. Official MCP quotes and candles are unavailable."
+}
+
+& (Join-Path $PSScriptRoot "initialize-local-database.ps1")
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+    docker info *> $null
+    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $localEnvFile)) {
+        docker compose --env-file $localEnvFile up -d postgres
+    }
+    elseif ($LASTEXITCODE -ne 0) {
+        Write-Warning "Docker Desktop is not running. PostgreSQL persistence will remain unavailable until it starts."
+    }
+}
+else {
+    Write-Warning "Docker is not installed. Configure MARKET_ANALYSIS_DATABASE_URL for an external PostgreSQL instance."
 }
 
 $url = "http://127.0.0.1:8000"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -107,9 +108,17 @@ class Jin10Provider:
         await self.close()
 
     async def open(self) -> None:
-        await self.client.initialize()
-        tools_result = await self.client.list_tools()
-        resources_result = await self.client.list_resources()
+        if self._ready:
+            return
+        try:
+            await self.client.initialize()
+            tools_result, resources_result = await asyncio.gather(
+                self.client.list_tools(),
+                self.client.list_resources(),
+            )
+        except McpError as error:
+            await self.client.close()
+            raise ProviderUnavailableError(str(error)) from error
         tools = {
             item.get("name")
             for item in _required_list(tools_result.get("tools"), "tools")
@@ -205,6 +214,7 @@ class Jin10Provider:
                 provider_symbol=code,
                 observed_at=observed_at,
                 received_at=datetime.now(UTC),
+                raw_payload=data,
             ),
         )
 
@@ -239,6 +249,7 @@ class Jin10Provider:
                 provider_symbol=code,
                 observed_at=observed_at,
                 received_at=received_at,
+                raw_payload=row,
             )
             candles.append(
                 Candle(

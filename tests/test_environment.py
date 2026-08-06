@@ -30,6 +30,19 @@ class ProjectEnvironmentTests(unittest.TestCase):
                 self.assertTrue(load_project_environment(Path(directory)))
                 self.assertEqual(os.environ[key], "from-process")
 
+    def test_dot_env_local_takes_priority_over_base_file(self) -> None:
+        key = "MARKET_ANALYSIS_TEST_LOCAL_ENV"
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, ".env").write_text(f"{key}=from-base\n", encoding="utf-8")
+            Path(directory, ".env.local").write_text(f"{key}=from-local\n", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(key, None)
+                try:
+                    self.assertTrue(load_project_environment(Path(directory)))
+                    self.assertEqual(os.environ[key], "from-local")
+                finally:
+                    os.environ.pop(key, None)
+
 
 if __name__ == "__main__":
     unittest.main()

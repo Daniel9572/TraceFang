@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -56,6 +57,7 @@ class SourceMetadata:
     provider_symbol: str
     observed_at: datetime
     received_at: datetime
+    raw_payload: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         _require_aware(self.observed_at, "observed_at")

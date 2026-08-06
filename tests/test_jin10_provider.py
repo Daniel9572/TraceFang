@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -90,6 +91,25 @@ class FakeMcpClient:
         return None
 
 
+class ParallelDiscoveryMcpClient(FakeMcpClient):
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def _track(self, value):
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.01)
+        self.in_flight -= 1
+        return value
+
+    async def list_tools(self):
+        return await self._track(await super().list_tools())
+
+    async def list_resources(self):
+        return await self._track(await super().list_resources())
+
+
 class Jin10ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.provider = Jin10Provider(
@@ -120,6 +140,15 @@ class Jin10ProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(candles), 2)
         self.assertLess(candles[0].open_time, candles[1].open_time)
+
+    async def test_discovers_tools_and_resources_in_parallel(self) -> None:
+        client = ParallelDiscoveryMcpClient()
+        provider = Jin10Provider(client)
+        try:
+            await provider.open()
+            self.assertEqual(client.max_in_flight, 2)
+        finally:
+            await provider.close()
 
 
 if __name__ == "__main__":

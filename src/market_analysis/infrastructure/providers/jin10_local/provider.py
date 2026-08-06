@@ -1,0 +1,362 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from websockets.asyncio.client import ClientConnection, connect
+
+from market_analysis.domain.errors import (
+    InstrumentNotSupportedError,
+    ProviderDataError,
+    ProviderUnavailableError,
+)
+from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
+from market_analysis.infrastructure.providers.jin10_local.protocol import (
+    ADVANCED_QUOTE_PUSH_PROTOCOL,
+    QUOTE_PUSH_PROTOCOL,
+    RELOGIN_REQUEST_PROTOCOL,
+    Jin10WireQuote,
+    decode_message,
+    derive_session_key,
+    encode_login,
+    encode_quote_subscription,
+    parse_quote,
+    xor_cipher,
+)
+from market_analysis.infrastructure.providers.jin10_local.settings import Jin10LocalSettings
+from market_analysis.infrastructure.providers.jin10_local.symbols import Jin10LocalSymbolMapper
+
+_MICRO = Decimal("0.000001")
+_QUOTE_PROTOCOLS = frozenset({QUOTE_PUSH_PROTOCOL, ADVANCED_QUOTE_PUSH_PROTOCOL})
+_RECONNECT_MIN_SECONDS = 0.1
+_RECONNECT_MAX_SECONDS = 1.0
+_MAX_MINUTE_CANDLES_PER_SYMBOL = 43_200
+QuoteListener = Callable[[QuoteSnapshot], None]
+
+
+class Jin10LocalProvider:
+    """Structured Jin10 quote stream authenticated by the local desktop session."""
+
+    name = "jin10_local"
+
+    def __init__(
+        self,
+        settings: Jin10LocalSettings,
+        *,
+        symbol_mapper: Jin10LocalSymbolMapper | None = None,
+    ) -> None:
+        self.settings = settings
+        self.symbol_mapper = symbol_mapper or Jin10LocalSymbolMapper()
+        self._latest: dict[str, QuoteSnapshot] = {}
+        self._minute_candles: dict[str, dict[datetime, Candle]] = {}
+        self._updates = {code: asyncio.Event() for code in self.symbol_mapper.provider_codes}
+        self._task: asyncio.Task[None] | None = None
+        self._connected = False
+        self._last_error: str | None = None
+        self._quote_listeners: set[QuoteListener] = set()
+        self._connection_had_quote = False
+
+    async def __aenter__(self) -> Jin10LocalProvider:
+        await self.open()
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
+
+    async def open(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run(), name="jin10-local-quotes")
+
+    async def close(self) -> None:
+        task = self._task
+        self._task = None
+        self._connected = False
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    def add_quote_listener(self, listener: QuoteListener) -> None:
+        self._quote_listeners.add(listener)
+
+    def remove_quote_listener(self, listener: QuoteListener) -> None:
+        self._quote_listeners.discard(listener)
+
+    def health(self) -> tuple[bool, str, str | None]:
+        now = datetime.now(UTC)
+        fresh = [
+            quote
+            for quote in self._latest.values()
+            if (now - quote.source.received_at).total_seconds() <= self.settings.stale_after_seconds
+        ]
+        if fresh:
+            newest = max(fresh, key=lambda quote: quote.source.received_at)
+            age = max(0.0, (now - newest.source.received_at).total_seconds())
+            return True, "ready", f"结构化推送正常。最新帧距今 {age:.1f} 秒"
+        if self._task is None:
+            return False, "closed", "本地行情长连接尚未启动"
+        if self._task.done():
+            return False, "stopped", self._last_error or "本地行情任务已停止"
+        if self._connected:
+            return False, "waiting_quote", self._last_error or "已连接。正在等待首个行情帧"
+        return False, "reconnecting", self._last_error or "正在连接本地金十会话"
+
+    async def get_quote(self, instrument: Instrument) -> QuoteSnapshot:
+        provider_code = self.symbol_mapper.to_provider_code(instrument)
+        if self._task is None or self._task.done():
+            raise ProviderUnavailableError("Jin10 local quote stream is not open")
+        event = self._updates[provider_code]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.quote_wait_timeout_seconds
+        while True:
+            quote = self._fresh_quote(provider_code)
+            if quote is not None:
+                return quote
+            event.clear()
+            quote = self._fresh_quote(provider_code)
+            if quote is not None:
+                return quote
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                detail = self._last_error or "已连接但尚未收到新的结构化行情帧"
+                raise ProviderUnavailableError(detail)
+            try:
+                await asyncio.wait_for(event.wait(), remaining)
+            except TimeoutError as error:
+                detail = self._last_error or "等待金十本地结构化行情超时"
+                raise ProviderUnavailableError(detail) from error
+
+    async def get_candles(
+        self,
+        instrument: Instrument,
+        *,
+        start: datetime | None = None,
+        count: int = 100,
+    ) -> tuple[Candle, ...]:
+        if not 1 <= count <= 100:
+            raise ValueError("count must be between 1 and 100")
+        if start is not None and (start.tzinfo is None or start.utcoffset() is None):
+            raise ValueError("start must be timezone-aware")
+        provider_code = self.symbol_mapper.to_provider_code(instrument)
+        rows = sorted(
+            self._minute_candles.get(provider_code, {}).values(),
+            key=lambda candle: candle.open_time,
+        )
+        if start is not None:
+            return tuple(candle for candle in rows if candle.open_time >= start)[:count]
+        return tuple(rows[-count:])
+
+    def seed_candles(self, candles: tuple[Candle, ...]) -> None:
+        for candle in candles:
+            if candle.source.provider != self.name or candle.interval != timedelta(minutes=1):
+                continue
+            rows = self._minute_candles.setdefault(candle.source.provider_symbol, {})
+            current = rows.get(candle.open_time)
+            if current is None or candle.source.received_at >= current.source.received_at:
+                rows[candle.open_time] = candle
+            self._trim_candles(rows)
+
+    def _fresh_quote(self, provider_code: str) -> QuoteSnapshot | None:
+        quote = self._latest.get(provider_code)
+        if quote is None:
+            return None
+        age = (datetime.now(UTC) - quote.source.received_at).total_seconds()
+        return quote if age <= self.settings.stale_after_seconds else None
+
+    async def _run(self) -> None:
+        delay = _RECONNECT_MIN_SECONDS
+        while True:
+            self._connection_had_quote = False
+            try:
+                await self._run_connection()
+                self._last_error = "金十行情服务器已关闭连接。正在重连"
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._last_error = self._safe_error(error)
+            finally:
+                self._connected = False
+            await asyncio.sleep(_RECONNECT_MIN_SECONDS if self._connection_had_quote else delay)
+            delay = (
+                _RECONNECT_MIN_SECONDS
+                if self._connection_had_quote
+                else min(delay * 2, _RECONNECT_MAX_SECONDS)
+            )
+
+    async def _run_connection(self) -> None:
+        async with connect(
+            self.settings.endpoint,
+            open_timeout=self.settings.connect_timeout_seconds,
+            close_timeout=5,
+            ping_interval=None,
+            max_size=1024 * 1024,
+        ) as socket:
+            handshake = await asyncio.wait_for(socket.recv(), self.settings.connect_timeout_seconds)
+            if not isinstance(handshake, bytes):
+                raise ProviderDataError("Jin10 local handshake is not binary")
+            key = derive_session_key(handshake)
+            self._connected = True
+            self._last_error = None
+            await self._send_login(socket, key)
+            subscription = encode_quote_subscription(
+                provider_codes=self.symbol_mapper.provider_codes,
+                frequency_ms=self.settings.quote_frequency_ms,
+            )
+            await socket.send(xor_cipher(subscription, key))
+            heartbeat = asyncio.create_task(self._heartbeat(socket), name="jin10-local-heartbeat")
+            try:
+                async for message in socket:
+                    if not isinstance(message, bytes):
+                        continue
+                    protocol, payload = decode_message(xor_cipher(message, key))
+                    if protocol == RELOGIN_REQUEST_PROTOCOL:
+                        await self._send_login(socket, key)
+                        continue
+                    if protocol not in _QUOTE_PROTOCOLS:
+                        continue
+                    try:
+                        wire_quote = parse_quote(payload)
+                        self._store_quote(wire_quote, protocol=protocol)
+                    except (InstrumentNotSupportedError, ProviderDataError):
+                        continue
+            finally:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _send_login(self, socket: ClientConnection, key: str) -> None:
+        packet = encode_login(
+            user_id=self.settings.user_id,
+            session_token=self.settings.session_token,
+            vip_type=self.settings.vip_type,
+        )
+        await socket.send(xor_cipher(packet, key))
+
+    async def _heartbeat(self, socket: ClientConnection) -> None:
+        while True:
+            await asyncio.sleep(self.settings.heartbeat_seconds)
+            await socket.send("")
+
+    def _store_quote(self, wire: Jin10WireQuote, *, protocol: int) -> None:
+        instrument = self.symbol_mapper.from_provider_code(wire.provider_code)
+        received_at = datetime.now(UTC)
+        last = self._price(wire.last_micros)
+        if last <= 0:
+            raise ProviderDataError("Jin10 local quote price must be positive")
+        high = self._optional_price(wire.high_micros)
+        low = self._optional_price(wire.low_micros)
+        if high is not None and low is not None and not low <= last <= high:
+            high = None
+            low = None
+        previous_close = self._optional_price(wire.previous_close_micros)
+        change = last - previous_close if previous_close is not None else None
+        change_percent = (
+            change * Decimal(100) / abs(previous_close)
+            if change is not None and previous_close
+            else None
+        )
+        try:
+            observed_at = datetime.fromtimestamp(wire.timestamp, tz=UTC)
+        except (OSError, OverflowError, ValueError):
+            observed_at = received_at
+        if abs((received_at - observed_at).total_seconds()) > 7 * 24 * 3600:
+            observed_at = received_at
+        quote = QuoteSnapshot(
+            instrument=instrument,
+            last=last,
+            open=self._optional_price(wire.open_micros),
+            high=high,
+            low=low,
+            volume=Decimal(wire.volume) if wire.volume >= 0 else None,
+            change=change,
+            change_percent=change_percent,
+            source=SourceMetadata(
+                provider=self.name,
+                provider_symbol=wire.provider_code,
+                observed_at=observed_at,
+                received_at=received_at,
+                raw_payload={
+                    "protocol": protocol,
+                    "buy": str(self._price(wire.buy_micros)),
+                    "ask": str(self._price(wire.ask_micros)),
+                    "previous_close": str(previous_close) if previous_close else None,
+                    "turnover": wire.turnover,
+                },
+            ),
+        )
+        self._store_minute_candle(quote)
+        self._latest[wire.provider_code] = quote
+        self._last_error = None
+        self._connection_had_quote = True
+        for listener in tuple(self._quote_listeners):
+            with suppress(Exception):
+                listener(quote)
+        self._updates[wire.provider_code].set()
+
+    def _store_minute_candle(self, quote: QuoteSnapshot) -> None:
+        open_time = quote.source.observed_at.replace(second=0, microsecond=0)
+        rows = self._minute_candles.setdefault(quote.source.provider_symbol, {})
+        current = rows.get(open_time)
+        if current is None:
+            rows[open_time] = Candle(
+                instrument=quote.instrument,
+                interval=timedelta(minutes=1),
+                open_time=open_time,
+                open=quote.last,
+                high=quote.last,
+                low=quote.last,
+                close=quote.last,
+                volume=None,
+                source=SourceMetadata(
+                    provider=self.name,
+                    provider_symbol=quote.source.provider_symbol,
+                    observed_at=quote.source.observed_at,
+                    received_at=quote.source.received_at,
+                    raw_payload={"derived_from": "local_quote_stream"},
+                ),
+            )
+            self._trim_candles(rows)
+            return
+
+        rows[open_time] = Candle(
+            instrument=current.instrument,
+            interval=current.interval,
+            open_time=current.open_time,
+            open=current.open,
+            high=max(current.high, quote.last),
+            low=min(current.low, quote.last),
+            close=quote.last,
+            volume=None,
+            source=SourceMetadata(
+                provider=self.name,
+                provider_symbol=quote.source.provider_symbol,
+                observed_at=quote.source.observed_at,
+                received_at=quote.source.received_at,
+                raw_payload={"derived_from": "local_quote_stream"},
+            ),
+        )
+
+    @staticmethod
+    def _trim_candles(rows: dict[datetime, Candle]) -> None:
+        overflow = len(rows) - _MAX_MINUTE_CANDLES_PER_SYMBOL
+        if overflow <= 0:
+            return
+        for open_time in sorted(rows)[:overflow]:
+            del rows[open_time]
+
+    def _safe_error(self, error: Exception) -> str:
+        message = str(error).replace(self.settings.session_token, "<redacted>")
+        message = message.replace("\r", " ").replace("\n", " ").strip()
+        return (message or type(error).__name__)[:240]
+
+    @staticmethod
+    def _price(value: int) -> Decimal:
+        return Decimal(value) * _MICRO
+
+    @classmethod
+    def _optional_price(cls, value: int) -> Decimal | None:
+        return cls._price(value) if value else None
