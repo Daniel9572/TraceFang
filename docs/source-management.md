@@ -3,35 +3,54 @@
 ## 路由规则
 
 - 每个来源声明能力：`quote / candles / catalog / news / calendar`。
-- `auto` 只考虑已启用且具有目标能力的来源，按数值较小的优先级先调用。
-- 只有 `ProviderError` 类的预期提供方错误会触发回退；代码错误会直接暴露。
-- 显式指定来源时不回退。
+- 路由粒度是“合约”：每个合约只选择一个行情源，报价、K 线、分时、状态与延迟统一使用它。
+- 能力用于判断来源能否承载完整行情页，不用于把同一合约拆成多条来源选择。
+- 调用方必须显式指定来源，`auto` 会被拒绝。
+- 来源失败直接返回错误，不尝试其他来源。
 - 启停与优先级原子写入 `data/sources.json`。
 
-默认顺序：
+当前来源：
 
-1. `jin10_desktop`，优先级 `10`；
-2. `jin10_mcp`，优先级 `20`。
+1. `jin10_local`：本机会话认证的结构化 WebSocket 报价，并从同一报价流生成分钟 K 线；
+2. `jin10_mcp`：官方结构化报价、K 线、目录、资讯与日历。
 
-页面默认显示“本地优先（自动回退）”。只要本地报价成功，就不会为同一次报价再调用官方 MCP；可在“数据来源管理”中调整默认顺序。
+合约来源路由保存在 PostgreSQL；来源启停和页面顺序保存在 `data/sources.json`。
 
 ## 本地 API
 
-- `GET /api/sources`：来源、能力、配置和实时健康状态；
+- `GET /api/sources?refresh=true|false`：来源、能力、连接策略、工具级额度和实时健康状态；
 - `PATCH /api/sources/{source_id}`：更新 `enabled` 和/或 `priority`；
 - `POST /api/sources/{source_id}/test`：绕过报价缓存，主动测试该来源的黄金报价并返回耗时；
-- `GET /api/quotes/{code}?source=auto|jin10_mcp|jin10_desktop`：读取报价；
-- `GET /api/candles/{code}?source=auto|jin10_mcp`：读取分钟 K 线。
+- `GET /api/instruments/{code}/source`：读取该合约唯一行情源；
+- `PUT /api/instruments/{code}/source`：切换该合约的全部行情数据；
+- `GET /api/quotes/{code}?source=jin10_mcp|jin10_local`：读取报价；
+- `GET /api/candles/{code}?source=jin10_mcp|jin10_local`：从明确来源读取分钟 K 线；
+- `WS /api/stream/quotes/{code}?source=...`：持续报价与状态事件。
 
-## 调用额度
+## 成本、限额与连接策略
 
-官方 MCP 每个用户、每个工具、北京时间自然日最多 1500 次。页面默认：
+每个来源均声明 `access_model`：
 
-- 官方报价约每 65 秒刷新一次；
-- 本地桌面报价约每 5 秒刷新一次；
-- 分钟 K 线约每 65 秒刷新一次；
+- `unmetered`：无调用计费或本应用不需要管理上游额度；
+- `limited`：存在固定周期请求上限；
+- `metered`：按调用量计费。
+
+限额或付费来源必须由用户主动连接。金十 MCP 在应用启动时保持未连接；用户点击“连接并测试”后才完成 `initialize`、能力与资源发现，并执行一次报价测试。测试只改变连接状态，不会自动把合约切换到该来源。报价、K 线等 `tools/call` 仍受本地预算和上游限流双重保护。
+
+额度按工具返回 `used / limit / reserve / available / usage_percent / resets_at`。当前 `used` 是本应用进程内计数，不包含同一账号在其他客户端产生的调用，因此 UI 明确标注为本应用记录；上游返回的限流错误始终具有最终权威性。
+
+## 金十 MCP 调用额度
+
+官方 MCP 每个用户、每个工具、北京时间自然日最多 1500 次。浏览器不再轮询主报价，后端为相同“来源 + 合约”的订阅者共享一个报价泵：
+
+- 官方 MCP 仅在用户主动连接后完成协议握手；选择为当前行情源后，报价订阅首次立即调用，之后按 60 秒安全额度周期调度；
+- 本地报价通过单一长连接接收，实测通常约每 3～4 秒一帧，不消耗 MCP 工具额度；
+- 最新分钟 K 线进入页面时从所选来源读取，之后贴着分钟边界刷新；
+- 历史不足时只向所选来源回填，不会为了省额度拼入本地或其他来源；
 - 官方来源的“测试连接”只在用户主动点击时调用一次。
 
-这些间隔让单个活跃页面保持在每日工具额度内；多开页面会分别产生调用，应通过后端共享缓存或后续的集中调度器进一步约束。
+可通过 `.env` 配置：`JIN10_MCP_DAILY_TOOL_LIMIT`、`JIN10_MCP_QUOTA_RESERVE`、`JIN10_MCP_QUOTA_TIMEZONE` 与 `JIN10_MCP_QUOTA_WARNING_PERCENT`。页面目前重点展示 `get_quote` 与 `get_kline` 两个实际行情工具的独立额度。
+
+WebSocket 解决浏览器到本机后端的持续传递，不能把低频上游变成逐笔行情。
 
 页面用最近一分钟 K 线作为基线，并把所选报价源的新报价合并进当前柱。收盘倒计时完全在浏览器本地计算，不消耗 MCP 调用额度；报价刷新速度仍受上述来源采样间隔约束。
