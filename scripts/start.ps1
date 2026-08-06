@@ -3,12 +3,21 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $webIndex = Join-Path $projectRoot "web\dist\index.html"
+$envFile = Join-Path $projectRoot ".env"
 
 if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $webIndex)) {
     throw "The project is not installed. Run setup.cmd first."
 }
 
-if ([string]::IsNullOrWhiteSpace($env:JIN10_MCP_BEARER_TOKEN)) {
+if (
+    [string]::IsNullOrWhiteSpace($env:JIN10_MCP_BEARER_TOKEN) -and
+    -not (
+        (Test-Path -LiteralPath $envFile) -and
+        (Get-Content -LiteralPath $envFile | Where-Object {
+            $_ -match '^\s*JIN10_MCP_BEARER_TOKEN\s*=\s*\S+'
+        } | Select-Object -First 1)
+    )
+) {
     Write-Warning "JIN10_MCP_BEARER_TOKEN is not set. MCP candles are unavailable; the local desktop quote source can still run."
 }
 

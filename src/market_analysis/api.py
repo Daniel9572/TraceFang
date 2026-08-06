@@ -28,6 +28,7 @@ from market_analysis.domain.errors import (
     ProviderRateLimitError,
 )
 from market_analysis.domain.models import InstrumentCatalogEntry
+from market_analysis.environment import load_project_environment
 from market_analysis.infrastructure.mcp import StreamableHttpMcpClient
 from market_analysis.infrastructure.providers.jin10 import (
     SPOT_GOLD,
@@ -41,6 +42,7 @@ from market_analysis.infrastructure.quota import DailyToolBudget
 from market_analysis.infrastructure.source_config import JsonSourceConfigurationStore
 
 _repo_root = Path(__file__).resolve().parents[2]
+load_project_environment(_repo_root)
 
 
 class Runtime:

@@ -24,12 +24,15 @@
 
 首次运行，双击 `setup.cmd` 安装并构建。只使用本地软件源时，之后可直接双击 `start.cmd`。
 
-如需官方 MCP 与 K 线，请在 PowerShell 中设置 Token，并在**同一个窗口**启动：
+如需官方 MCP 与 K 线，推荐复制本机环境文件模板，填写 `JIN10_MCP_BEARER_TOKEN` 后再启动：
 
 ```powershell
-$env:JIN10_MCP_BEARER_TOKEN = "<your-token>"
+Copy-Item .env.example .env
+# 用文本编辑器填写 .env；不要把真实 Token 写回 .env.example
 .\start.cmd
 ```
+
+程序启动时自动读取项目根目录 `.env`；PowerShell 或系统中已经存在的同名环境变量优先，不会被 `.env` 覆盖。若只想让 Token 在当前 PowerShell 会话临时生效，也可以不创建 `.env`，继续使用 `$env:JIN10_MCP_BEARER_TOKEN = "<your-token>"`。
 
 浏览器会打开 `http://127.0.0.1:8000`。也可以完全从终端安装和启动：
 

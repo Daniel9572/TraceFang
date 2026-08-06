@@ -41,4 +41,6 @@ K线接口当前为分钟级，单次 `count` 范围是 1–100，`time` 为可�
 
 ## 密钥
 
-代码只读取 `JIN10_MCP_BEARER_TOKEN` 环境变量。`.env*` 默认忽略，仓库只保留无密钥的 `.env.example`。
+程序启动时先读取项目根目录 `.env`，再从进程环境获取 `JIN10_MCP_BEARER_TOKEN`。加载使用 `override=False`，因此 PowerShell、系统服务或容器显式注入的同名变量优先于 `.env`。
+
+`.env` 和其他 `.env.*` 本机文件默认被 Git 忽略，仓库只保留无密钥的 `.env.example`。真实 Token 不得写入示例、代码、测试、日志或 Git 历史。
