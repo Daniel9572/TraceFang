@@ -37,6 +37,13 @@ class SourceAccessModel(StrEnum):
     METERED = "metered"
 
 
+class QuoteServiceTier(StrEnum):
+    INSTITUTIONAL = "institutional"
+    ENHANCED = "enhanced"
+    STANDARD = "standard"
+    REFERENCE = "reference"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderProbe:
     available: bool
@@ -87,6 +94,7 @@ class SourceRegistration:
     structured: bool = True
     quote_poll_interval_seconds: float = 60.0
     quote_streaming: bool = False
+    quote_service_tier: QuoteServiceTier = QuoteServiceTier.REFERENCE
     access_model: SourceAccessModel = SourceAccessModel.UNMETERED
     access_note: str | None = None
     manual_connection_required: bool = False
@@ -111,6 +119,7 @@ class SourceDescriptor:
     structured: bool
     quote_poll_interval_seconds: float
     quote_streaming: bool
+    quote_service_tier: QuoteServiceTier
     access_model: SourceAccessModel
     access_note: str | None
     manual_connection_required: bool
@@ -218,6 +227,7 @@ class MarketSourceManager:
                     structured=registration.structured,
                     quote_poll_interval_seconds=registration.quote_poll_interval_seconds,
                     quote_streaming=registration.quote_streaming,
+                    quote_service_tier=registration.quote_service_tier,
                     access_model=registration.access_model,
                     access_note=registration.access_note,
                     manual_connection_required=registration.manual_connection_required,
@@ -445,7 +455,7 @@ class MarketSourceManager:
             raise ProviderUnavailableError(f"{source} is disabled")
         if registration.manual_connection_required and not self._runtime[source].connection_active:
             raise ProviderUnavailableError(
-                f"{registration.display_name} 尚未连接, 请先在行情源管理中点击连接并测试"
+                f"{registration.display_name} 尚未连接, 请先在实时来源菜单中点击连接并测试"
             )
         return registration
 

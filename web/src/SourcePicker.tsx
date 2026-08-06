@@ -1,27 +1,82 @@
-import { Check, ChevronDown, ChevronRight, SlidersHorizontal } from "lucide-react";
+import {
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  CircleAlert,
+  Gauge,
+  PlugZap,
+  Radio,
+  RefreshCw,
+  ShieldCheck,
+  Timer,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  dataLatencyMilliseconds,
   formatQuotaPercent,
-  formatSamplingInterval,
-  formatSourceLatency,
+  formatRefreshFrequency,
+  quoteServiceLabels,
+  quoteServiceNotes,
+  quotaTone,
   sourceAccessLabels,
   sourceHealthLabels,
 } from "./sourcePresentation";
-import type { SourceDescriptor, SourceId } from "./types";
+import type { QuoteServiceTier, SourceDescriptor, SourceId } from "./types";
+
+export interface SourceTestFeedback {
+  tone: "success" | "error";
+  message: string;
+}
 
 interface SourcePickerProps {
   sources: SourceDescriptor[];
   selectedSource: SourceId;
   fallbackLabel: string;
   busy: boolean;
+  contractCode: string;
   connectionState: "connecting" | "live" | "unavailable";
   connectionError: string | null;
-  quoteObservedAt: string | null;
-  quoteReceivedAt: string | null;
+  testingSourceId: SourceId | null;
+  testResults: Partial<Record<SourceId, SourceTestFeedback>>;
+  notice: string | null;
   onSelect: (source: SourceDescriptor) => void | Promise<void>;
-  onManage: () => void;
+  onToggle: (source: SourceDescriptor) => void | Promise<void>;
+  onTest: (source: SourceDescriptor) => void | Promise<void>;
+  onOpenChange?: (open: boolean) => void;
+}
+
+const capabilityLabels: Record<string, string> = {
+  quote: "报价",
+  candles: "K 线",
+  catalog: "品种",
+  news: "资讯",
+  calendar: "日历",
+};
+
+function ServiceTierIcon({ tier, size = 10 }: { tier: QuoteServiceTier; size?: number }) {
+  if (tier === "institutional") return <ShieldCheck size={size} strokeWidth={2.2} aria-hidden="true" />;
+  if (tier === "enhanced") return <Gauge size={size} strokeWidth={2.2} aria-hidden="true" />;
+  if (tier === "standard") return <Radio size={size} strokeWidth={2.2} aria-hidden="true" />;
+  return <Timer size={size} strokeWidth={2.2} aria-hidden="true" />;
+}
+
+function formatQuotaReset(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "北京时间重置";
+  return date.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai",
+  }) + " 重置";
+}
+
+function sourceUpdateLabel(source: SourceDescriptor): string {
+  if (source.quote_service_tier === "enhanced" && source.quote_streaming) return "变化即推送";
+  return formatRefreshFrequency(
+    source.quote_poll_interval_seconds,
+    source.quote_streaming,
+  );
 }
 
 export function SourcePicker({
@@ -29,90 +84,75 @@ export function SourcePicker({
   selectedSource,
   fallbackLabel,
   busy,
+  contractCode,
   connectionState,
   connectionError,
-  quoteObservedAt,
-  quoteReceivedAt,
+  testingSourceId,
+  testResults,
+  notice,
   onSelect,
-  onManage,
+  onToggle,
+  onTest,
+  onOpenChange,
 }: SourcePickerProps) {
   const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const manageRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuRef = useRef<HTMLDivElement>(null);
   const options = useMemo(
     () => sources.filter((source) => source.capabilities.includes("quote")),
     [sources],
   );
   const selected = options.find((source) => source.source_id === selectedSource)
     ?? sources.find((source) => source.source_id === selectedSource);
-  const samplingInterval = formatSamplingInterval(
-    selected?.quote_poll_interval_seconds,
-    selected?.quote_streaming,
-  );
-  const selectedLatencyMs = dataLatencyMilliseconds(quoteObservedAt, quoteReceivedAt);
-  const selectedLatency = formatSourceLatency(quoteObservedAt, quoteReceivedAt);
-  const samplingDescription = selected?.quote_streaming
-    ? "更新方式 实时推送"
-    : `采样间隔 ${samplingInterval}`;
+  const selectedServiceTier = selected?.quote_service_tier ?? "reference";
+  const selectedServiceLabel = quoteServiceLabels[selectedServiceTier];
   const selectedPeakQuota = selected?.quotas.reduce(
     (peak, quota) => quota.usage_percent > peak.usage_percent ? quota : peak,
     selected.quotas[0],
   );
+  const selectedEnabled = selected?.enabled ?? false;
   const awaitingManualConnection = Boolean(
-    selected?.manual_connection_required && !selected.connection_active,
+    selectedEnabled
+    && selected?.manual_connection_required
+    && !selected.connection_active,
   );
-  const connectionLabel = awaitingManualConnection
-    ? "待连接"
-    : connectionState === "live"
-      ? "在线"
-      : connectionState === "connecting"
-        ? "连接中"
-        : "已停滞";
-  const selectedHealth = awaitingManualConnection
+  const connectionLabel = !selectedEnabled
+    ? "已停用"
+    : awaitingManualConnection
+      ? "待连接"
+      : connectionState === "live"
+        ? "在线"
+        : connectionState === "connecting"
+          ? "连接中"
+          : "已停滞";
+  const selectedHealth = !selectedEnabled || awaitingManualConnection
     ? "unknown"
     : connectionState === "live"
       ? "healthy"
       : connectionState === "connecting"
         ? "unknown"
         : "unavailable";
-  const triggerMetric = awaitingManualConnection
-    ? selectedPeakQuota
-      ? `今日用量 ${formatQuotaPercent(selectedPeakQuota.usage_percent)}`
-      : "需要主动连接"
-    : connectionState === "live"
-      ? selectedLatencyMs === null
-        ? "等待延迟样本"
-        : `延迟 ${selectedLatency}`
-      : connectionState === "connecting"
-        ? "等待首帧"
-        : "数据停滞";
 
-  const focusOption = useCallback((index: number) => {
-    if (options.length === 0) return;
-    const nextIndex = (index + options.length) % options.length;
-    setActiveIndex(nextIndex);
-    window.requestAnimationFrame(() => optionRefs.current[nextIndex]?.focus());
-  }, [options.length]);
-
-  const openMenu = useCallback((direction: "selected" | "first" | "last" = "selected") => {
-    if (busy || options.length === 0) return;
-    const selectedIndex = Math.max(0, options.findIndex((source) => source.source_id === selectedSource));
-    const nextIndex = direction === "first"
-      ? 0
-      : direction === "last"
-        ? options.length - 1
-        : selectedIndex;
-    setOpen(true);
-    focusOption(nextIndex);
-  }, [busy, focusOption, options, selectedSource]);
+  const setMenuOpen = useCallback((next: boolean) => {
+    setOpen(next);
+    onOpenChange?.(next);
+  }, [onOpenChange]);
 
   const closeMenu = useCallback((restoreFocus = false) => {
-    setOpen(false);
+    setMenuOpen(false);
     if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
-  }, []);
+  }, [setMenuOpen]);
+
+  const openMenu = useCallback((focusFirstControl = false) => {
+    if (busy || options.length === 0) return;
+    setMenuOpen(true);
+    if (focusFirstControl) {
+      window.requestAnimationFrame(() => {
+        menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+      });
+    }
+  }, [busy, options.length, setMenuOpen]);
 
   useEffect(() => {
     if (!open) return;
@@ -130,35 +170,44 @@ export function SourcePicker({
     };
   }, [closeMenu, open]);
 
-  const chooseSource = (source: SourceDescriptor) => {
-    closeMenu(true);
-    if (source.source_id !== selectedSource) void onSelect(source);
-  };
-
-  const manageSources = () => {
-    closeMenu();
-    onManage();
-  };
+  const enabledCount = options.filter((source) => source.enabled).length;
+  const triggerTitle = connectionError ?? [
+    selected?.display_name ?? fallbackLabel,
+    selectedServiceLabel,
+    connectionLabel,
+    selected ? sourceUpdateLabel(selected) : "待检测",
+  ].join("；");
 
   return (
-    <div className={`source-picker health-${selectedHealth} ${open ? "is-open" : ""}`} ref={rootRef}>
+    <div
+      className={[
+        "source-picker",
+        "health-" + selectedHealth,
+        "tier-" + selectedServiceTier,
+        open ? "is-open" : "",
+      ].filter(Boolean).join(" ")}
+      ref={rootRef}
+    >
       <button
         type="button"
         ref={triggerRef}
         className="source-picker-trigger"
-        aria-haspopup="listbox"
+        aria-haspopup="dialog"
         aria-expanded={open}
-        aria-controls="market-source-options"
-        disabled={busy}
-        title={connectionError ?? `${selected?.display_name ?? fallbackLabel}；${connectionLabel}；${selectedLatencyMs === null ? "暂无延迟样本" : `估算采集延迟 ${selectedLatency}`}；${samplingDescription}`}
+        aria-controls="market-source-console"
+        disabled={busy && !open}
+        title={triggerTitle}
         onClick={() => {
           if (open) closeMenu();
           else openMenu();
         }}
         onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          if (event.key === "ArrowDown") {
             event.preventDefault();
-            openMenu(event.key === "ArrowDown" ? "first" : "last");
+            openMenu(true);
+          } else if (event.key === "Escape" && open) {
+            event.preventDefault();
+            closeMenu(true);
           }
         }}
       >
@@ -166,17 +215,21 @@ export function SourcePicker({
           <span className="source-picker-name">
             <strong>{selected?.display_name ?? fallbackLabel}</strong>
             {selected && selected.access_model !== "unmetered" ? (
-              <span className={`source-access-badge is-${selected.access_model}`}>
+              <span className={"source-access-badge is-" + selected.access_model}>
                 {sourceAccessLabels[selected.access_model]}
-                {selectedPeakQuota ? ` ${formatQuotaPercent(selectedPeakQuota.usage_percent)}` : ""}
+                {selectedPeakQuota ? " " + formatQuotaPercent(selectedPeakQuota.usage_percent) : ""}
               </span>
             ) : null}
           </span>
-          <small>
-            <span className="source-picker-status-dot" aria-hidden="true" />
-            <span className="source-picker-status-label">{connectionLabel}</span>
-            <span aria-hidden="true">·</span>
-            <span>{triggerMetric}</span>
+          <small className="source-picker-signal-row">
+            <span className="source-picker-tier-icon">
+              <ServiceTierIcon tier={selectedServiceTier} />
+            </span>
+            <span className="source-picker-tier-label">{selectedServiceLabel}</span>
+            <span className="source-picker-connection">
+              <span className="source-picker-status-dot" aria-hidden="true" />
+              <span className="source-picker-status-label">{connectionLabel}</span>
+            </span>
           </small>
         </span>
         <ChevronDown className="source-picker-chevron" size={14} aria-hidden="true" />
@@ -184,146 +237,209 @@ export function SourcePicker({
 
       {open ? (
         <div
-          id="market-source-options"
+          id="market-source-console"
           className="source-picker-menu"
-          role="listbox"
-          aria-label="行情源"
+          role="dialog"
+          aria-label={contractCode + " 实时行情源控制台"}
+          ref={menuRef}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown") {
-              event.preventDefault();
-              focusOption(activeIndex + 1);
-            } else if (event.key === "ArrowUp") {
-              event.preventDefault();
-              focusOption(activeIndex - 1);
-            } else if (event.key === "Home") {
-              event.preventDefault();
-              focusOption(0);
-            } else if (event.key === "End") {
-              event.preventDefault();
-              focusOption(options.length - 1);
-            } else if (event.key === "Escape") {
+            if (event.key === "Escape") {
               event.preventDefault();
               closeMenu(true);
-            } else if (event.key === "Tab") {
-              const focusedOption = optionRefs.current.findIndex((node) => node === document.activeElement);
-              if (event.shiftKey) {
-                if (document.activeElement === manageRef.current) {
-                  event.preventDefault();
-                  focusOption(options.length - 1);
-                } else if (focusedOption > 0) {
-                  event.preventDefault();
-                  focusOption(focusedOption - 1);
-                } else if (focusedOption === 0) {
-                  event.preventDefault();
-                  closeMenu(true);
-                }
-              } else if (focusedOption >= 0 && focusedOption < options.length - 1) {
-                event.preventDefault();
-                focusOption(focusedOption + 1);
-              } else if (focusedOption === options.length - 1) {
-                event.preventDefault();
-                manageRef.current?.focus();
-              }
             }
           }}
         >
-          <div className="source-picker-menu-head">
-            <strong>实时来源</strong>
-            <span>延迟 / 今日用量</span>
+          <div className="source-console-head">
+            <div>
+              <span className="source-console-title">
+                <strong>实时来源</strong>
+                <b>{contractCode}</b>
+              </span>
+              <small>每个合约独立设置，历史数据统一读取本地库</small>
+            </div>
+            <span className="source-console-count">{enabledCount}/{options.length} 已启用</span>
           </div>
-          <div className="source-picker-options">
-            {options.map((source, index) => {
+
+          <div className="source-console-list">
+            {options.map((source) => {
               const isSelected = source.source_id === selectedSource;
-              const awaitingConnection = source.manual_connection_required && !source.connection_active;
-              const optionHealth = awaitingConnection
+              const awaitingConnection = source.enabled
+                && source.manual_connection_required
+                && !source.connection_active;
+              const isTesting = testingSourceId === source.source_id;
+              const testResult = testResults[source.source_id];
+              const supportsRealtime = source.capabilities.includes("quote");
+              const optionHealth = !source.enabled || awaitingConnection
                 ? "unknown"
                 : isSelected
                   ? selectedHealth
                   : source.health;
-              const optionState = awaitingConnection
-                ? "待连接"
-                : isSelected
-                  ? connectionLabel
-                  : sourceHealthLabels[source.health];
+              const optionState = !source.enabled
+                ? "已停用"
+                : awaitingConnection
+                  ? "待连接"
+                  : isSelected
+                    ? connectionLabel
+                    : sourceHealthLabels[source.health];
               const quoteQuota = source.quotas.find((quota) => quota.key === "get_quote");
               const candleQuota = source.quotas.find((quota) => quota.key === "get_kline");
-              const optionPeakQuota = source.quotas.reduce(
-                (peak, quota) => quota.usage_percent > peak.usage_percent ? quota : peak,
-                source.quotas[0],
-              );
-              const optionSampling = formatSamplingInterval(
-                source.quote_poll_interval_seconds,
-                source.quote_streaming,
-              );
-              const hasLiveLatency = isSelected
-                && optionState === "在线"
-                && selectedLatencyMs !== null;
-              const optionMetric = hasLiveLatency
-                ? selectedLatency
-                : quoteQuota && candleQuota
-                  ? `报 ${quoteQuota.used.toLocaleString("zh-CN")} · K ${candleQuota.used.toLocaleString("zh-CN")}`
-                  : optionPeakQuota
-                    ? `${optionPeakQuota.used.toLocaleString("zh-CN")} / ${optionPeakQuota.limit.toLocaleString("zh-CN")}`
-                  : source.access_model === "metered"
-                    ? "按调用"
-                    : optionSampling;
-              const optionMetricLabel = hasLiveLatency
-                ? "采集延迟"
-                : optionPeakQuota
-                  ? `最高用量 · ${formatQuotaPercent(optionPeakQuota.usage_percent)}`
-                  : source.access_model === "metered"
-                    ? "计费通道"
-                    : "采样间隔";
+              const optionServiceTier = source.quote_service_tier;
+              const optionServiceLabel = quoteServiceLabels[optionServiceTier];
+              const capabilitySummary = source.capabilities
+                .map((capability) => capabilityLabels[capability] ?? capability)
+                .join(" · ");
+              const accessSummary = quoteQuota && candleQuota
+                ? "报 " + quoteQuota.used.toLocaleString("zh-CN") + " · K "
+                  + candleQuota.used.toLocaleString("zh-CN")
+                : sourceAccessLabels[source.access_model];
+              const cardClassName = [
+                "source-console-card",
+                "tier-" + optionServiceTier,
+                "health-" + optionHealth,
+                isSelected ? "is-current" : "",
+                source.enabled ? "" : "is-disabled",
+              ].filter(Boolean).join(" ");
               return (
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  key={source.source_id}
-                  ref={(node) => { optionRefs.current[index] = node; }}
-                  className={`source-picker-option health-${optionHealth} access-${source.access_model} ${isSelected ? "is-selected" : ""}`}
-                  disabled={!source.enabled || awaitingConnection}
-                  title={awaitingConnection ? "请先在行情源管理中连接并测试此限额来源" : undefined}
-                  onFocus={() => setActiveIndex(index)}
-                  onClick={() => chooseSource(source)}
-                >
-                  <span className="source-option-dot" aria-hidden="true" />
-                  <span className="source-option-copy">
-                    <strong>{source.display_name}</strong>
-                    <small>
-                      {optionState}
-                      {` · ${source.access_model !== "unmetered"
-                        ? sourceAccessLabels[source.access_model]
-                        : source.quote_streaming
-                          ? optionSampling
-                          : `采样 ${optionSampling}`}`}
-                    </small>
-                  </span>
-                  <span className="source-option-metric">
-                    <strong>{optionMetric}</strong>
-                    <small>{optionMetricLabel}</small>
-                  </span>
-                  <Check className="source-option-check" size={14} aria-hidden="true" />
-                </button>
+                <section className={cardClassName} key={source.source_id}>
+                  <div className="source-console-card-head">
+                    <span className="source-console-signal-mark">
+                      <ServiceTierIcon tier={optionServiceTier} size={14} />
+                    </span>
+                    <div className="source-console-identity">
+                      <span>
+                        <strong>{source.display_name}</strong>
+                        {isSelected ? (
+                          <b className="source-console-current"><Check size={9} />当前</b>
+                        ) : null}
+                      </span>
+                      <small>
+                        <span className="source-console-health-dot" aria-hidden="true" />
+                        {optionState}
+                        <span aria-hidden="true">·</span>
+                        {optionServiceLabel}
+                      </small>
+                    </div>
+                    <div className="source-console-enable">
+                      <span>{source.enabled ? "启用" : "停用"}</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={source.enabled}
+                        aria-label={(source.enabled ? "停用" : "启用") + source.display_name}
+                        className={"source-console-switch " + (source.enabled ? "is-on" : "")}
+                        onClick={() => void onToggle(source)}
+                        disabled={busy}
+                      >
+                        <span />
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="source-console-description" title={source.description}>
+                    {source.description}
+                  </p>
+
+                  <div className="source-console-facts">
+                    <span>
+                      <small>更新</small>
+                      <strong>{sourceUpdateLabel(source)}</strong>
+                    </span>
+                    <span>
+                      <small>运行</small>
+                      <strong>{source.requires_running_app ? "需桌面端" : "独立连接"}</strong>
+                    </span>
+                    <span>
+                      <small>{source.quotas.length > 0 ? "今日用量" : "访问"}</small>
+                      <strong>{accessSummary}</strong>
+                    </span>
+                  </div>
+
+                  <div className="source-console-meta">
+                    <span className={"source-tier-note is-" + optionServiceTier}>
+                      {quoteServiceNotes[optionServiceTier]}
+                    </span>
+                    <span>{source.structured ? "结构化" : "非结构化"}</span>
+                    <span>{capabilitySummary}</span>
+                    {source.access_model !== "unmetered" ? (
+                      <span className={"source-access-badge is-" + source.access_model}>
+                        {sourceAccessLabels[source.access_model]}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {source.quotas.length > 0 ? (
+                    <div className="source-console-quotas">
+                      <div className="source-console-quota-head">
+                        <span>额度</span>
+                        <small>{formatQuotaReset(source.quotas[0].resets_at)}</small>
+                      </div>
+                      {source.quotas.map((quota) => (
+                        <div className={"source-console-quota is-" + quotaTone(quota)} key={quota.key}>
+                          <span>{quota.label}</span>
+                          <span className="source-console-quota-track">
+                            <span style={{ width: String(Math.min(100, quota.usage_percent)) + "%" }} />
+                          </span>
+                          <strong>{formatQuotaPercent(quota.usage_percent)}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {source.error && optionHealth !== "healthy" ? (
+                    <p className="source-console-error">{source.error}</p>
+                  ) : null}
+
+                  <div className="source-console-actions">
+                    <button
+                      type="button"
+                      className={"source-console-action source-console-use " + (isSelected ? "is-current" : "")}
+                      onClick={() => void onSelect(source)}
+                      disabled={busy || !source.enabled || awaitingConnection || !supportsRealtime || isSelected}
+                    >
+                      {isSelected ? <Check size={13} /> : null}
+                      {isSelected ? contractCode + " 当前来源" : "用于 " + contractCode}
+                    </button>
+                    <button
+                      type="button"
+                      className="source-console-action source-console-test"
+                      onClick={() => void onTest(source)}
+                      disabled={busy || testingSourceId !== null || !source.enabled}
+                    >
+                      {isTesting
+                        ? <RefreshCw size={13} className="spin" />
+                        : <PlugZap size={13} />}
+                      {isTesting
+                        ? "测试中…"
+                        : awaitingConnection
+                          ? "连接并测试"
+                          : "测试连接"}
+                    </button>
+                  </div>
+
+                  {testResult ? (
+                    <div className={"source-console-result is-" + testResult.tone}>
+                      {testResult.tone === "success"
+                        ? <CheckCircle2 size={13} />
+                        : <CircleAlert size={13} />}
+                      <span>{testResult.message}</span>
+                    </div>
+                  ) : null}
+                </section>
               );
             })}
           </div>
-          <button
-            type="button"
-            ref={manageRef}
-            className="source-picker-manage"
-            onClick={manageSources}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                manageSources();
-              }
-            }}
-          >
-            <SlidersHorizontal size={14} aria-hidden="true" />
-            <span><strong>管理行情源</strong><small>实时连接、额度与历史补缺</small></span>
-            <ChevronRight size={14} aria-hidden="true" />
-          </button>
+
+          {notice ? (
+            <div className="source-console-notice">
+              <CircleAlert size={13} />
+              <span>{notice}</span>
+            </div>
+          ) : null}
+
+          <div className="source-console-foot">
+            <span aria-hidden="true" />
+            切换只作用于 {contractCode}；停用后不会静默改用其他来源。
+          </div>
         </div>
       ) : null}
     </div>

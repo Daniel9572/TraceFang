@@ -1,4 +1,9 @@
-import type { SourceAccessModel, SourceDescriptor, SourceQuota } from "./types";
+import type {
+  QuoteServiceTier,
+  SourceAccessModel,
+  SourceDescriptor,
+  SourceQuota,
+} from "./types";
 
 export const sourceHealthLabels: Record<SourceDescriptor["health"], string> = {
   healthy: "可用",
@@ -12,6 +17,20 @@ export const sourceAccessLabels: Record<SourceAccessModel, string> = {
   unmetered: "不限额",
   limited: "限额",
   metered: "计费",
+};
+
+export const quoteServiceLabels: Record<QuoteServiceTier, string> = {
+  institutional: "机构专业级",
+  enhanced: "优质分析级",
+  standard: "标准分析级",
+  reference: "低频参考级",
+};
+
+export const quoteServiceNotes: Record<QuoteServiceTier, string> = {
+  institutional: "适合专业交易与低延迟执行",
+  enhanced: "适合常规分析",
+  standard: "适合一般实时观察",
+  reference: "适合快照与校验",
 };
 
 function formatNumber(value: number): string {

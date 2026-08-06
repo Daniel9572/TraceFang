@@ -8,6 +8,8 @@ import {
   formatRefreshFrequency,
   formatSamplingInterval,
   formatSourceLatency,
+  quoteServiceLabels,
+  quoteServiceNotes,
   quotaTone,
 } from "../src/sourcePresentation.ts";
 import type { SourceQuota } from "../src/types.ts";
@@ -18,6 +20,14 @@ test("formats configured quote refresh frequencies without hiding precision", ()
   assert.equal(formatRefreshFrequency(120), "2 分钟/次");
   assert.equal(formatRefreshFrequency(0.5), "0.5 秒/次");
   assert.equal(formatRefreshFrequency(0, true), "事件推送");
+});
+
+test("keeps professional service quality above the public analysis feed", () => {
+  assert.equal(quoteServiceLabels.institutional, "机构专业级");
+  assert.equal(quoteServiceLabels.enhanced, "优质分析级");
+  assert.equal(quoteServiceLabels.standard, "标准分析级");
+  assert.equal(quoteServiceLabels.reference, "低频参考级");
+  assert.equal(quoteServiceNotes.enhanced, "适合常规分析");
 });
 
 test("marks missing or invalid refresh frequency as awaiting detection", () => {

@@ -5,6 +5,7 @@ from decimal import Decimal
 from market_analysis.application.sources import (
     MarketSourceManager,
     ProviderProbe,
+    QuoteServiceTier,
     SourceAccessModel,
     SourceCapability,
     SourceRegistration,
@@ -89,6 +90,30 @@ def registration(source_id, priority, provider):
 
 
 class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exposes_quote_service_tier_as_source_metadata(self) -> None:
+        manager = MarketSourceManager(
+            (
+                SourceRegistration(
+                    source_id="fast",
+                    display_name="fast",
+                    description="change-driven stream",
+                    capabilities=frozenset({SourceCapability.QUOTE}),
+                    default_enabled=True,
+                    default_priority=10,
+                    delayed=False,
+                    requires_running_app=False,
+                    quote_streaming=True,
+                    quote_service_tier=QuoteServiceTier.ENHANCED,
+                    quote_provider=FakeProvider("fast", "4242"),
+                ),
+            ),
+            store=MemoryStore(),
+        )
+
+        sources = await manager.list_sources()
+
+        self.assertEqual(sources[0].quote_service_tier, QuoteServiceTier.ENHANCED)
+
     async def test_explicit_candle_source_failure_does_not_call_free_source(self) -> None:
         free = FakeProvider("free", "4242")
         metered = FakeProvider("metered")

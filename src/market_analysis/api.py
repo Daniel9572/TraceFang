@@ -22,6 +22,7 @@ from market_analysis.application.realtime import QuoteStreamCoordinator
 from market_analysis.application.sources import (
     MarketSourceManager,
     ProviderProbe,
+    QuoteServiceTier,
     SourceAccessModel,
     SourceCapability,
     SourceQuota,
@@ -239,6 +240,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             structured=True,
             quote_poll_interval_seconds=60,
             quote_streaming=False,
+            quote_service_tier=QuoteServiceTier.REFERENCE,
             access_model=SourceAccessModel.LIMITED,
             access_note=(
                 "每个用户、每个工具每天最多调用 "
@@ -256,7 +258,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             source_id="jin10_local",
             display_name="金十桌面会话行情",
             description=(
-                "使用本机金十客户端登录会话，直连并解码鉴权结构化行情。首次需在金十软件登录。"
+                "使用本机金十客户端登录会话。直连并解码鉴权结构化行情。首次需在金十软件登录。"
                 "建立会话后无需保持软件窗口运行。"
             ),
             capabilities=frozenset(
@@ -273,6 +275,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             structured=True,
             quote_poll_interval_seconds=0,
             quote_streaming=True,
+            quote_service_tier=QuoteServiceTier.STANDARD,
             quote_provider=local_provider,
             candle_provider=local_provider,
             probe=probe_local_provider if local_provider is not None else None,
@@ -294,8 +297,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             structured=True,
             quote_poll_interval_seconds=0,
             quote_streaming=True,
+            quote_service_tier=QuoteServiceTier.ENHANCED,
             access_model=SourceAccessModel.UNMETERED,
-            access_note="官网公开通道，无登录鉴权和调用次数额度。接口升级时需要重新验证协议。",
+            access_note="官网公开通道。无登录鉴权和调用次数额度。接口升级时需要重新验证协议。",
             quote_provider=web_provider,
             probe=probe_web_provider if web_provider is not None else None,
             setup_error=web_setup_error,

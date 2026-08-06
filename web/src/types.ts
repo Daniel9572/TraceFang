@@ -1,5 +1,6 @@
 export type SourceId = "jin10_mcp" | "jin10_local" | "jin10_web";
 export type SourceAccessModel = "unmetered" | "limited" | "metered";
+export type QuoteServiceTier = "institutional" | "enhanced" | "standard" | "reference";
 
 export interface SourceQuota {
   key: string;
@@ -73,6 +74,7 @@ export interface SourceDescriptor {
   structured: boolean;
   quote_poll_interval_seconds: number;
   quote_streaming: boolean;
+  quote_service_tier: QuoteServiceTier;
   access_model: SourceAccessModel;
   access_note: string | null;
   manual_connection_required: boolean;

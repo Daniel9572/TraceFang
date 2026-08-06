@@ -23,8 +23,7 @@ import { appendTimelineSample, buildChartBars } from "./chartModel";
 import { chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
-import { SourceDrawer, type SourceTestFeedback } from "./SourceDrawer";
-import { SourcePicker } from "./SourcePicker";
+import { SourcePicker, type SourceTestFeedback } from "./SourcePicker";
 import type {
   Candle,
   HoverCandle,
@@ -119,7 +118,7 @@ export default function App() {
   const [timelineSamples, setTimelineSamples] = useState<TimelineSample[]>([]);
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
   const [watchOpen, setWatchOpen] = useState(true);
   const [watchPinned, setWatchPinned] = useState(true);
   const [periodId, setPeriodId] = useState<ChartPeriodId>("1m");
@@ -149,6 +148,7 @@ export default function App() {
   const selectedSourceReady = Boolean(
     sourcesLoaded
     && selectedSourceDescriptor
+    && selectedSourceDescriptor.enabled
     && (!selectedSourceDescriptor.manual_connection_required || selectedSourceDescriptor.connection_active),
   );
 
@@ -266,7 +266,9 @@ export default function App() {
 
     if (!selectedSourceReady) {
       setQuoteStreamState("unavailable");
-      setQuoteError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在行情源管理中点击连接并测试`);
+      setQuoteError(selectedSourceDescriptor && !selectedSourceDescriptor.enabled
+        ? `${selectedSourceDescriptor.display_name}已停用，请在实时来源菜单中重新启用`
+        : `${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在实时来源菜单中点击连接并测试`);
       setLoadingQuote(false);
       return;
     }
@@ -359,11 +361,11 @@ export default function App() {
   }, [refreshCandles]);
 
   useEffect(() => {
-    if (!drawerOpen) return;
+    if (!sourceMenuOpen) return;
     void refreshSourceSnapshot();
     const timer = window.setInterval(() => void refreshSourceSnapshot(), 5_000);
     return () => window.clearInterval(timer);
-  }, [drawerOpen, refreshSourceSnapshot]);
+  }, [refreshSourceSnapshot, sourceMenuOpen]);
 
   useEffect(() => {
     const hasActiveLimitedSource = sources.some(
@@ -399,6 +401,9 @@ export default function App() {
     try {
       await marketApi.updateSource(source.source_id, update);
       await loadSources();
+      if (update.enabled !== undefined) {
+        setTestMessage(`${source.display_name}已${update.enabled ? "启用" : "停用"}`);
+      }
     } catch (error) {
       setTestMessage(`更新失败：${translateError(error)}`);
     } finally {
@@ -451,6 +456,14 @@ export default function App() {
       setTestingSourceId(null);
     }
   };
+
+  const handleSourceMenuOpenChange = useCallback((next: boolean) => {
+    setSourceMenuOpen(next);
+    if (!next) {
+      setTestMessage(null);
+      setSourceTestResults({});
+    }
+  }, []);
 
   const livePrice = numeric(quote?.last);
   const quoteObservedAt = quote?.source.observed_at ?? null;
@@ -652,12 +665,16 @@ export default function App() {
             selectedSource={selectedSource}
             fallbackLabel={sourceLabels[selectedSource]}
             busy={sourceBusy}
+            contractCode={selectedCode}
             connectionState={quoteStreamState}
             connectionError={quoteError}
-            quoteObservedAt={quoteProvider === selectedSource ? quote?.source.observed_at ?? null : null}
-            quoteReceivedAt={quoteProvider === selectedSource ? quote?.source.received_at ?? null : null}
+            testingSourceId={testingSourceId}
+            testResults={sourceTestResults}
+            notice={testMessage}
             onSelect={preferSource}
-            onManage={() => setDrawerOpen(true)}
+            onToggle={(source) => void updateSource(source, { enabled: !source.enabled })}
+            onTest={(source) => void testSource(source)}
+            onOpenChange={handleSourceMenuOpenChange}
           />
           <button type="button" className="draw-button"><Activity size={15} />画线</button>
         </div>
@@ -692,7 +709,7 @@ export default function App() {
                 <span>
                   {quoteError
                     ? quoteError
-                    : `${sourceLabels[quoteProvider ?? selectedSource]} · ${quote ? new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}`}
+                    : `${sourceById.get(quoteProvider ?? selectedSource)?.display_name ?? sourceLabels[quoteProvider ?? selectedSource]} · ${quote ? new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}`}
                 </span>
               </div>
             </div>
@@ -732,24 +749,6 @@ export default function App() {
         </section>
       </main>
 
-      <SourceDrawer
-        open={drawerOpen}
-        sources={sources}
-        busy={sourceBusy}
-        notice={testMessage}
-        contractCode={selectedCode}
-        selectedSource={selectedSource}
-        testingSourceId={testingSourceId}
-        testResults={sourceTestResults}
-        onClose={() => {
-          setDrawerOpen(false);
-          setTestMessage(null);
-          setSourceTestResults({});
-        }}
-        onToggle={(source) => void updateSource(source, { enabled: !source.enabled })}
-        onPrefer={(source) => void preferSource(source)}
-        onTest={(source) => void testSource(source)}
-      />
     </div>
   );
 }
