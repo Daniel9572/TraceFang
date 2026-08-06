@@ -8,7 +8,11 @@ import {
   Gauge,
   Maximize2,
   Newspaper,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRightOpen,
+  Pin,
+  PinOff,
   RefreshCw,
   Search,
   Settings2,
@@ -100,7 +104,9 @@ function LiveClock() {
     return () => window.clearInterval(timer);
   }, []);
 
-  return new Date(now).toLocaleString("zh-CN", { hour12: false });
+  const current = new Date(now);
+  const pad = (value: number) => value.toString().padStart(2, "0");
+  return `${pad(current.getMonth() + 1)}/${pad(current.getDate())} ${pad(current.getHours())}:${pad(current.getMinutes())}:${pad(current.getSeconds())}`;
 }
 
 export default function App() {
@@ -112,6 +118,8 @@ export default function App() {
   const [candles, setCandles] = useState<Candle[]>([]);
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [watchOpen, setWatchOpen] = useState(true);
+  const [watchPinned, setWatchPinned] = useState(true);
   const [intervalMinutes, setIntervalMinutes] = useState(1);
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
@@ -274,62 +282,76 @@ export default function App() {
   const quoteProvider = quote?.source.provider as SourceId | undefined;
 
   return (
-    <div className="terminal-shell">
-      <nav className="rail" aria-label="主功能">
-        <div className="brand-mark" title="Market Pulse">
-          <span>M</span>
-          <small>LAB</small>
-        </div>
-        <div className="rail-tools">
-          <button type="button" title="市场概览"><Gauge size={22} /></button>
-          <button type="button" title="策略观察"><Waypoints size={22} /></button>
-          <button type="button" className="is-active" title="行情图表"><CandlestickChart size={22} /></button>
-          <button type="button" title="资讯"><Newspaper size={22} /></button>
-          <button type="button" title="数据源" onClick={() => setDrawerOpen(true)}><Database size={22} /></button>
-        </div>
-        <div className="rail-bottom">
-          <button type="button" title="帮助"><CircleHelp size={20} /></button>
-          <div className="avatar">D</div>
-        </div>
-      </nav>
-
-      <aside className="watch-panel">
-        <header className="watch-head">
+    <div className={`terminal-shell ${watchOpen && watchPinned ? "is-watch-docked" : ""}`}>
+      <header className="top-command-bar">
+        <div className="top-brand" title="Market Pulse">
+          <div className="top-brand-mark"><span>M</span></div>
           <div>
-            <p className="eyebrow">MARKET WATCH</p>
-            <h1>行情</h1>
+            <small>MARKET WATCH</small>
+            <strong>行情</strong>
           </div>
-          <button type="button" className="icon-button" title="搜索品种"><Search size={18} /></button>
-        </header>
-        <div className="market-tabs">
-          <button type="button">自选</button>
-          <button type="button">外汇</button>
-          <button type="button" className="is-active">贵金属</button>
-          <button type="button">能源</button>
         </div>
+        <nav className="top-tool-icons" aria-label="主功能">
+          <button type="button" title="市场概览"><Gauge size={18} /></button>
+          <button type="button" title="策略观察"><Waypoints size={18} /></button>
+          <button type="button" className="is-active" title="行情图表"><CandlestickChart size={18} /></button>
+          <button type="button" title="资讯"><Newspaper size={18} /></button>
+          <button type="button" title="数据源" onClick={() => setDrawerOpen(true)}><Database size={18} /></button>
+        </nav>
+        <div className="content-tabs">
+          <button type="button" className="is-active">图表</button>
+          <button type="button">快讯</button>
+          <button type="button">头条</button>
+          <button type="button">研报</button>
+          <button type="button">指标库</button>
+          <button type="button" className="accent"><Sparkles size={14} />分析器</button>
+        </div>
+        <div className="utility-cluster">
+          <div className="search-box"><Search size={16} /><span>搜索品种、资讯或指标</span></div>
+          <div className="utility-actions">
+            <button type="button" title="提醒"><Bell size={17} /></button>
+            <button type="button" title="全屏"><Maximize2 size={17} /></button>
+            <button type="button" title="帮助"><CircleHelp size={17} /></button>
+          </div>
+          <div className="avatar" title="当前用户">D</div>
+        </div>
+      </header>
 
-        <div className="quote-tiles">
-          {instruments.slice(0, 2).map((item) => {
-            const itemQuote = watchQuotes[item.provider_code];
-            const direction = trendClass(itemQuote ?? null);
-            return (
-              <button
-                type="button"
-                key={item.provider_code}
-                className={`${direction} ${selectedCode === item.provider_code ? "is-selected" : ""}`}
-                onClick={() => setSelectedCode(item.provider_code)}
-              >
-                <span>{item.name}</span>
-                <strong>{formatPrice(itemQuote?.last, item.provider_code)}</strong>
-                <small>{formatSigned(itemQuote?.change_percent)}%</small>
-              </button>
-            );
-          })}
+      <aside
+        className={`watch-panel ${watchOpen ? "is-open" : "is-collapsed"} ${watchPinned ? "is-pinned" : "is-floating"}`}
+        aria-label="行情列表"
+        aria-hidden={!watchOpen}
+      >
+        <div className="market-tabs">
+          <div className="market-tab-list">
+            <button type="button">自选</button>
+            <button type="button">外汇</button>
+            <button type="button" className="is-active">贵金属</button>
+            <button type="button">能源</button>
+          </div>
+          <div className="watch-panel-actions">
+            <button
+              type="button"
+              className={watchPinned ? "is-active" : ""}
+              title={watchPinned ? "取消固定，改为悬浮侧栏" : "固定侧栏"}
+              aria-pressed={watchPinned}
+              onClick={() => setWatchPinned((current) => !current)}
+            >
+              {watchPinned ? <Pin size={14} /> : <PinOff size={14} />}
+            </button>
+            <button type="button" title="收起行情列表" onClick={() => setWatchOpen(false)}>
+              <PanelLeftClose size={15} />
+            </button>
+          </div>
         </div>
 
         <div className="watch-section-title">
           <div><ChevronDown size={15} /><strong>贵金属</strong></div>
           <span>实时观察</span>
+        </div>
+        <div className="watch-list-head" aria-hidden="true">
+          <span>名称 / 代码</span>
+          <span>现价 / 涨跌</span>
         </div>
         <div className="instrument-list">
           {instruments.map((item) => {
@@ -365,75 +387,20 @@ export default function App() {
         </button>
       </aside>
 
+      {!watchOpen ? (
+        <button
+          type="button"
+          className="watch-reveal-button"
+          title={watchPinned ? "展开并固定行情列表" : "展开悬浮行情列表"}
+          aria-label="展开行情列表"
+          onClick={() => setWatchOpen(true)}
+        >
+          <PanelLeftOpen size={16} />
+          <span>行情</span>
+        </button>
+      ) : null}
+
       <main className="market-main">
-        <div className="utility-bar">
-          <div className="content-tabs">
-            <button type="button" className="is-active">图表</button>
-            <button type="button">快讯</button>
-            <button type="button">头条</button>
-            <button type="button">研报</button>
-            <button type="button">指标库</button>
-            <button type="button" className="accent"><Sparkles size={14} />分析器</button>
-          </div>
-          <div className="utility-cluster">
-            <div className="search-box"><Search size={16} /><span>搜索品种、资讯或指标</span></div>
-            <div className="utility-actions">
-              <button type="button" title="提醒"><Bell size={17} /></button>
-              <button type="button" title="全屏"><Maximize2 size={17} /></button>
-            </div>
-          </div>
-        </div>
-
-        <header className="instrument-head">
-          <div className="instrument-summary">
-            <div className="instrument-identity">
-              <div>
-                <strong>{selectedInstrument.name}</strong>
-                <span>{selectedCode}</span>
-                <ChevronDown size={15} />
-                <span className="session-badge">交易中</span>
-              </div>
-              <small><LiveClock /></small>
-            </div>
-            <div className={`hero-price ${quoteTrend}`}>
-              <strong>{loadingQuote && !quote ? "读取中" : formatPrice(quote?.last, selectedCode)}</strong>
-              {numeric(quote?.change) === null ? null : (
-                <span>{(numeric(quote?.change) ?? 0) >= 0 ? "↑" : "↓"}</span>
-              )}
-              <small>{formatSigned(quote?.change_percent)}%</small>
-              <small>{formatSigned(quote?.change, digitsFor(selectedCode))}</small>
-            </div>
-          </div>
-          <div className="instrument-telemetry">
-            <dl className="daily-stats">
-              <div><dt>最高</dt><dd className="trend-up">{formatPrice(quote?.high, selectedCode)}</dd></div>
-              <div><dt>最低</dt><dd className="trend-down">{formatPrice(quote?.low, selectedCode)}</dd></div>
-              <div><dt>今开</dt><dd>{formatPrice(quote?.open, selectedCode)}</dd></div>
-              <div><dt>来源</dt><dd>{sourceLabels[quoteProvider ?? selectedSource]}</dd></div>
-            </dl>
-            <div className="freshness">
-              <span className={`status-dot ${quoteError ? "is-error" : ""}`} />
-              <div>
-                <strong>{quoteError ? "报价暂不可用" : "报价已连接"}</strong>
-                <span>{quoteError ?? (quote ? `采样 ${new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据")}</span>
-              </div>
-              <button type="button" className="icon-button" title="刷新报价" onClick={() => void loadQuote()}><RefreshCw size={16} className={loadingQuote ? "spin" : ""} /></button>
-            </div>
-            <div className="head-actions">
-              <label className="source-select">
-                <Database size={14} />
-                <span>报价源</span>
-                <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value as SourceId)}>
-                  <option value="auto">本地优先（自动回退）</option>
-                  <option value="jin10_desktop">本地金十软件</option>
-                  <option value="jin10_mcp">金十官方 MCP</option>
-                </select>
-              </label>
-              <button type="button" className="icon-button" title="来源设置" onClick={() => setDrawerOpen(true)}><Settings2 size={18} /></button>
-            </div>
-          </div>
-        </header>
-
         <div className="chart-toolbar">
           <div className="indicator-button"><span>指标</span><ChevronDown size={14} /></div>
           {[1, 5, 15, 30, 60].map((minutes) => (
@@ -444,18 +411,62 @@ export default function App() {
           <button type="button" disabled title="等待长周期历史数据源">4小时</button>
           <button type="button" disabled title="等待长周期历史数据源">日K</button>
           <div className="toolbar-spacer" />
-          <span className={`live-chart-state ${quoteError || livePrice === null ? "is-offline" : ""}`}>
+          <span
+            className={`live-chart-state ${quoteError || livePrice === null ? "is-offline" : ""}`}
+            title={quoteError ?? (quote ? `报价采样于 ${new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待报价")}
+          >
             <i />
-            {quoteError || livePrice === null
-              ? "当前柱等待报价"
-              : `当前柱实时更新 · ${quoteProvider === "jin10_desktop" ? "约5秒" : "约65秒"}`}
+            {quoteError || livePrice === null ? "等待报价" : "实时"}
           </span>
-          <span className="chart-source">K 线：金十官方 MCP · 最多 100 条分钟数据</span>
+          <label className="source-select toolbar-source-select">
+            <Database size={14} />
+            <span>报价源</span>
+            <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value as SourceId)}>
+              <option value="auto">本地优先（自动回退）</option>
+              <option value="jin10_desktop">本地金十软件</option>
+              <option value="jin10_mcp">金十官方 MCP</option>
+            </select>
+          </label>
+          <button type="button" className="toolbar-icon-button" title="刷新报价" onClick={() => void loadQuote()}><RefreshCw size={15} className={loadingQuote ? "spin" : ""} /></button>
           <button type="button" className="draw-button"><Activity size={15} />画线</button>
-          <button type="button" className="draw-button"><Settings2 size={15} />设置</button>
+          <button type="button" className="draw-button" onClick={() => setDrawerOpen(true)}><Settings2 size={15} />设置</button>
         </div>
 
         <section className="chart-area">
+          <div className="chart-context-overlay">
+            <div className="chart-context-primary">
+              <div className="chart-symbol">
+                <strong>{selectedInstrument.name}</strong>
+                <span>{selectedCode}</span>
+                <ChevronDown size={13} />
+                <span className="session-badge">交易中</span>
+                <small><LiveClock /></small>
+              </div>
+              <div className={`hero-price chart-hero-price ${quoteTrend}`}>
+                <strong>{loadingQuote && !quote ? "读取中" : formatPrice(quote?.last, selectedCode)}</strong>
+                {numeric(quote?.change) === null ? null : (
+                  <span>{(numeric(quote?.change) ?? 0) >= 0 ? "↑" : "↓"}</span>
+                )}
+                <small>{formatSigned(quote?.change_percent)}%</small>
+                <small>{formatSigned(quote?.change, digitsFor(selectedCode))}</small>
+              </div>
+            </div>
+            <div className="chart-context-secondary">
+              <dl className="chart-daily-stats">
+                <div><dt>最高</dt><dd className="trend-up">{formatPrice(quote?.high, selectedCode)}</dd></div>
+                <div><dt>最低</dt><dd className="trend-down">{formatPrice(quote?.low, selectedCode)}</dd></div>
+                <div><dt>今开</dt><dd>{formatPrice(quote?.open, selectedCode)}</dd></div>
+              </dl>
+              <div className="chart-freshness">
+                <span className={`status-dot ${quoteError ? "is-error" : ""}`} />
+                <span>
+                  {quoteError
+                    ? quoteError
+                    : `${sourceLabels[quoteProvider ?? selectedSource]} · ${quote ? new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}`}
+                </span>
+              </div>
+            </div>
+          </div>
           {displayBar ? (
             <div className="ohlc-overlay">
               <span>{new Date(displayBar.time * 1000).toLocaleString("zh-CN", { hour12: false })}</span>

@@ -88,7 +88,7 @@ export function MarketChart({
       rightPriceScale: {
         borderVisible: false,
         minimumWidth: 82,
-        scaleMargins: { top: 0.1, bottom: 0.1 },
+        scaleMargins: { top: 0.17, bottom: 0.08 },
       },
       timeScale: {
         borderVisible: false,
