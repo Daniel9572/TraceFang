@@ -93,12 +93,12 @@ class Jin10WebProvider:
             age = max(0.0, (now - newest.source.received_at).total_seconds())
             return True, "ready", f"高速结构化推送正常。最新帧距今 {age:.1f} 秒"
         if self._task is None:
-            return False, "closed", "金十网页行情长连接尚未启动"
+            return False, "closed", "金十官网高速行情长连接尚未启动"
         if self._task.done():
-            return False, "stopped", self._last_error or "金十网页行情任务已停止"
+            return False, "stopped", self._last_error or "金十官网高速行情任务已停止"
         if self._connected:
             return False, "waiting_quote", self._last_error or "已连接。正在等待首个行情帧"
-        return False, "reconnecting", self._last_error or "正在连接金十网页行情"
+        return False, "reconnecting", self._last_error or "正在连接金十官网高速行情"
 
     async def get_quote(self, instrument: Instrument) -> QuoteSnapshot:
         provider_code = self.symbol_mapper.to_provider_code(instrument)
@@ -122,7 +122,7 @@ class Jin10WebProvider:
             try:
                 await asyncio.wait_for(event.wait(), remaining)
             except TimeoutError as error:
-                detail = self._last_error or "等待金十网页结构化行情超时"
+                detail = self._last_error or "等待金十官网高速结构化行情超时"
                 raise ProviderUnavailableError(detail) from error
 
     def _fresh_quote(self, provider_code: str) -> QuoteSnapshot | None:
@@ -138,7 +138,7 @@ class Jin10WebProvider:
             self._connection_had_quote = False
             try:
                 await self._run_connection()
-                self._last_error = "金十网页行情服务器已关闭连接。正在重连"
+                self._last_error = "金十官网高速行情服务器已关闭连接。正在重连"
             except asyncio.CancelledError:
                 raise
             except Exception as error:

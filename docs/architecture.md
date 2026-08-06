@@ -19,7 +19,7 @@ flowchart LR
     S --> C["全局历史数据服务"]
     R --> JM["金十官方 MCP 适配器"]
     R --> JD["本地金十 WebSocket 适配器"]
-    R --> JW["金十网页高速适配器"]
+    R --> JW["金十官网高速适配器"]
     R --> O["未来其他数据源适配器"]
     JM --> M["通用 MCP 客户端"]
     M --> H["Streamable HTTP"]

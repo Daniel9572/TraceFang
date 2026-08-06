@@ -128,7 +128,7 @@ class Jin10LocalProvider:
             try:
                 await asyncio.wait_for(event.wait(), remaining)
             except TimeoutError as error:
-                detail = self._last_error or "等待金十本地结构化行情超时"
+                detail = self._last_error or "等待金十桌面会话结构化行情超时"
                 raise ProviderUnavailableError(detail) from error
 
     async def get_candles(

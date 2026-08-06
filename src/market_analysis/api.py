@@ -254,9 +254,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ),
         SourceRegistration(
             source_id="jin10_local",
-            display_name="金十本地行情",
+            display_name="金十桌面会话行情",
             description=(
-                "读取本机金十登录会话。直连并解码结构化行情推送。首次需在金十软件登录。"
+                "使用本机金十客户端登录会话，直连并解码鉴权结构化行情。首次需在金十软件登录。"
                 "建立会话后无需保持软件窗口运行。"
             ),
             capabilities=frozenset(
@@ -280,9 +280,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ),
         SourceRegistration(
             source_id="jin10_web",
-            display_name="金十极速行情",
+            display_name="金十官网高速行情",
             description=(
-                "金十官网公开的结构化行情推送。价格变化后即时到达。"
+                "金十官网公开、无需登录口令的结构化行情推送。价格变化后即时到达。"
                 "不消耗 MCP 额度。无需运行桌面客户端。"
             ),
             capabilities=frozenset({SourceCapability.QUOTE}),
@@ -295,7 +295,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             quote_poll_interval_seconds=0,
             quote_streaming=True,
             access_model=SourceAccessModel.UNMETERED,
-            access_note="公开网页通道。无调用次数额度。接口升级时需要重新验证协议。",
+            access_note="官网公开通道，无登录鉴权和调用次数额度。接口升级时需要重新验证协议。",
             quote_provider=web_provider,
             probe=probe_web_provider if web_provider is not None else None,
             setup_error=web_setup_error,

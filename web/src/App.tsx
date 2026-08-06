@@ -53,8 +53,8 @@ const defaultInstruments: InstrumentEntry[] = [
 
 const sourceLabels: Record<SourceId, string> = {
   jin10_mcp: "金十官方 MCP",
-  jin10_local: "金十本地行情",
-  jin10_web: "金十极速行情",
+  jin10_local: "金十桌面会话行情",
+  jin10_web: "金十官网高速行情",
 };
 
 const errorTranslations: Array<[RegExp, string]> = [
