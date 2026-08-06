@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { marketApi } from "./api";
+import { buildChartBars } from "./chartModel";
 import { MarketChart } from "./MarketChart";
 import { SourceDrawer } from "./SourceDrawer";
 import type {
@@ -89,6 +90,17 @@ function trendClass(quote: QuoteSnapshot | null): string {
   const change = numeric(quote?.change);
   if (change === null) return "trend-neutral";
   return change >= 0 ? "trend-up" : "trend-down";
+}
+
+function LiveClock() {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return new Date(now).toLocaleString("zh-CN", { hour12: false });
 }
 
 export default function App() {
@@ -168,7 +180,7 @@ export default function App() {
   }, [loadQuote, loadCandles]);
 
   useEffect(() => {
-    const delay = quote?.source.provider === "jin10_desktop" ? 5_000 : 90_000;
+    const delay = quote?.source.provider === "jin10_desktop" ? 5_000 : 65_000;
     const timer = window.setInterval(() => void loadQuote(), delay);
     return () => window.clearInterval(timer);
   }, [loadQuote, quote?.source.provider]);
@@ -248,18 +260,13 @@ export default function App() {
     }
   };
 
-  const displayBar = useMemo(() => {
-    if (hover) return hover;
-    const last = candles.at(-1);
-    if (!last) return null;
-    return {
-      time: Math.floor(new Date(last.open_time).getTime() / 1000),
-      open: Number(last.open),
-      high: Number(last.high),
-      low: Number(last.low),
-      close: Number(last.close),
-    };
-  }, [candles, hover]);
+  const livePrice = numeric(quote?.last);
+  const quoteObservedAt = quote?.source.observed_at ?? null;
+  const chartBars = useMemo(
+    () => buildChartBars(candles, intervalMinutes, livePrice, quoteObservedAt),
+    [candles, intervalMinutes, livePrice, quoteObservedAt],
+  );
+  const displayBar = hover ?? chartBars.at(-1) ?? null;
 
   const quoteTrend = trendClass(quote);
   const quoteProvider = quote?.source.provider as SourceId | undefined;
@@ -368,7 +375,7 @@ export default function App() {
         <header className="instrument-head">
           <div className="instrument-identity">
             <div><strong>{selectedInstrument.name}</strong><span>{selectedCode}</span><ChevronDown size={15} /></div>
-            <small>{new Date().toLocaleString("zh-CN", { hour12: false })}</small>
+            <small><LiveClock /></small>
             <span className="session-badge">交易中</span>
           </div>
           <div className="head-actions">
@@ -448,6 +455,12 @@ export default function App() {
           <button type="button" disabled title="等待长周期历史数据源">4小时</button>
           <button type="button" disabled title="等待长周期历史数据源">日K</button>
           <div className="toolbar-spacer" />
+          <span className={`live-chart-state ${quoteError || livePrice === null ? "is-offline" : ""}`}>
+            <i />
+            {quoteError || livePrice === null
+              ? "当前柱等待报价"
+              : `当前柱实时更新 · ${quoteProvider === "jin10_desktop" ? "约5秒" : "约65秒"}`}
+          </span>
           <span className="chart-source">K 线：金十官方 MCP · 最多 100 条分钟数据</span>
           <button type="button" className="draw-button"><Activity size={15} />画线</button>
           <button type="button" className="draw-button"><Settings2 size={15} />设置</button>
@@ -463,7 +476,14 @@ export default function App() {
               <span>收 <b>{formatPrice(displayBar.close, selectedCode)}</b></span>
             </div>
           ) : null}
-          <MarketChart candles={candles} intervalMinutes={intervalMinutes} onHover={setHover} />
+          <MarketChart
+            candles={candles}
+            intervalMinutes={intervalMinutes}
+            livePrice={livePrice}
+            observedAt={quoteObservedAt}
+            priceDigits={digitsFor(selectedCode)}
+            onHover={setHover}
+          />
           {loadingCandles && candles.length === 0 ? <div className="chart-state"><RefreshCw size={20} className="spin" /><strong>正在读取 K 线</strong></div> : null}
           {candleError ? <div className="chart-state is-error"><CircleHelp size={22} /><strong>K 线暂不可用</strong><span>{candleError}</span><button type="button" onClick={() => void loadCandles()}>重试</button></div> : null}
         </section>
