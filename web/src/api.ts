@@ -1,8 +1,8 @@
 import type {
   Candle,
   InstrumentEntry,
-  QuoteComparison,
   QuoteSnapshot,
+  SourceConnectionTest,
   SourceDescriptor,
   SourceId,
 } from "./types";
@@ -34,7 +34,8 @@ export const marketApi = {
   quote: (code: string, source: SourceId) =>
     request<QuoteSnapshot>(`/api/quotes/${code}?source=${encodeURIComponent(source)}`),
   candles: (code: string) => request<Candle[]>(`/api/candles/${code}?source=auto&count=100`),
-  compare: (code: string) => request<QuoteComparison>(`/api/quotes/${code}/compare`),
+  testSource: (sourceId: Exclude<SourceId, "auto">) =>
+    request<SourceConnectionTest>(`/api/sources/${sourceId}/test`, { method: "POST" }),
   updateSource: (
     sourceId: Exclude<SourceId, "auto">,
     update: { enabled?: boolean; priority?: number },

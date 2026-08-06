@@ -22,7 +22,7 @@ flowchart LR
 1. `domain`：品种、报价、K线、快讯、文章、财经事件和来源元数据。不得依赖网络库或提供方字段。
 2. `application`：按能力拆分的数据端口，以及按优先级切换提供方的服务。
 3. `infrastructure.mcp`：标准 MCP 生命周期、JSON-RPC、HTTP/SSE、会话和错误模型。
-4. `application.sources`：按能力、启用状态和优先级选择来源，支持强制来源和双源比较。
+4. `application.sources`：按能力、启用状态和优先级选择来源，支持本地优先、自动回退和强制来源。
 5. `infrastructure.providers.jin10`：代码映射、金十结构化结果校验与领域对象转换。
 6. `infrastructure.providers.jin10_desktop`：Windows 窗口发现、截图、OCR 和安全范围校验。
 7. `web`：只调用本地 API，不持有 Bearer Token，也不解析供应商原始响应。

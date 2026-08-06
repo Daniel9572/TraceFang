@@ -90,17 +90,16 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(quote.source.provider, "desktop")
         self.assertEqual(store.values["desktop"]["priority"], 5)
 
-    async def test_compare_preserves_individual_failures(self) -> None:
+    async def test_auto_prefers_the_lowest_priority_source(self) -> None:
         manager = MarketSourceManager(
             (
-                registration("official", 10, FakeProvider("official", "4242")),
-                registration("desktop", 20, FakeProvider("desktop")),
+                registration("official", 20, FakeProvider("official", "4242")),
+                registration("desktop", 10, FakeProvider("desktop", "4243")),
             ),
             store=MemoryStore(),
         )
-        results = await manager.compare_quotes(SPOT_GOLD)
-        self.assertIsNotNone(results[0].quote)
-        self.assertIsNotNone(results[1].error)
+        quote = await manager.get_quote(SPOT_GOLD)
+        self.assertEqual(quote.source.provider, "desktop")
 
 
 if __name__ == "__main__":

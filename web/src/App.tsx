@@ -12,7 +12,6 @@ import {
   RefreshCw,
   Search,
   Settings2,
-  SlidersHorizontal,
   Sparkles,
   Waypoints,
 } from "lucide-react";
@@ -21,12 +20,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { marketApi } from "./api";
 import { buildChartBars } from "./chartModel";
 import { MarketChart } from "./MarketChart";
-import { SourceDrawer } from "./SourceDrawer";
+import { SourceDrawer, type SourceTestFeedback } from "./SourceDrawer";
 import type {
   Candle,
   HoverCandle,
   InstrumentEntry,
-  QuoteComparison,
   QuoteSnapshot,
   SourceDescriptor,
   SourceId,
@@ -48,10 +46,12 @@ const defaultInstruments: InstrumentEntry[] = [
 ];
 
 const sourceLabels: Record<SourceId, string> = {
-  auto: "自动选择",
+  auto: "本地优先",
   jin10_mcp: "金十官方 MCP",
   jin10_desktop: "本地金十软件",
 };
+
+type ConcreteSourceId = Exclude<SourceId, "auto">;
 
 const errorTranslations: Array<[RegExp, string]> = [
   [/Jin10 desktop process is not running/i, "金十数据软件未运行"],
@@ -111,8 +111,6 @@ export default function App() {
   const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteSnapshot>>({});
   const [candles, setCandles] = useState<Candle[]>([]);
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
-  const [comparison, setComparison] = useState<QuoteComparison | null>(null);
-  const [compareOpen, setCompareOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [intervalMinutes, setIntervalMinutes] = useState(1);
   const [hover, setHover] = useState<HoverCandle | null>(null);
@@ -120,6 +118,10 @@ export default function App() {
   const [candleError, setCandleError] = useState<string | null>(null);
   const [sourceBusy, setSourceBusy] = useState(false);
   const [testMessage, setTestMessage] = useState<string | null>(null);
+  const [testingSourceId, setTestingSourceId] = useState<ConcreteSourceId | null>(null);
+  const [sourceTestResults, setSourceTestResults] = useState<
+    Partial<Record<ConcreteSourceId, SourceTestFeedback>>
+  >({});
   const [loadingQuote, setLoadingQuote] = useState(true);
   const [loadingCandles, setLoadingCandles] = useState(true);
 
@@ -174,7 +176,6 @@ export default function App() {
 
   useEffect(() => {
     setQuote(null);
-    setComparison(null);
     void loadQuote();
     void loadCandles();
   }, [loadQuote, loadCandles]);
@@ -200,20 +201,6 @@ export default function App() {
       }),
     );
   }, [instruments, selectedSource, watchQuotes]);
-
-  const loadComparison = useCallback(async () => {
-    setComparison(null);
-    try {
-      setComparison(await marketApi.compare(selectedCode));
-    } catch (error) {
-      setTestMessage(`双源比较失败：${translateError(error)}`);
-    }
-  }, [selectedCode]);
-
-  const toggleComparison = () => {
-    setCompareOpen((current) => !current);
-    if (!compareOpen) void loadComparison();
-  };
 
   const updateSource = async (
     source: SourceDescriptor,
@@ -249,14 +236,29 @@ export default function App() {
   };
 
   const testSource = async (source: SourceDescriptor) => {
-    setSourceBusy(true);
+    setTestingSourceId(source.source_id);
+    setSourceTestResults((current) => {
+      const next = { ...current };
+      delete next[source.source_id];
+      return next;
+    });
     try {
-      const value = await marketApi.quote("XAUUSD", source.source_id);
-      setTestMessage(`${source.display_name}：${formatPrice(value.last, "XAUUSD")}，测试成功`);
+      const value = await marketApi.testSource(source.source_id);
+      const observedAt = new Date(value.observed_at).toLocaleTimeString("zh-CN", { hour12: false });
+      setSourceTestResults((current) => ({
+        ...current,
+        [source.source_id]: {
+          tone: "success",
+          message: `连接成功 · 黄金 ${formatPrice(value.last, "XAUUSD")} · ${value.latency_ms}ms · ${observedAt}`,
+        },
+      }));
     } catch (error) {
-      setTestMessage(`${source.display_name}：${translateError(error)}`);
+      setSourceTestResults((current) => ({
+        ...current,
+        [source.source_id]: { tone: "error", message: translateError(error) },
+      }));
     } finally {
-      setSourceBusy(false);
+      setTestingSourceId(null);
     }
   };
 
@@ -365,85 +367,72 @@ export default function App() {
 
       <main className="market-main">
         <div className="utility-bar">
-          <div className="search-box"><Search size={16} /><span>搜索品种、资讯或指标</span></div>
-          <div className="utility-actions">
-            <button type="button" title="提醒"><Bell size={17} /></button>
-            <button type="button" title="全屏"><Maximize2 size={17} /></button>
+          <div className="content-tabs">
+            <button type="button" className="is-active">图表</button>
+            <button type="button">快讯</button>
+            <button type="button">头条</button>
+            <button type="button">研报</button>
+            <button type="button">指标库</button>
+            <button type="button" className="accent"><Sparkles size={14} />分析器</button>
+          </div>
+          <div className="utility-cluster">
+            <div className="search-box"><Search size={16} /><span>搜索品种、资讯或指标</span></div>
+            <div className="utility-actions">
+              <button type="button" title="提醒"><Bell size={17} /></button>
+              <button type="button" title="全屏"><Maximize2 size={17} /></button>
+            </div>
           </div>
         </div>
 
         <header className="instrument-head">
-          <div className="instrument-identity">
-            <div><strong>{selectedInstrument.name}</strong><span>{selectedCode}</span><ChevronDown size={15} /></div>
-            <small><LiveClock /></small>
-            <span className="session-badge">交易中</span>
+          <div className="instrument-summary">
+            <div className="instrument-identity">
+              <div>
+                <strong>{selectedInstrument.name}</strong>
+                <span>{selectedCode}</span>
+                <ChevronDown size={15} />
+                <span className="session-badge">交易中</span>
+              </div>
+              <small><LiveClock /></small>
+            </div>
+            <div className={`hero-price ${quoteTrend}`}>
+              <strong>{loadingQuote && !quote ? "读取中" : formatPrice(quote?.last, selectedCode)}</strong>
+              {numeric(quote?.change) === null ? null : (
+                <span>{(numeric(quote?.change) ?? 0) >= 0 ? "↑" : "↓"}</span>
+              )}
+              <small>{formatSigned(quote?.change_percent)}%</small>
+              <small>{formatSigned(quote?.change, digitsFor(selectedCode))}</small>
+            </div>
           </div>
-          <div className="head-actions">
-            <label className="source-select">
-              <Database size={14} />
-              <span>报价源</span>
-              <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value as SourceId)}>
-                <option value="auto">自动选择</option>
-                <option value="jin10_mcp">金十官方 MCP</option>
-                <option value="jin10_desktop">本地金十软件</option>
-              </select>
-            </label>
-            <button type="button" className={`compare-button ${compareOpen ? "is-active" : ""}`} onClick={toggleComparison}>
-              <SlidersHorizontal size={15} />双源对比
-            </button>
-            <button type="button" className="icon-button" title="来源设置" onClick={() => setDrawerOpen(true)}><Settings2 size={18} /></button>
+          <div className="instrument-telemetry">
+            <dl className="daily-stats">
+              <div><dt>最高</dt><dd className="trend-up">{formatPrice(quote?.high, selectedCode)}</dd></div>
+              <div><dt>最低</dt><dd className="trend-down">{formatPrice(quote?.low, selectedCode)}</dd></div>
+              <div><dt>今开</dt><dd>{formatPrice(quote?.open, selectedCode)}</dd></div>
+              <div><dt>来源</dt><dd>{sourceLabels[quoteProvider ?? selectedSource]}</dd></div>
+            </dl>
+            <div className="freshness">
+              <span className={`status-dot ${quoteError ? "is-error" : ""}`} />
+              <div>
+                <strong>{quoteError ? "报价暂不可用" : "报价已连接"}</strong>
+                <span>{quoteError ?? (quote ? `采样 ${new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据")}</span>
+              </div>
+              <button type="button" className="icon-button" title="刷新报价" onClick={() => void loadQuote()}><RefreshCw size={16} className={loadingQuote ? "spin" : ""} /></button>
+            </div>
+            <div className="head-actions">
+              <label className="source-select">
+                <Database size={14} />
+                <span>报价源</span>
+                <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value as SourceId)}>
+                  <option value="auto">本地优先（自动回退）</option>
+                  <option value="jin10_desktop">本地金十软件</option>
+                  <option value="jin10_mcp">金十官方 MCP</option>
+                </select>
+              </label>
+              <button type="button" className="icon-button" title="来源设置" onClick={() => setDrawerOpen(true)}><Settings2 size={18} /></button>
+            </div>
           </div>
         </header>
-
-        <div className="content-tabs">
-          <button type="button" className="is-active">图表</button>
-          <button type="button">快讯</button>
-          <button type="button">头条</button>
-          <button type="button">研报</button>
-          <button type="button">指标库</button>
-          <button type="button" className="accent"><Sparkles size={14} />分析器</button>
-        </div>
-
-        <section className="quote-strip">
-          <div className={`hero-price ${quoteTrend}`}>
-            <strong>{loadingQuote && !quote ? "读取中" : formatPrice(quote?.last, selectedCode)}</strong>
-            {numeric(quote?.change) === null ? null : (
-              <span>{(numeric(quote?.change) ?? 0) >= 0 ? "↑" : "↓"}</span>
-            )}
-            <small>{formatSigned(quote?.change_percent)}%</small>
-            <small>{formatSigned(quote?.change, digitsFor(selectedCode))}</small>
-          </div>
-          <dl className="daily-stats">
-            <div><dt>最高</dt><dd className="trend-up">{formatPrice(quote?.high, selectedCode)}</dd></div>
-            <div><dt>最低</dt><dd className="trend-down">{formatPrice(quote?.low, selectedCode)}</dd></div>
-            <div><dt>今开</dt><dd>{formatPrice(quote?.open, selectedCode)}</dd></div>
-            <div><dt>来源</dt><dd>{sourceLabels[quoteProvider ?? selectedSource]}</dd></div>
-          </dl>
-          <div className="freshness">
-            <span className={`status-dot ${quoteError ? "is-error" : ""}`} />
-            <div>
-              <strong>{quoteError ? "报价暂不可用" : "报价已连接"}</strong>
-              <span>{quoteError ?? (quote ? `采样 ${new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据")}</span>
-            </div>
-            <button type="button" className="icon-button" title="刷新报价" onClick={() => void loadQuote()}><RefreshCw size={16} className={loadingQuote ? "spin" : ""} /></button>
-          </div>
-        </section>
-
-        {compareOpen ? (
-          <section className="comparison-strip">
-            <div className="comparison-title"><Activity size={16} /><div><strong>双源实时对照</strong><span>官方 MCP 作为偏差基准；失败来源不会影响另一路结果</span></div></div>
-            <div className="comparison-items">
-              {comparison ? comparison.items.map((item) => (
-                <div className={`comparison-item ${item.error ? "has-error" : ""}`} key={item.source_id}>
-                  <span>{sourceLabels[item.source_id]}</span>
-                  <strong>{item.quote ? formatPrice(item.quote.last, selectedCode) : "不可用"}</strong>
-                  <small>{item.error ? translateError(item.error) : `偏差 ${formatSigned(item.deviation, digitsFor(selectedCode))} · ${item.request_latency_ms}ms`}</small>
-                </div>
-              )) : <div className="comparison-loading"><RefreshCw size={16} className="spin" />正在分别读取两套来源…</div>}
-            </div>
-            <button type="button" className="icon-button" title="重新比较" onClick={() => void loadComparison()}><RefreshCw size={15} /></button>
-          </section>
-        ) : null}
 
         <div className="chart-toolbar">
           <div className="indicator-button"><span>指标</span><ChevronDown size={14} /></div>
@@ -493,8 +482,14 @@ export default function App() {
         open={drawerOpen}
         sources={sources}
         busy={sourceBusy}
-        testMessage={testMessage}
-        onClose={() => { setDrawerOpen(false); setTestMessage(null); }}
+        notice={testMessage}
+        testingSourceId={testingSourceId}
+        testResults={sourceTestResults}
+        onClose={() => {
+          setDrawerOpen(false);
+          setTestMessage(null);
+          setSourceTestResults({});
+        }}
         onRefresh={() => void loadSources()}
         onToggle={(source) => void updateSource(source, { enabled: !source.enabled })}
         onPrefer={(source) => void preferSource(source)}

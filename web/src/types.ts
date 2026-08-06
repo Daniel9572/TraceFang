@@ -62,20 +62,12 @@ export interface SourceDescriptor {
   last_success_at: string | null;
 }
 
-export interface ComparisonItem {
+export interface SourceConnectionTest {
   source_id: Exclude<SourceId, "auto">;
-  quote: QuoteSnapshot | null;
-  error: string | null;
-  request_latency_ms: number;
-  sample_age_seconds: number | null;
-  deviation: number | string | null;
-  deviation_percent: number | string | null;
-}
-
-export interface QuoteComparison {
   code: string;
-  reference_source: string | null;
-  items: ComparisonItem[];
+  last: number | string;
+  observed_at: string;
+  latency_ms: number;
 }
 
 export interface HoverCandle {

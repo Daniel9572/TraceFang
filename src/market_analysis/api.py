@@ -5,8 +5,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import uvicorn
@@ -118,7 +118,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 }
             ),
             default_enabled=True,
-            default_priority=10,
+            default_priority=20,
             delayed=False,
             requires_running_app=False,
             quote_provider=mcp_provider,
@@ -131,7 +131,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             description="窗口截图与 Windows OCR。成本低、略有延迟。首版提供黄金和白银报价。",
             capabilities=frozenset({SourceCapability.QUOTE}),
             default_enabled=True,
-            default_priority=20,
+            default_priority=10,
             delayed=True,
             requires_running_app=True,
             quote_provider=desktop_provider,
@@ -159,7 +159,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=False,
-    allow_methods=["GET", "PATCH"],
+    allow_methods=["GET", "PATCH", "POST"],
     allow_headers=["*"],
 )
 
@@ -229,6 +229,22 @@ async def update_source(source_id: str, update: SourceUpdate) -> dict[str, Any]:
     return asdict(next(item for item in values if item.source_id == source_id))
 
 
+@app.post("/api/sources/{source_id}/test")
+async def test_source(source_id: str) -> dict[str, Any]:
+    started = perf_counter()
+    try:
+        value = await _manager().get_quote(SPOT_GOLD, source=source_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {
+        "source_id": source_id,
+        "code": "XAUUSD",
+        "last": value.last,
+        "observed_at": value.source.observed_at,
+        "latency_ms": max(1, round((perf_counter() - started) * 1000)),
+    }
+
+
 @app.get("/api/instruments")
 async def instruments() -> list[dict[str, Any]]:
     if runtime.mcp_provider is not None:
@@ -269,49 +285,6 @@ async def quote(
         loader=lambda: _manager().get_quote(instrument, source=source),
     )
     return asdict(value)
-
-
-@app.get("/api/quotes/{code}/compare")
-async def compare_quotes(code: str) -> dict[str, Any]:
-    normalized_code = code.upper()
-    instrument = runtime.mapper.from_provider_code(normalized_code)
-    results = await _manager().compare_quotes(instrument)
-    successful = [item for item in results if item.quote is not None]
-    reference = next(
-        (item.quote for item in successful if item.source_id == "jin10_mcp"),
-        successful[0].quote if successful else None,
-    )
-    now = datetime.now(UTC)
-    rows: list[dict[str, Any]] = []
-    for item in results:
-        deviation: Decimal | None = None
-        deviation_percent: Decimal | None = None
-        sample_age_seconds: float | None = None
-        if item.quote is not None:
-            sample_age_seconds = max(
-                0.0,
-                (now - item.quote.source.observed_at.astimezone(UTC)).total_seconds(),
-            )
-            if reference is not None:
-                deviation = item.quote.last - reference.last
-                if reference.last != 0:
-                    deviation_percent = deviation / reference.last * Decimal("100")
-        rows.append(
-            {
-                "source_id": item.source_id,
-                "quote": asdict(item.quote) if item.quote is not None else None,
-                "error": item.error,
-                "request_latency_ms": item.request_latency_ms,
-                "sample_age_seconds": sample_age_seconds,
-                "deviation": deviation,
-                "deviation_percent": deviation_percent,
-            }
-        )
-    return {
-        "code": normalized_code,
-        "reference_source": reference.source.provider if reference is not None else None,
-        "items": rows,
-    }
 
 
 @app.get("/api/candles/{code}")

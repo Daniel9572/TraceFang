@@ -4,17 +4,27 @@ import {
   CircleAlert,
   Database,
   MonitorUp,
+  PlugZap,
   RefreshCw,
   X,
 } from "lucide-react";
 
-import type { SourceDescriptor } from "./types";
+import type { SourceDescriptor, SourceId } from "./types";
+
+type ConcreteSourceId = Exclude<SourceId, "auto">;
+
+export interface SourceTestFeedback {
+  tone: "success" | "error";
+  message: string;
+}
 
 interface SourceDrawerProps {
   open: boolean;
   sources: SourceDescriptor[];
   busy: boolean;
-  testMessage: string | null;
+  notice: string | null;
+  testingSourceId: ConcreteSourceId | null;
+  testResults: Partial<Record<ConcreteSourceId, SourceTestFeedback>>;
   onClose: () => void;
   onRefresh: () => void;
   onToggle: (source: SourceDescriptor) => void;
@@ -42,7 +52,9 @@ export function SourceDrawer({
   open,
   sources,
   busy,
-  testMessage,
+  notice,
+  testingSourceId,
+  testResults,
   onClose,
   onRefresh,
   onToggle,
@@ -81,8 +93,10 @@ export function SourceDrawer({
           {sources.map((source, index) => {
             const SourceIcon = source.requires_running_app ? MonitorUp : Database;
             const healthy = source.health === "healthy";
+            const isTesting = testingSourceId === source.source_id;
+            const testResult = testResults[source.source_id];
             return (
-              <section className="source-card" key={source.source_id}>
+              <section className={`source-card ${index === 0 && source.enabled ? "is-primary" : ""}`} key={source.source_id}>
                 <div className="source-card-head">
                   <div className="source-icon">
                     <SourceIcon size={20} />
@@ -90,7 +104,7 @@ export function SourceDrawer({
                   <div className="source-title">
                     <div>
                       <h3>{source.display_name}</h3>
-                      {index === 0 && source.enabled ? <span className="primary-badge">自动优先</span> : null}
+                      {index === 0 && source.enabled ? <span className="primary-badge">默认报价</span> : null}
                     </div>
                     <span className={`health health-${source.health}`}>
                       {healthy ? <CheckCircle2 size={13} /> : <CircleAlert size={13} />}
@@ -138,24 +152,31 @@ export function SourceDrawer({
                     disabled={busy || !source.enabled || index === 0}
                   >
                     <ArrowUp size={14} />
-                    设为自动优先
+                    设为默认
                   </button>
                   <button
                     type="button"
-                    className="secondary-button"
+                    className="secondary-button test-connection-button"
                     onClick={() => onTest(source)}
-                    disabled={busy || !source.enabled}
+                    disabled={busy || testingSourceId !== null || !source.enabled}
                   >
-                    测试黄金报价
+                    {isTesting ? <RefreshCw size={14} className="spin" /> : <PlugZap size={14} />}
+                    {isTesting ? "测试中…" : "测试连接"}
                   </button>
                 </div>
+                {testResult ? (
+                  <div className={`connection-result is-${testResult.tone}`}>
+                    {testResult.tone === "success" ? <CheckCircle2 size={14} /> : <CircleAlert size={14} />}
+                    <span>{testResult.message}</span>
+                  </div>
+                ) : null}
               </section>
             );
           })}
         </div>
-        {testMessage ? <div className="test-toast">{testMessage}</div> : null}
+        {notice ? <div className="test-toast">{notice}</div> : null}
         <div className="drawer-note">
-          本地软件源不读取私有网络协议，也不从图形反推 K 线；首版仅识别观察列表中的黄金、白银报价。
+          默认按“本地软件 → 官方 MCP”回退。只有本地不可用、手动强制官方源或主动测试官方连接时，才会使用官方报价额度；K 线仍由官方 MCP 提供。
         </div>
       </aside>
     </>

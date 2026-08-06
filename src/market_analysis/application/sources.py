@@ -82,14 +82,6 @@ class SourceDescriptor:
     last_success_at: datetime | None
 
 
-@dataclass(frozen=True, slots=True)
-class QuoteComparisonItem:
-    source_id: str
-    quote: QuoteSnapshot | None
-    error: str | None
-    request_latency_ms: int
-
-
 @dataclass(slots=True)
 class _RuntimeState:
     health: SourceHealth = SourceHealth.UNKNOWN
@@ -260,29 +252,6 @@ class MarketSourceManager:
                 self._mark_success(registration.source_id)
                 return value
         raise ProviderChainExhaustedError("candle", failures)
-
-    async def compare_quotes(self, instrument: Instrument) -> tuple[QuoteComparisonItem, ...]:
-        registrations = self._candidates(SourceCapability.QUOTE, "auto")
-
-        async def load(registration: SourceRegistration) -> QuoteComparisonItem:
-            started = asyncio.get_running_loop().time()
-            try:
-                value = await self.get_quote(instrument, source=registration.source_id)
-            except ProviderError as error:
-                return QuoteComparisonItem(
-                    source_id=registration.source_id,
-                    quote=None,
-                    error=str(error),
-                    request_latency_ms=round((asyncio.get_running_loop().time() - started) * 1000),
-                )
-            return QuoteComparisonItem(
-                source_id=registration.source_id,
-                quote=value,
-                error=None,
-                request_latency_ms=round((asyncio.get_running_loop().time() - started) * 1000),
-            )
-
-        return tuple(await asyncio.gather(*(load(item) for item in registrations)))
 
     def _candidates(
         self, capability: SourceCapability, source: str
