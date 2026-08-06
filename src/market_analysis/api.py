@@ -311,6 +311,15 @@ async def candles(
     return [asdict(value) for value in values]
 
 
+@app.api_route(
+    "/api/{path:path}",
+    methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+async def missing_api(path: str) -> None:
+    raise HTTPException(status_code=404, detail=f"API route not found: /api/{path}")
+
+
 _web_dist = _repo_root / "web" / "dist"
 if _web_dist.exists():
     _assets = _web_dist / "assets"
