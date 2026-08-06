@@ -35,48 +35,24 @@ class FakeStore:
     def __init__(self, rows: tuple[Candle, ...] = ()) -> None:
         self.rows = rows
         self.saved: list[tuple[Candle, ...]] = []
-        self.loaded_sources: list[str] = []
+        self.loaded_priorities: list[tuple[str, ...]] = []
 
     async def load_candles(self, _instrument, **kwargs) -> tuple[Candle, ...]:
-        self.loaded_sources.append(kwargs["source_id"])
+        self.loaded_priorities.append(tuple(kwargs["source_priority"]))
         return self.rows[: kwargs["count"]]
 
     async def save_candles(self, rows) -> None:
         values = tuple(rows)
         self.saved.append(values)
-        self.rows = values
+        merged = {row.open_time: row for row in self.rows}
+        merged.update((row.open_time, row) for row in values)
+        self.rows = tuple(sorted(merged.values(), key=lambda row: row.open_time))
 
 
 class LocalCandleHistoryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_backfills_only_from_the_selected_source(self) -> None:
-        store = FakeStore()
-        calls: list[str] = []
-
-        async def fetch(_instrument, source, _start, _count):
-            calls.append(source)
-            return (candle(0, source=source),)
-
-        service = LocalCandleHistoryService(
-            store,
-            fetch_candles=fetch,
-            backfill_delay_seconds=0.01,
-        )
-        rows = await service.get_candles(
-            INSTRUMENT,
-            source_id="metered",
-            count=1,
-        )
-
-        self.assertEqual(rows, ())
-        self.assertEqual(calls, [])
-        await asyncio.sleep(0.05)
-        self.assertEqual(calls, ["metered"])
-        self.assertEqual(store.loaded_sources, ["metered"])
-        self.assertEqual(store.saved, [(candle(0, source="metered"),)])
-        await service.close()
-
-    async def test_complete_local_history_does_not_call_provider(self) -> None:
-        store = FakeStore((candle(0, source="jin10_local"),))
+    async def test_returns_global_local_history_before_background_work(self) -> None:
+        existing = (candle(0, source="jin10_mcp"),)
+        store = FakeStore(existing)
         calls: list[str] = []
 
         async def fetch(_instrument, source, _start, _count):
@@ -86,18 +62,90 @@ class LocalCandleHistoryTests(unittest.IsolatedAsyncioTestCase):
         service = LocalCandleHistoryService(
             store,
             fetch_candles=fetch,
+            source_priority=lambda: ("jin10_mcp", "jin10_local"),
+            quote_derived_sources=lambda: ("jin10_local",),
+            backfill_sources=lambda: ("jin10_local", "jin10_mcp"),
             backfill_delay_seconds=0,
         )
         rows = await service.get_candles(
             INSTRUMENT,
-            source_id="jin10_local",
             start=datetime(2026, 8, 6, 8, 0, tzinfo=UTC),
             count=1,
         )
         await asyncio.sleep(0)
 
-        self.assertEqual(rows, store.rows)
+        self.assertEqual(rows, existing)
         self.assertEqual(calls, [])
+        self.assertEqual(store.loaded_priorities, [("jin10_mcp", "jin10_local")])
+        await service.close()
+
+    async def test_backfill_uses_free_source_before_limited_source(self) -> None:
+        store = FakeStore()
+        calls: list[str] = []
+
+        async def fetch(_instrument, source, _start, _count):
+            calls.append(source)
+            minute = 0 if source == "free" else 1
+            return (candle(minute, source=source),)
+
+        service = LocalCandleHistoryService(
+            store,
+            fetch_candles=fetch,
+            source_priority=lambda: ("official", "free"),
+            quote_derived_sources=lambda: ("free",),
+            backfill_sources=lambda: ("free", "official"),
+            backfill_delay_seconds=0.01,
+        )
+        rows = await service.get_candles(
+            INSTRUMENT,
+            start=datetime(2026, 8, 6, 8, 0, tzinfo=UTC),
+            count=2,
+        )
+
+        self.assertEqual(rows, ())
+        self.assertEqual(calls, [])
+        await asyncio.sleep(0.05)
+        self.assertEqual(calls, ["free", "official"])
+        self.assertEqual(
+            store.saved,
+            [
+                (candle(0, source="free"),),
+                (candle(1, source="official"),),
+            ],
+        )
+        await service.close()
+
+    async def test_complete_free_backfill_does_not_spend_limited_source(self) -> None:
+        store = FakeStore()
+        calls: list[str] = []
+
+        async def fetch(_instrument, source, _start, _count):
+            calls.append(source)
+            if source == "free":
+                return (
+                    candle(0, source=source),
+                    candle(1, source=source),
+                )
+            return (candle(2, source=source),)
+
+        service = LocalCandleHistoryService(
+            store,
+            fetch_candles=fetch,
+            source_priority=lambda: ("official", "free"),
+            quote_derived_sources=lambda: ("free",),
+            backfill_sources=lambda: ("free", "official"),
+            backfill_delay_seconds=0,
+        )
+        rows = await service.get_candles(
+            INSTRUMENT,
+            start=datetime(2026, 8, 6, 8, 0, tzinfo=UTC),
+            count=2,
+        )
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(rows, ())
+        self.assertEqual(calls, ["free"])
+        self.assertEqual(store.rows, (candle(0, source="free"), candle(1, source="free")))
         await service.close()
 
 

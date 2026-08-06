@@ -43,9 +43,7 @@ export function SourcePicker({
   const manageRef = useRef<HTMLButtonElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const options = useMemo(
-    () => sources.filter(
-      (source) => source.capabilities.includes("quote") && source.capabilities.includes("candles"),
-    ),
+    () => sources.filter((source) => source.capabilities.includes("quote")),
     [sources],
   );
   const selected = options.find((source) => source.source_id === selectedSource)
@@ -230,7 +228,7 @@ export function SourcePicker({
           }}
         >
           <div className="source-picker-menu-head">
-            <strong>行情来源</strong>
+            <strong>实时来源</strong>
             <span>延迟 / 今日用量</span>
           </div>
           <div className="source-picker-options">
@@ -323,7 +321,7 @@ export function SourcePicker({
             }}
           >
             <SlidersHorizontal size={14} aria-hidden="true" />
-            <span><strong>管理行情源</strong><small>连接、额度与数据范围</small></span>
+            <span><strong>管理行情源</strong><small>实时连接、额度与历史补缺</small></span>
             <ChevronRight size={14} aria-hidden="true" />
           </button>
         </div>

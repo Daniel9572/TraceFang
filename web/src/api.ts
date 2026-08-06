@@ -58,19 +58,17 @@ export function mergeCandleRows(...pages: Candle[][]): Candle[] {
 
 function fetchCandles(
   code: string,
-  source: SourceId,
   options: CandleRequestOptions = {},
 ): Promise<Candle[]> {
   const params = new URLSearchParams({
-    source,
     count: String(options.count ?? HISTORY_PAGE_SIZE),
   });
   if (options.time !== undefined) params.set("time", String(options.time));
   return request<Candle[]>(`/api/candles/${encodeURIComponent(code)}?${params.toString()}`);
 }
 
-async function fetchCandleHistory(code: string, source: SourceId): Promise<Candle[]> {
-  const cacheKey = `${source}:${code}`;
+async function fetchCandleHistory(code: string): Promise<Candle[]> {
+  const cacheKey = code;
   const now = Date.now();
   const cached = candleHistoryCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.promise;
@@ -89,7 +87,7 @@ async function fetchCandleHistory(code: string, source: SourceId): Promise<Candl
     }
 
     const pages = await Promise.all(
-      requests.map((options) => fetchCandles(code, source, options)),
+      requests.map((options) => fetchCandles(code, options)),
     );
     return mergeCandleRows(...pages);
   })();

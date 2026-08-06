@@ -150,7 +150,6 @@ export default function App() {
     && selectedSourceDescriptor
     && (!selectedSourceDescriptor.manual_connection_required || selectedSourceDescriptor.connection_active),
   );
-  const selectedSourceSupportsCandles = selectedSourceDescriptor?.capabilities.includes("candles") ?? false;
 
   const loadSources = useCallback(async () => {
     setSourceBusy(true);
@@ -175,22 +174,10 @@ export default function App() {
 
   const loadCandles = useCallback(async () => {
     const requestId = ++candleRequestRef.current;
-    if (!selectedSourceReady) {
-      setCandles([]);
-      setLoadingCandles(false);
-      setCandleError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在行情源管理中点击连接并测试`);
-      return;
-    }
-    if (!selectedSourceSupportsCandles) {
-      setCandles([]);
-      setLoadingCandles(false);
-      setCandleError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}不提供 K 线数据，系统不会改用其他来源`);
-      return;
-    }
     setLoadingCandles(true);
     setCandles([]);
     try {
-      const recent = await marketApi.candles(selectedCode, selectedSource);
+      const recent = await marketApi.candles(selectedCode);
       if (requestId !== candleRequestRef.current) return;
       setCandles(recent);
       setCandleError(null);
@@ -200,12 +187,12 @@ export default function App() {
             await new Promise((resolve) => window.setTimeout(resolve, delay));
             if (requestId !== candleRequestRef.current) return;
             try {
-              const localRows = await marketApi.candles(selectedCode, selectedSource);
+              const localRows = await marketApi.candles(selectedCode);
               if (requestId !== candleRequestRef.current) return;
               setCandles((current) => mergeCandleRows(current, localRows));
               if (localRows.length >= 100) return;
             } catch {
-              // Backfill is optional; the live quote stream remains authoritative.
+              // A failed background fill never blocks local history or the live stream.
             }
           }
         })();
@@ -217,18 +204,17 @@ export default function App() {
     } finally {
       if (requestId === candleRequestRef.current) setLoadingCandles(false);
     }
-  }, [selectedCode, selectedSource, selectedSourceDescriptor?.display_name, selectedSourceReady, selectedSourceSupportsCandles]);
+  }, [selectedCode]);
 
   const refreshCandles = useCallback(async () => {
-    if (!selectedSourceReady || !selectedSourceSupportsCandles) return;
     try {
-      const recent = await marketApi.candles(selectedCode, selectedSource);
+      const recent = await marketApi.candles(selectedCode);
       setCandles((current) => mergeCandleRows(current, recent));
       setCandleError(null);
     } catch (error) {
       setCandleError(translateError(error));
     }
-  }, [selectedCode, selectedSource, selectedSourceReady, selectedSourceSupportsCandles]);
+  }, [selectedCode]);
 
   useEffect(() => {
     void marketApi
@@ -262,16 +248,8 @@ export default function App() {
   }, [instruments]);
 
   useEffect(() => {
-    if (!sourcesLoaded) return;
-    setQuote(null);
-    if (!selectedSourceReady) {
-      setCandles([]);
-      setLoadingCandles(false);
-      setCandleError(`${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在行情源管理中点击连接并测试`);
-      return;
-    }
     void loadCandles();
-  }, [loadCandles, selectedSourceDescriptor?.display_name, selectedSourceReady, sourcesLoaded]);
+  }, [loadCandles]);
 
   useEffect(() => {
     if (!instrumentSourcesLoaded || !sourcesLoaded) return;
@@ -346,7 +324,6 @@ export default function App() {
   }, [selectedCode, selectedSource]);
 
   useEffect(() => {
-    if (!selectedSourceReady || !selectedSourceSupportsCandles) return;
     let disposed = false;
     let timer: number | null = null;
     const scheduleNextMinute = () => {
@@ -362,7 +339,7 @@ export default function App() {
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [refreshCandles, selectedSourceReady, selectedSourceSupportsCandles]);
+  }, [refreshCandles]);
 
   useEffect(() => {
     if (!drawerOpen) return;
@@ -422,7 +399,7 @@ export default function App() {
         delete next[selectedCode];
         return next;
       });
-      setTestMessage(`${selectedCode} 的全部行情已切换为 ${source.display_name}`);
+      setTestMessage(`${selectedCode} 的实时行情已切换为 ${source.display_name}`);
     } catch (error) {
       setTestMessage(`合约来源更新失败：${translateError(error)}`);
     } finally {

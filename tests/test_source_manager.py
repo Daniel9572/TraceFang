@@ -227,6 +227,53 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sources[0].connection_active)
         self.assertEqual(provider.calls, 0)
 
+    async def test_history_policy_is_global_free_first_and_never_auto_connects(self) -> None:
+        connector = FakeConnector()
+        manager = MarketSourceManager(
+            (
+                SourceRegistration(
+                    source_id="official",
+                    display_name="official",
+                    description="limited official history",
+                    capabilities=frozenset({SourceCapability.CANDLES}),
+                    default_enabled=True,
+                    default_priority=5,
+                    delayed=False,
+                    requires_running_app=False,
+                    history_priority=10,
+                    access_model=SourceAccessModel.LIMITED,
+                    manual_connection_required=True,
+                    connector=connector,
+                    candle_provider=FakeProvider("official", "4242"),
+                ),
+                SourceRegistration(
+                    source_id="free",
+                    display_name="free",
+                    description="unmetered history",
+                    capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
+                    default_enabled=True,
+                    default_priority=20,
+                    delayed=False,
+                    requires_running_app=False,
+                    history_priority=20,
+                    access_model=SourceAccessModel.UNMETERED,
+                    quote_streaming=True,
+                    candle_provider=FakeProvider("free", "4242"),
+                ),
+            ),
+            store=MemoryStore(),
+        )
+
+        self.assertEqual(manager.history_source_priority(), ("official", "free"))
+        self.assertEqual(manager.history_quote_derived_sources(), ("free",))
+        self.assertEqual(manager.history_backfill_sources(), ("free",))
+        self.assertEqual(connector.calls, 0)
+
+        await manager.connect_source("official")
+
+        self.assertEqual(manager.history_backfill_sources(), ("free", "official"))
+        self.assertEqual(connector.calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

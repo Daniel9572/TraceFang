@@ -83,6 +83,7 @@ class SourceRegistration:
     default_priority: int
     delayed: bool
     requires_running_app: bool
+    history_priority: int = 100
     structured: bool = True
     quote_poll_interval_seconds: float = 60.0
     quote_streaming: bool = False
@@ -364,6 +365,72 @@ class MarketSourceManager:
     def quote_is_streaming(self, source: str) -> bool:
         registration = self._selected(SourceCapability.QUOTE, source)
         return registration.quote_streaming
+
+    def history_source_priority(self) -> tuple[str, ...]:
+        """Returns the global canonical-history precedence, independent of live routes."""
+
+        registrations = (
+            item
+            for item in self._registrations.values()
+            if SourceCapability.CANDLES in item.capabilities
+        )
+        return tuple(
+            item.source_id
+            for item in sorted(
+                registrations,
+                key=lambda item: (item.history_priority, item.source_id),
+            )
+        )
+
+    def history_quote_derived_sources(self) -> tuple[str, ...]:
+        """Returns structured push feeds whose quote events can form minute OHLC rows."""
+
+        registrations = (
+            item
+            for item in self._registrations.values()
+            if SourceCapability.QUOTE in item.capabilities
+            and item.quote_streaming
+            and item.structured
+        )
+        return tuple(
+            item.source_id
+            for item in sorted(
+                registrations,
+                key=lambda item: (item.history_priority, item.source_id),
+            )
+        )
+
+    def history_backfill_sources(self) -> tuple[str, ...]:
+        """Returns usable history providers with free channels ahead of limited ones."""
+
+        access_rank = {
+            SourceAccessModel.UNMETERED: 0,
+            SourceAccessModel.LIMITED: 1,
+            SourceAccessModel.METERED: 2,
+        }
+        registrations = []
+        for source_id, registration in self._registrations.items():
+            if SourceCapability.CANDLES not in registration.capabilities:
+                continue
+            if not bool(self._configuration[source_id]["enabled"]):
+                continue
+            if registration.candle_provider is None or registration.setup_error:
+                continue
+            if (
+                registration.manual_connection_required
+                and not self._runtime[source_id].connection_active
+            ):
+                continue
+            registrations.append(registration)
+        registrations.sort(
+            key=lambda item: (
+                access_rank[item.access_model],
+                int(self._configuration[item.source_id]["priority"]),
+                item.history_priority,
+                item.source_id,
+            )
+        )
+        return tuple(item.source_id for item in registrations)
 
     def validate_source(self, capability: SourceCapability, source: str) -> None:
         self._selected(capability, source)

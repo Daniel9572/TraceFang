@@ -14,7 +14,8 @@ class LocalCandleStore(Protocol):
         self,
         instrument: Instrument,
         *,
-        source_id: str,
+        source_priority: Sequence[str],
+        quote_derived_sources: Sequence[str],
         interval: timedelta = timedelta(minutes=1),
         start: datetime | None = None,
         count: int = 100,
@@ -27,20 +28,28 @@ CandleFetcher = Callable[
     [Instrument, str, datetime | None, int],
     Awaitable[tuple[Candle, ...]],
 ]
+SourceList = Callable[[], Sequence[str]]
+
 
 class LocalCandleHistoryService:
-    """Serves persisted history and fills gaps from that same selected source."""
+    """Serves one global local history and fills missing rows off the request path."""
 
     def __init__(
         self,
         store: LocalCandleStore,
         *,
         fetch_candles: CandleFetcher,
+        source_priority: SourceList,
+        quote_derived_sources: SourceList,
+        backfill_sources: SourceList,
         backfill_delay_seconds: float = 0.05,
         retry_cooldown_seconds: float = 300.0,
     ) -> None:
         self._store = store
         self._fetch_candles = fetch_candles
+        self._source_priority = source_priority
+        self._quote_derived_sources = quote_derived_sources
+        self._backfill_sources = backfill_sources
         self._backfill_delay_seconds = backfill_delay_seconds
         self._retry_cooldown_seconds = retry_cooldown_seconds
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -50,20 +59,19 @@ class LocalCandleHistoryService:
         self,
         instrument: Instrument,
         *,
-        source_id: str,
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]:
         rows = await self._store.load_candles(
             instrument,
-            source_id=source_id,
+            source_priority=self._source_priority(),
+            quote_derived_sources=self._quote_derived_sources(),
             start=start,
             count=count,
         )
         if self._needs_backfill(rows, start=start, count=count):
             self._schedule_backfill(
                 instrument,
-                source_id=source_id,
                 start=start,
                 count=count,
             )
@@ -95,7 +103,6 @@ class LocalCandleHistoryService:
         self,
         instrument: Instrument,
         *,
-        source_id: str,
         start: datetime | None,
         count: int,
     ) -> None:
@@ -104,14 +111,13 @@ class LocalCandleHistoryService:
             if start is not None
             else int(datetime.now(UTC).replace(second=0, microsecond=0).timestamp())
         )
-        key = f"{instrument.symbol}:{source_id}:{interval_key}:{count}"
+        key = f"{instrument.symbol}:{interval_key}:{count}"
         if key in self._tasks or self._cooldown_until.get(key, 0.0) > monotonic():
             return
         task = asyncio.create_task(
             self._backfill(
                 key,
                 instrument,
-                source_id=source_id,
                 start=start,
                 count=count,
             ),
@@ -125,18 +131,27 @@ class LocalCandleHistoryService:
         key: str,
         instrument: Instrument,
         *,
-        source_id: str,
         start: datetime | None,
         count: int,
     ) -> None:
         await asyncio.sleep(self._backfill_delay_seconds)
         try:
-            try:
-                rows = await self._fetch_candles(instrument, source_id, start, count)
-            except Exception:
-                rows = ()
-            if rows:
-                await self._store.save_candles(rows)
+            for source_id in self._backfill_sources():
+                current = await self._store.load_candles(
+                    instrument,
+                    source_priority=self._source_priority(),
+                    quote_derived_sources=self._quote_derived_sources(),
+                    start=start,
+                    count=count,
+                )
+                if not self._needs_backfill(current, start=start, count=count):
+                    break
+                try:
+                    rows = await self._fetch_candles(instrument, source_id, start, count)
+                except Exception:
+                    continue
+                if rows:
+                    await self._store.save_candles(rows)
         finally:
             self._cooldown_until[key] = monotonic() + self._retry_cooldown_seconds
 

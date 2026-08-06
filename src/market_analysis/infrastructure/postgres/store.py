@@ -96,42 +96,116 @@ ON CONFLICT (instrument_symbol, capability) DO UPDATE SET
     updated_at = now()
 """
 
-_SELECT_CANDLES_FROM = """
-SELECT
-    instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
-    observed_at, received_at, open, high, low, close, volume, raw_payload
-FROM (
-    SELECT DISTINCT ON (open_time)
+_SELECT_CANONICAL_CANDLES_FROM = """
+WITH persisted AS (
+    SELECT
         instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
         observed_at, received_at, open, high, low, close, volume, raw_payload,
-        CASE WHEN source_id = $3 THEN 0 ELSE 1 END AS source_rank
+        0 AS record_rank
     FROM candles
     WHERE instrument_symbol = $1
       AND interval_seconds = $2
-      AND source_id = ANY($4::text[])
       AND open_time >= $5
-    ORDER BY open_time ASC, source_rank ASC, received_at DESC
-) AS selected
+), quote_derived AS (
+    SELECT
+        instrument_symbol,
+        source_id,
+        (array_agg(provider_symbol ORDER BY observed_at, id))[1] AS provider_symbol,
+        60 AS interval_seconds,
+        date_trunc('minute', observed_at) AS open_time,
+        max(observed_at) AS observed_at,
+        max(received_at) AS received_at,
+        (array_agg(last ORDER BY observed_at, id))[1] AS open,
+        max(last) AS high,
+        min(last) AS low,
+        (array_agg(last ORDER BY observed_at DESC, id DESC))[1] AS close,
+        NULL::numeric AS volume,
+        jsonb_build_object('derived_from', 'persisted_quote_events') AS raw_payload,
+        1 AS record_rank
+    FROM quote_events
+    WHERE instrument_symbol = $1
+      AND $2 = 60
+      AND source_id = ANY($4::text[])
+      AND observed_at >= $5
+      AND observed_at < $6
+    GROUP BY instrument_symbol, source_id, date_trunc('minute', observed_at)
+), selected AS (
+    SELECT DISTINCT ON (open_time)
+        instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
+        observed_at, received_at, open, high, low, close, volume, raw_payload
+    FROM (
+        SELECT * FROM persisted
+        UNION ALL
+        SELECT * FROM quote_derived
+    ) AS candidates
+    ORDER BY
+        open_time ASC,
+        COALESCE(array_position($3::text[], source_id), 2147483647) ASC,
+        record_rank ASC,
+        received_at DESC
+)
+SELECT
+    instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
+    observed_at, received_at, open, high, low, close, volume, raw_payload
+FROM selected
 ORDER BY open_time ASC
-LIMIT $6
+LIMIT $7
 """
 
-_SELECT_LATEST_CANDLES = """
-SELECT
-    instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
-    observed_at, received_at, open, high, low, close, volume, raw_payload
-FROM (
-    SELECT DISTINCT ON (open_time)
+_SELECT_CANONICAL_LATEST_CANDLES = """
+WITH persisted AS (
+    SELECT
         instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
         observed_at, received_at, open, high, low, close, volume, raw_payload,
-        CASE WHEN source_id = $3 THEN 0 ELSE 1 END AS source_rank
+        0 AS record_rank
     FROM candles
     WHERE instrument_symbol = $1
       AND interval_seconds = $2
+), quote_derived AS (
+    SELECT
+        instrument_symbol,
+        source_id,
+        (array_agg(provider_symbol ORDER BY observed_at, id))[1] AS provider_symbol,
+        60 AS interval_seconds,
+        date_trunc('minute', observed_at) AS open_time,
+        max(observed_at) AS observed_at,
+        max(received_at) AS received_at,
+        (array_agg(last ORDER BY observed_at, id))[1] AS open,
+        max(last) AS high,
+        min(last) AS low,
+        (array_agg(last ORDER BY observed_at DESC, id DESC))[1] AS close,
+        NULL::numeric AS volume,
+        jsonb_build_object('derived_from', 'persisted_quote_events') AS raw_payload,
+        1 AS record_rank
+    FROM quote_events
+    WHERE instrument_symbol = $1
+      AND $2 = 60
       AND source_id = ANY($4::text[])
-    ORDER BY open_time DESC, source_rank ASC, received_at DESC
-    LIMIT $5
-) AS selected
+      AND observed_at >= $5
+    GROUP BY instrument_symbol, source_id, date_trunc('minute', observed_at)
+), selected AS (
+    SELECT DISTINCT ON (open_time)
+        instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
+        observed_at, received_at, open, high, low, close, volume, raw_payload
+    FROM (
+        SELECT * FROM persisted
+        UNION ALL
+        SELECT * FROM quote_derived
+    ) AS candidates
+    ORDER BY
+        open_time DESC,
+        COALESCE(array_position($3::text[], source_id), 2147483647) ASC,
+        record_rank ASC,
+        received_at DESC
+), recent AS (
+    SELECT * FROM selected
+    ORDER BY open_time DESC
+    LIMIT $6
+)
+SELECT
+    instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
+    observed_at, received_at, open, high, low, close, volume, raw_payload
+FROM recent
 ORDER BY open_time ASC
 """
 
@@ -331,7 +405,8 @@ class PostgresMarketDataStore:
         self,
         instrument: Instrument,
         *,
-        source_id: str,
+        source_priority: Sequence[str],
+        quote_derived_sources: Sequence[str],
         interval: timedelta = timedelta(minutes=1),
         start: datetime | None = None,
         count: int = 100,
@@ -341,39 +416,36 @@ class PostgresMarketDataStore:
         interval_seconds = int(interval.total_seconds())
         if interval_seconds < 1:
             raise ValueError("interval must be positive")
-        source_ids = (source_id,)
+        if start is not None and (start.tzinfo is None or start.utcoffset() is None):
+            raise ValueError("start must be timezone-aware")
+        priority = tuple(source_priority)
+        derived_sources = tuple(quote_derived_sources)
         pool = self._require_pool()
         async with pool.acquire() as connection:
             if start is None:
+                quote_cutoff = datetime.now(UTC) - timedelta(minutes=max(7 * 24 * 60, count * 3))
                 rows = await connection.fetch(
-                    _SELECT_LATEST_CANDLES,
+                    _SELECT_CANONICAL_LATEST_CANDLES,
                     instrument.symbol,
                     interval_seconds,
-                    source_id,
-                    source_ids,
+                    priority,
+                    derived_sources,
+                    quote_cutoff,
                     count,
                 )
             else:
+                quote_end = start + timedelta(days=7)
                 rows = await connection.fetch(
-                    _SELECT_CANDLES_FROM,
+                    _SELECT_CANONICAL_CANDLES_FROM,
                     instrument.symbol,
                     interval_seconds,
-                    source_id,
-                    source_ids,
+                    priority,
+                    derived_sources,
                     start,
+                    quote_end,
                     count,
                 )
-        stored = tuple(_candle_from_row(row, instrument) for row in rows)
-        local = await self.load_quote_candles(
-            instrument,
-            source_id=source_id,
-            start=start,
-            count=count,
-        )
-        merged = {candle.open_time: candle for candle in local}
-        merged.update((candle.open_time, candle) for candle in stored)
-        ordered = tuple(sorted(merged.values(), key=lambda candle: candle.open_time))
-        return ordered[:count] if start is not None else ordered[-count:]
+        return tuple(_candle_from_row(row, instrument) for row in rows)
 
     async def get_instrument_source(self, instrument: Instrument) -> str | None:
         pool = self._require_pool()
@@ -392,12 +464,11 @@ class PostgresMarketDataStore:
         async with pool.acquire() as connection, connection.transaction():
             await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
             await connection.execute(_UPSERT_SOURCE, source_id)
-            await connection.executemany(
+            await connection.execute(
                 _UPSERT_SOURCE_ROUTE,
-                (
-                    (instrument.symbol, "quote", source_id),
-                    (instrument.symbol, "candles", source_id),
-                ),
+                instrument.symbol,
+                "quote",
+                source_id,
             )
 
     async def load_quote_candles(

@@ -82,11 +82,22 @@ export function SourceDrawer({
           <div>
             <p className="eyebrow">MARKET FEED</p>
             <h2>行情源管理</h2>
-            <p>正在配置 {contractCode} 的全部行情数据；其他品种保持各自设置。</p>
+            <p>正在配置 {contractCode} 的实时行情；其他品种保持各自设置。</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} title="关闭">
             <X size={19} />
           </button>
+        </div>
+
+        <div className="data-plane-grid">
+          <section>
+            <strong>实时数据</strong>
+            <span>{contractCode} 独立选择来源，驱动报价、当前柱、状态与延迟。</span>
+          </section>
+          <section>
+            <strong>历史数据</strong>
+            <span>全局统一读取本地库；缺口在后台优先用免费通道补齐。</span>
+          </section>
         </div>
 
         <div className="drawer-summary">
@@ -100,8 +111,7 @@ export function SourceDrawer({
             const isTesting = testingSourceId === source.source_id;
             const testResult = testResults[source.source_id];
             const healthLabel = awaitingConnection ? "待连接" : sourceHealthLabels[source.health];
-            const supportsFullMarketData = source.capabilities.includes("quote")
-              && source.capabilities.includes("candles");
+            const supportsRealtime = source.capabilities.includes("quote");
             return (
               <section className={`source-card ${selectedSource === source.source_id ? "is-primary" : ""}`} key={source.source_id}>
                 <div className="source-card-head">
@@ -114,7 +124,10 @@ export function SourceDrawer({
                           {sourceAccessLabels[source.access_model]}
                         </span>
                       ) : null}
-                      {selectedSource === source.source_id ? <span className="primary-badge">{contractCode} 全部行情</span> : null}
+                      {selectedSource === source.source_id ? <span className="primary-badge">{contractCode} 实时源</span> : null}
+                      {source.access_model === "unmetered" && source.capabilities.includes("candles") ? (
+                        <span className="history-fill-badge">历史补缺优先</span>
+                      ) : null}
                     </div>
                     <span className={`health health-${awaitingConnection ? "unknown" : source.health}`}>
                       <span className="health-dot" aria-hidden="true" />
@@ -192,11 +205,11 @@ export function SourceDrawer({
                     type="button"
                     className="secondary-button"
                     onClick={() => onPrefer(source)}
-                    disabled={busy || !source.enabled || awaitingConnection || !supportsFullMarketData || selectedSource === source.source_id}
-                    title={!supportsFullMarketData ? "该来源不能同时提供报价与 K 线" : undefined}
+                    disabled={busy || !source.enabled || awaitingConnection || !supportsRealtime || selectedSource === source.source_id}
+                    title={!supportsRealtime ? "该来源不提供实时报价" : undefined}
                   >
                     <ArrowUp size={14} />
-                    全部行情用于 {contractCode}
+                    设为 {contractCode} 实时源
                   </button>
                   <button
                     type="button"
@@ -224,7 +237,7 @@ export function SourceDrawer({
         </div>
         {notice ? <div className="test-toast">{notice}</div> : null}
         <div className="drawer-note">
-          每个品种只使用一个行情源：报价、K 线、分时与状态均来自当前选择。来源断开或缺少某类数据时会明确提示，不会静默切换或混用其他来源。
+          实时层不会静默换源：来源断开时只暂停该合约。历史层与实时层独立，页面只读 PostgreSQL 中的全局历史；后台补缺保留每根 K 线的真实来源，不用截图或推测数据。
         </div>
       </aside>
     </>

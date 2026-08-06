@@ -202,6 +202,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             default_priority=20,
             delayed=False,
             requires_running_app=False,
+            history_priority=10,
             structured=True,
             quote_poll_interval_seconds=60,
             quote_streaming=False,
@@ -235,6 +236,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             default_priority=10,
             delayed=False,
             requires_running_app=False,
+            history_priority=20,
             structured=True,
             quote_poll_interval_seconds=0,
             quote_streaming=True,
@@ -294,6 +296,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         runtime.candle_history = LocalCandleHistoryService(
             runtime.database_store,
             fetch_candles=fetch_backfill_candles,
+            source_priority=_manager().history_source_priority,
+            quote_derived_sources=_manager().history_quote_derived_sources,
+            backfill_sources=_manager().history_backfill_sources,
         )
 
     async def fetch_quote(instrument, source):
@@ -421,6 +426,9 @@ async def health() -> dict[str, Any]:
         "database": database,
         "history": {
             "mode": "postgres_local",
+            "source_priority": manager.history_source_priority(),
+            "quote_derived_sources": manager.history_quote_derived_sources(),
+            "backfill_sources": manager.history_backfill_sources(),
             "backfill_pending": (
                 runtime.candle_history.pending_count() if runtime.candle_history is not None else 0
             ),
@@ -509,8 +517,7 @@ async def _instrument_source(code: str) -> tuple[str, Any, str]:
     instrument = runtime.mapper.from_provider_code(normalized_code)
     store = _database_store()
     source_id = await store.get_instrument_source(instrument) or "jin10_local"
-    # Older releases persisted quote and candle routes independently. Healing both
-    # rows here makes the single-source invariant durable without destructive SQL.
+    # Only the real-time route is contract-specific. Historical candles are global.
     await store.set_instrument_source(instrument, source_id)
     return normalized_code, instrument, source_id
 
@@ -533,7 +540,6 @@ async def update_instrument_source(
     instrument = runtime.mapper.from_provider_code(normalized_code)
     try:
         _manager().validate_source(SourceCapability.QUOTE, update.source_id)
-        _manager().validate_source(SourceCapability.CANDLES, update.source_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     await _database_store().set_instrument_source(instrument, update.source_id)
@@ -588,20 +594,18 @@ async def quote(
 @app.get("/api/candles/{code}")
 async def candles(
     code: str,
-    source: str = Query(min_length=1),
+    source: str | None = Query(default=None, deprecated=True),
     count: int = Query(default=100, ge=1, le=100),
     time: int | None = Query(default=None, description="Unix seconds"),
 ) -> list[dict[str, Any]]:
+    # `source` is accepted temporarily for older clients but intentionally ignored:
+    # all users and contracts read the same canonical history from PostgreSQL.
+    del source
     normalized_code = code.upper()
     instrument = runtime.mapper.from_provider_code(normalized_code)
     start = datetime.fromtimestamp(time, tz=UTC) if time else None
-    try:
-        _manager().validate_source(SourceCapability.CANDLES, source)
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
     values = await _candle_history().get_candles(
         instrument,
-        source_id=source,
         start=start,
         count=count,
     )
