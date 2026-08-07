@@ -6,6 +6,7 @@ from market_analysis.infrastructure.postgres.schema import SCHEMA_SQL
 from market_analysis.infrastructure.postgres.store import (
     _INSERT_QUOTE,
     _REMOVE_SOURCE_FROM_STANDARD_HISTORY,
+    _SELECT_INSTRUMENT_SOURCE,
     _SELECT_STANDARD_CANDLES_FROM,
     _SELECT_STANDARD_LATEST_CANDLES,
     _STANDARDIZE_CANDLES,
@@ -13,6 +14,18 @@ from market_analysis.infrastructure.postgres.store import (
 
 
 class QuoteEventPersistenceTests(unittest.TestCase):
+    def test_each_contract_has_one_logical_source_binding(self) -> None:
+        self.assertIn(
+            "DELETE FROM instrument_source_routes\nWHERE capability <> 'quote'",
+            SCHEMA_SQL,
+        )
+        self.assertIn(
+            "UNIQUE INDEX IF NOT EXISTS ux_instrument_source_routes_instrument",
+            SCHEMA_SQL,
+        )
+        self.assertIn("capability = 'quote'", _SELECT_INSTRUMENT_SOURCE)
+        self.assertNotIn("ORDER BY CASE capability", _SELECT_INSTRUMENT_SOURCE)
+
     def test_distinguishes_every_received_frame_inside_the_same_source_second(self) -> None:
         unique_key = "source_id, provider_symbol, received_at"
 

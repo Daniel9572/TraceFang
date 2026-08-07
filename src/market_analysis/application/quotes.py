@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
+from enum import StrEnum
 
 from market_analysis.domain.errors import ProviderUnavailableError
-from market_analysis.domain.models import Instrument, QuoteSnapshot
+from market_analysis.domain.models import Instrument, QuoteSnapshot, SourceMetadata
 
 JIN10_CLIENT_SOURCE = "jin10_client"
 JIN10_WEB_CHANNEL = "jin10_web"
@@ -14,33 +16,37 @@ JIN10_LOCAL_CHANNEL = "jin10_local"
 
 _PRICE_FIELDS = ("last", "change", "change_percent")
 _SUPPLEMENT_FIELDS = ("open", "high", "low", "volume")
-_ALL_QUOTE_FIELDS = _PRICE_FIELDS + _SUPPLEMENT_FIELDS
+
+
+class QuoteQuality(StrEnum):
+    COMPLETE = "complete"
+    DEGRADED = "degraded"
 
 
 @dataclass(frozen=True, slots=True)
-class QuoteComponent:
-    """One raw channel participating in a logical quote view."""
+class LogicalQuoteSnapshot:
+    """Aggregated presentation values; never persisted as raw channel evidence."""
 
-    source_id: str
-    role: str
-    fields: tuple[str, ...]
-    available: bool
-    stale: bool
-    age_seconds: float | None
-    quote: QuoteSnapshot | None
+    instrument: Instrument
+    last: Decimal
+    open: Decimal | None
+    high: Decimal | None
+    low: Decimal | None
+    volume: Decimal | None
+    change: Decimal | None
+    change_percent: Decimal | None
+    source: SourceMetadata
 
 
 @dataclass(frozen=True, slots=True)
 class QuoteView:
-    """Presentation/query view that never masquerades as a raw source record."""
+    """One logical source result with its physical composition fully encapsulated."""
 
     source_id: str
-    price: QuoteSnapshot
-    supplement: QuoteSnapshot | None
-    field_sources: Mapping[str, str]
-    components: tuple[QuoteComponent, ...]
-    missing_channels: tuple[str, ...]
-    stale_channels: tuple[str, ...]
+    quote: LogicalQuoteSnapshot
+    quality: QuoteQuality
+    unavailable_fields: tuple[str, ...]
+    stale_fields: tuple[str, ...]
     composed_at: datetime
 
 
@@ -91,7 +97,7 @@ class LatestQuoteCache:
 
 
 class QuoteViewService:
-    """Builds channel-pure or explicitly composed views from the local cache."""
+    """Builds an encapsulated logical-source result from the local hot cache."""
 
     def __init__(self, cache: LatestQuoteCache, *, stale_after: StaleAfter) -> None:
         self._cache = cache
@@ -101,52 +107,23 @@ class QuoteViewService:
         return self._cache.put(quote)
 
     async def get(self, instrument: Instrument, source_id: str) -> QuoteView:
-        if source_id == JIN10_CLIENT_SOURCE:
-            price = await self._cache.get(instrument, JIN10_WEB_CHANNEL)
-            supplement = await self._cache.get(instrument, JIN10_LOCAL_CHANNEL)
-            return self._compose_client(instrument, price, supplement)
-        quote = await self._cache.get(instrument, source_id)
-        return self._single_channel(instrument, source_id, quote)
+        self._require_logical_source(source_id)
+        price = await self._cache.get(instrument, JIN10_WEB_CHANNEL)
+        supplement = await self._cache.get(instrument, JIN10_LOCAL_CHANNEL)
+        return self._compose_client(instrument, price, supplement)
 
     def build_cached(self, instrument: Instrument, source_id: str) -> QuoteView:
-        if source_id == JIN10_CLIENT_SOURCE:
-            return self._compose_client(
-                instrument,
-                self._cache.peek(instrument, JIN10_WEB_CHANNEL),
-                self._cache.peek(instrument, JIN10_LOCAL_CHANNEL),
-            )
-        return self._single_channel(
+        self._require_logical_source(source_id)
+        return self._compose_client(
             instrument,
-            source_id,
-            self._cache.peek(instrument, source_id),
+            self._cache.peek(instrument, JIN10_WEB_CHANNEL),
+            self._cache.peek(instrument, JIN10_LOCAL_CHANNEL),
         )
 
-    def _single_channel(
-        self,
-        instrument: Instrument,
-        source_id: str,
-        quote: QuoteSnapshot | None,
-    ) -> QuoteView:
-        component = self._component(
-            source_id,
-            role="complete_quote",
-            fields=_ALL_QUOTE_FIELDS,
-            quote=quote,
-        )
-        if quote is None:
-            raise ProviderUnavailableError(f"{source_id} has no locally cached quote")
-        if component.stale:
-            raise ProviderUnavailableError(f"{source_id} locally cached quote is stale")
-        return QuoteView(
-            source_id=source_id,
-            price=quote,
-            supplement=None,
-            field_sources={field: source_id for field in _ALL_QUOTE_FIELDS},
-            components=(component,),
-            missing_channels=(),
-            stale_channels=(),
-            composed_at=datetime.now(UTC),
-        )
+    @staticmethod
+    def _require_logical_source(source_id: str) -> None:
+        if source_id != JIN10_CLIENT_SOURCE:
+            raise ProviderUnavailableError(f"{source_id} is not a selectable logical quote source")
 
     def _compose_client(
         self,
@@ -154,70 +131,56 @@ class QuoteViewService:
         price: QuoteSnapshot | None,
         supplement: QuoteSnapshot | None,
     ) -> QuoteView:
-        price_component = self._component(
-            JIN10_WEB_CHANNEL,
-            role="realtime_price",
-            fields=_PRICE_FIELDS,
-            quote=price,
-        )
-        supplement_component = self._component(
-            JIN10_LOCAL_CHANNEL,
-            role="session_supplement",
-            fields=_SUPPLEMENT_FIELDS,
-            quote=supplement,
-        )
         if price is None:
-            raise ProviderUnavailableError(
-                "金十客户端组合行情缺少 jin10_web 实时价格通道"
-            )
-        if price_component.stale:
-            raise ProviderUnavailableError(
-                "金十客户端组合行情的 jin10_web 实时价格已过期"
-            )
-        components = (price_component, supplement_component)
+            raise ProviderUnavailableError("金十客户端行情暂时没有实时价格")
+        if self._is_stale(JIN10_WEB_CHANNEL, price):
+            raise ProviderUnavailableError("金十客户端行情的实时价格已过期")
+
+        unavailable_fields = [
+            field_name for field_name in _PRICE_FIELDS if getattr(price, field_name) is None
+        ]
+        stale_fields: list[str] = []
+        supplement_values: dict[str, Decimal | None] = {
+            field_name: None for field_name in _SUPPLEMENT_FIELDS
+        }
+        if supplement is None:
+            unavailable_fields.extend(_SUPPLEMENT_FIELDS)
+        elif self._is_stale(JIN10_LOCAL_CHANNEL, supplement):
+            stale_fields.extend(_SUPPLEMENT_FIELDS)
+        else:
+            for field_name in _SUPPLEMENT_FIELDS:
+                value = getattr(supplement, field_name)
+                supplement_values[field_name] = value
+                if value is None:
+                    unavailable_fields.append(field_name)
+
+        logical_quote = LogicalQuoteSnapshot(
+            instrument=instrument,
+            last=price.last,
+            open=supplement_values["open"],
+            high=supplement_values["high"],
+            low=supplement_values["low"],
+            volume=supplement_values["volume"],
+            change=price.change,
+            change_percent=price.change_percent,
+            source=SourceMetadata(
+                provider=JIN10_CLIENT_SOURCE,
+                provider_symbol=instrument.symbol,
+                observed_at=price.source.observed_at,
+                received_at=price.source.received_at,
+            ),
+        )
+        unavailable = tuple(dict.fromkeys(unavailable_fields))
+        stale = tuple(dict.fromkeys(stale_fields))
         return QuoteView(
             source_id=JIN10_CLIENT_SOURCE,
-            price=price,
-            supplement=supplement,
-            field_sources={
-                **{field: JIN10_WEB_CHANNEL for field in _PRICE_FIELDS},
-                **{field: JIN10_LOCAL_CHANNEL for field in _SUPPLEMENT_FIELDS},
-            },
-            components=components,
-            missing_channels=tuple(
-                component.source_id for component in components if not component.available
-            ),
-            stale_channels=tuple(
-                component.source_id for component in components if component.stale
-            ),
+            quote=logical_quote,
+            quality=(QuoteQuality.DEGRADED if unavailable or stale else QuoteQuality.COMPLETE),
+            unavailable_fields=unavailable,
+            stale_fields=stale,
             composed_at=datetime.now(UTC),
         )
 
-    def _component(
-        self,
-        source_id: str,
-        *,
-        role: str,
-        fields: tuple[str, ...],
-        quote: QuoteSnapshot | None,
-    ) -> QuoteComponent:
-        if quote is None:
-            return QuoteComponent(
-                source_id=source_id,
-                role=role,
-                fields=fields,
-                available=False,
-                stale=False,
-                age_seconds=None,
-                quote=None,
-            )
+    def _is_stale(self, source_id: str, quote: QuoteSnapshot) -> bool:
         age = max(0.0, (datetime.now(UTC) - quote.source.received_at).total_seconds())
-        return QuoteComponent(
-            source_id=source_id,
-            role=role,
-            fields=fields,
-            available=True,
-            stale=age > self._stale_after(source_id),
-            age_seconds=age,
-            quote=quote,
-        )
+        return age > self._stale_after(source_id)

@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS instrument_source_routes (
 CREATE INDEX IF NOT EXISTS ix_instrument_source_routes_source
     ON instrument_source_routes (source_id, capability);
 
+-- Releases before the logical-source boundary stored one route per capability.
+-- History is now global, so only the single contract-level quote binding remains.
+DELETE FROM instrument_source_routes
+WHERE capability <> 'quote';
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_instrument_source_routes_instrument
+    ON instrument_source_routes (instrument_symbol);
+
 CREATE TABLE IF NOT EXISTS candles (
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
     source_id TEXT NOT NULL REFERENCES market_sources(source_id),

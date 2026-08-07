@@ -1,7 +1,6 @@
-export type SourceId = "jin10_client" | "jin10_mcp" | "jin10_local" | "jin10_web";
+export type SourceId = string;
 export type SourceAccessModel = "unmetered" | "limited" | "metered";
 export type QuoteServiceTier = "institutional" | "enhanced" | "standard" | "reference";
-export type SourceKind = "channel" | "composite";
 
 export interface SourceQuota {
   key: string;
@@ -51,24 +50,12 @@ export interface QuoteSnapshot {
   source: SourceMetadata;
 }
 
-export interface QuoteComponent {
-  source_id: SourceId;
-  role: "realtime_price" | "session_supplement" | "complete_quote" | string;
-  fields: string[];
-  available: boolean;
-  stale: boolean;
-  age_seconds: number | null;
-  quote: QuoteSnapshot | null;
-}
-
 export interface QuoteView {
   source_id: SourceId;
-  price: QuoteSnapshot;
-  supplement: QuoteSnapshot | null;
-  field_sources: Record<string, SourceId>;
-  components: QuoteComponent[];
-  missing_channels: SourceId[];
-  stale_channels: SourceId[];
+  quote: QuoteSnapshot;
+  quality: "complete" | "degraded";
+  unavailable_fields: string[];
+  stale_fields: string[];
   composed_at: string;
 }
 
@@ -89,17 +76,13 @@ export interface SourceDescriptor {
   display_name: string;
   description: string;
   capabilities: string[];
-  enabled: boolean;
-  priority: number;
+  selectable: boolean;
   delayed: boolean;
   requires_running_app: boolean;
   structured: boolean;
   quote_poll_interval_seconds: number;
   quote_streaming: boolean;
   quote_service_tier: QuoteServiceTier;
-  source_kind: SourceKind;
-  component_source_ids: SourceId[];
-  field_ownership: Array<{ source_id: SourceId; fields: string[] }>;
   access_model: SourceAccessModel;
   access_note: string | null;
   manual_connection_required: boolean;
@@ -110,8 +93,6 @@ export interface SourceDescriptor {
   error: string | null;
   checked_at: string | null;
   last_success_at: string | null;
-  frozen: boolean;
-  frozen_reason: string | null;
 }
 
 export interface SourceConnectionTest {
@@ -120,7 +101,9 @@ export interface SourceConnectionTest {
   last: number | string;
   observed_at: string;
   latency_ms: number;
-  components: QuoteComponent[];
+  quality: "complete" | "degraded";
+  unavailable_fields: string[];
+  stale_fields: string[];
 }
 
 export interface InstrumentSourceSelection {

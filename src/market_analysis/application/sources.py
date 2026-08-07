@@ -45,15 +45,11 @@ class QuoteServiceTier(StrEnum):
     REFERENCE = "reference"
 
 
-class SourceKind(StrEnum):
-    CHANNEL = "channel"
-    COMPOSITE = "composite"
+class SourceRoutingRole(StrEnum):
+    """Separates user-selectable logical sources from implementation channels."""
 
-
-@dataclass(frozen=True, slots=True)
-class SourceFieldOwnership:
-    source_id: str
-    fields: tuple[str, ...]
+    LOGICAL = "logical"
+    INTERNAL_CHANNEL = "internal_channel"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +104,7 @@ class SourceRegistration:
     quote_poll_interval_seconds: float = 60.0
     quote_streaming: bool = False
     quote_service_tier: QuoteServiceTier = QuoteServiceTier.REFERENCE
-    source_kind: SourceKind = SourceKind.CHANNEL
-    component_source_ids: tuple[str, ...] = ()
-    field_ownership: tuple[SourceFieldOwnership, ...] = ()
+    routing_role: SourceRoutingRole = SourceRoutingRole.LOGICAL
     access_model: SourceAccessModel = SourceAccessModel.UNMETERED
     access_note: str | None = None
     manual_connection_required: bool = False
@@ -138,9 +132,7 @@ class SourceDescriptor:
     quote_poll_interval_seconds: float
     quote_streaming: bool
     quote_service_tier: QuoteServiceTier
-    source_kind: SourceKind
-    component_source_ids: tuple[str, ...]
-    field_ownership: tuple[SourceFieldOwnership, ...]
+    routing_role: SourceRoutingRole
     access_model: SourceAccessModel
     access_note: str | None
     manual_connection_required: bool
@@ -181,10 +173,10 @@ class MarketSourceManager:
             raise ValueError("source ids must be unique")
         self._store = store
         self._configuration = self._merged_configuration(store.load())
-        if any(item.frozen for item in registrations):
-            # Persist the effective disabled state so a stale local preference
-            # cannot silently reactivate a source after restart.
-            self._store.save(self._configuration)
+        # Physical channels are implementation details, not independently managed
+        # sources. Rewriting the local preference file also removes stale channel
+        # switches left by older releases.
+        self._store.save(self._persistable_configuration())
         self._runtime = {
             source_id: _RuntimeState(
                 connection_active=not registration.manual_connection_required,
@@ -233,19 +225,41 @@ class MarketSourceManager:
                 "enabled": (
                     False
                     if registration.frozen
+                    else registration.default_enabled
+                    if registration.routing_role is SourceRoutingRole.INTERNAL_CHANNEL
                     else bool(configured.get("enabled", registration.default_enabled))
                 ),
-                "priority": int(configured.get("priority", registration.default_priority)),
+                "priority": (
+                    registration.default_priority
+                    if registration.routing_role is SourceRoutingRole.INTERNAL_CHANNEL
+                    else int(configured.get("priority", registration.default_priority))
+                ),
             }
         return result
 
-    async def list_sources(self, *, refresh: bool = False) -> tuple[SourceDescriptor, ...]:
+    def _persistable_configuration(self) -> dict[str, dict[str, int | bool]]:
+        return {
+            source_id: value.copy()
+            for source_id, value in self._configuration.items()
+            if self._registrations[source_id].routing_role is SourceRoutingRole.LOGICAL
+        }
+
+    async def list_sources(
+        self,
+        *,
+        refresh: bool = False,
+        include_internal: bool = False,
+    ) -> tuple[SourceDescriptor, ...]:
+        registrations = tuple(
+            item
+            for item in self._registrations.values()
+            if include_internal or item.routing_role is SourceRoutingRole.LOGICAL
+        )
         if refresh:
-            await asyncio.gather(
-                *(self._refresh_probe(item) for item in self._registrations.values())
-            )
+            await asyncio.gather(*(self._refresh_probe(item) for item in registrations))
         rows: list[SourceDescriptor] = []
-        for source_id, registration in self._registrations.items():
+        for registration in registrations:
+            source_id = registration.source_id
             configured = self._configuration[source_id]
             runtime = self._runtime[source_id]
             quotas = (
@@ -267,9 +281,7 @@ class MarketSourceManager:
                     quote_poll_interval_seconds=registration.quote_poll_interval_seconds,
                     quote_streaming=registration.quote_streaming,
                     quote_service_tier=registration.quote_service_tier,
-                    source_kind=registration.source_kind,
-                    component_source_ids=registration.component_source_ids,
-                    field_ownership=registration.field_ownership,
+                    routing_role=registration.routing_role,
                     access_model=registration.access_model,
                     access_note=registration.access_note,
                     manual_connection_required=registration.manual_connection_required,
@@ -316,10 +328,12 @@ class MarketSourceManager:
         priority: int | None = None,
     ) -> None:
         registration = self._registration(source_id)
-        if registration.frozen and (enabled is not None or priority is not None):
-            raise ProviderUnavailableError(
-                registration.frozen_reason or f"{source_id} is frozen"
+        if registration.routing_role is not SourceRoutingRole.LOGICAL:
+            raise ValueError(
+                f"{source_id} is an internal channel and cannot be configured directly"
             )
+        if registration.frozen and (enabled is not None or priority is not None):
+            raise ProviderUnavailableError(registration.frozen_reason or f"{source_id} is frozen")
         if priority is not None and not 0 <= priority <= 1000:
             raise ValueError("priority must be between 0 and 1000")
         value = self._configuration[source_id]
@@ -334,14 +348,27 @@ class MarketSourceManager:
                 runtime.checked_at = datetime.now(UTC)
         if priority is not None:
             value["priority"] = priority
-        self._store.save(self._configuration)
+        self._store.save(self._persistable_configuration())
+
+    def logical_source_ids(self) -> tuple[str, ...]:
+        return tuple(
+            item.source_id
+            for item in self._registrations.values()
+            if item.routing_role is SourceRoutingRole.LOGICAL and not item.frozen
+        )
+
+    def is_logical_source(self, source_id: str) -> bool:
+        registration = self._registrations.get(source_id)
+        return bool(
+            registration is not None
+            and registration.routing_role is SourceRoutingRole.LOGICAL
+            and not registration.frozen
+        )
 
     async def connect_source(self, source_id: str) -> None:
         registration = self._registration(source_id)
         if registration.frozen:
-            raise ProviderUnavailableError(
-                registration.frozen_reason or f"{source_id} is frozen"
-            )
+            raise ProviderUnavailableError(registration.frozen_reason or f"{source_id} is frozen")
         if not bool(self._configuration[source_id]["enabled"]):
             raise ProviderUnavailableError(f"{source_id} is disabled")
         if not registration.manual_connection_required:
@@ -440,7 +467,9 @@ class MarketSourceManager:
         registrations = (
             item
             for item in self._registrations.values()
-            if SourceCapability.CANDLES in item.capabilities and not item.frozen
+            if item.routing_role is SourceRoutingRole.INTERNAL_CHANNEL
+            and SourceCapability.CANDLES in item.capabilities
+            and not item.frozen
         )
         return tuple(
             item.source_id
@@ -459,7 +488,7 @@ class MarketSourceManager:
             if SourceCapability.QUOTE in item.capabilities
             and item.quote_streaming
             and item.structured
-            and item.source_kind is SourceKind.CHANNEL
+            and item.routing_role is SourceRoutingRole.INTERNAL_CHANNEL
             and not item.frozen
         )
         return tuple(
@@ -498,6 +527,8 @@ class MarketSourceManager:
         }
         registrations = []
         for source_id, registration in self._registrations.items():
+            if registration.routing_role is not SourceRoutingRole.INTERNAL_CHANNEL:
+                continue
             if SourceCapability.CANDLES not in registration.capabilities:
                 continue
             if not bool(self._configuration[source_id]["enabled"]):
@@ -529,6 +560,23 @@ class MarketSourceManager:
     ) -> None:
         self._selected(capability, source, require_connection=require_connection)
 
+    def validate_logical_source(
+        self,
+        capability: SourceCapability,
+        source: str,
+        *,
+        require_connection: bool = True,
+    ) -> None:
+        registration = self._selected(
+            capability,
+            source,
+            require_connection=require_connection,
+        )
+        if registration.routing_role is not SourceRoutingRole.LOGICAL:
+            raise ProviderUnavailableError(
+                f"{source} is an internal channel, not a selectable logical source"
+            )
+
     def _selected(
         self,
         capability: SourceCapability,
@@ -540,9 +588,7 @@ class MarketSourceManager:
             raise ValueError("automatic source fallback is disabled; select a concrete source")
         registration = self._registration(source)
         if registration.frozen:
-            raise ProviderUnavailableError(
-                registration.frozen_reason or f"{source} is frozen"
-            )
+            raise ProviderUnavailableError(registration.frozen_reason or f"{source} is frozen")
         if capability not in registration.capabilities:
             raise ProviderUnavailableError(f"{source} does not provide {capability.value} data")
         if not bool(self._configuration[source]["enabled"]):

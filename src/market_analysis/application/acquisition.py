@@ -94,8 +94,7 @@ class QuoteAcquisitionRouter:
             },
             "poll_tasks": tuple(
                 sorted(
-                    f"{source_id}:{instrument.symbol}"
-                    for source_id, instrument in self._poll_tasks
+                    f"{source_id}:{instrument.symbol}" for source_id, instrument in self._poll_tasks
                 )
             ),
         }
@@ -108,9 +107,6 @@ class QuoteAcquisitionRouter:
         channels = self._require_source(source_id)
         if not self._source_enabled(source_id):
             raise ValueError(f"{source_id} is disabled")
-        for channel in channels:
-            if not self._source_enabled(channel):
-                raise ValueError(f"{channel} is disabled")
         async with self._lock:
             for channel in channels:
                 if channel in self._push_channels:
@@ -165,8 +161,7 @@ class QuoteAcquisitionRouter:
             if not self._source_enabled(source_id):
                 continue
             for channel in self._source_channels.get(source_id, ()):
-                if self._source_enabled(channel):
-                    desired.setdefault(channel, set()).add(instrument)
+                desired.setdefault(channel, set()).add(instrument)
         for channel, instruments in self._test_requirements.items():
             desired.setdefault(channel, set()).update(instruments)
         return desired

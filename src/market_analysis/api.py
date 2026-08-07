@@ -33,11 +33,9 @@ from market_analysis.application.sources import (
     QuoteServiceTier,
     SourceAccessModel,
     SourceCapability,
-    SourceFieldOwnership,
     SourceHealth,
-    SourceKind,
-    SourceQuota,
     SourceRegistration,
+    SourceRoutingRole,
 )
 from market_analysis.cache import AsyncTtlCache
 from market_analysis.domain.errors import (
@@ -48,7 +46,6 @@ from market_analysis.domain.errors import (
 )
 from market_analysis.domain.models import InstrumentCatalogEntry
 from market_analysis.environment import load_project_environment
-from market_analysis.infrastructure.mcp import StreamableHttpMcpClient
 from market_analysis.infrastructure.postgres import (
     BufferedMarketDataWriter,
     PostgresMarketDataStore,
@@ -57,8 +54,6 @@ from market_analysis.infrastructure.postgres import (
 from market_analysis.infrastructure.providers.jin10 import (
     SPOT_GOLD,
     SPOT_SILVER,
-    Jin10Provider,
-    Jin10Settings,
     Jin10SymbolMapper,
 )
 from market_analysis.infrastructure.providers.jin10_local import (
@@ -69,26 +64,14 @@ from market_analysis.infrastructure.providers.jin10_web import (
     Jin10WebProvider,
     Jin10WebSettings,
 )
-from market_analysis.infrastructure.quota import DailyToolBudget
 from market_analysis.infrastructure.source_config import JsonSourceConfigurationStore
 
 _repo_root = Path(__file__).resolve().parents[2]
 load_project_environment(_repo_root)
-_MCP_FROZEN_REASON = (
-    "金十官方 MCP 已按项目策略暂时冻结; 不用于实时、历史、补缺或校对。"
-)
-
-
-def _environment_flag(name: str, *, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Runtime:
     def __init__(self) -> None:
-        self.mcp_provider: Jin10Provider | None = None
         self.local_provider: Jin10LocalProvider | None = None
         self.web_provider: Jin10WebProvider | None = None
         self.manager: MarketSourceManager | None = None
@@ -109,28 +92,8 @@ class Runtime:
 runtime = Runtime()
 
 
-class SourceUpdate(BaseModel):
-    enabled: bool | None = None
-    priority: int | None = Field(default=None, ge=0, le=1000)
-
-
 class InstrumentSourceUpdate(BaseModel):
     source_id: str = Field(min_length=1)
-
-
-def _build_mcp_provider(settings: Jin10Settings) -> Jin10Provider:
-    client = StreamableHttpMcpClient(
-        endpoint=settings.endpoint,
-        bearer_token=settings.bearer_token,
-        timeout_seconds=settings.timeout_seconds,
-    )
-    budget = DailyToolBudget(
-        provider="jin10_mcp",
-        daily_limit=settings.daily_tool_limit,
-        reserve=settings.quota_reserve,
-        timezone=settings.quota_timezone,
-    )
-    return Jin10Provider(client, budget=budget)
 
 
 def _source_store_path() -> Path:
@@ -140,20 +103,6 @@ def _source_store_path() -> Path:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    mcp_enabled = _environment_flag("JIN10_MCP_ENABLED", default=False)
-    mcp_provider: Jin10Provider | None = None
-    mcp_settings: Jin10Settings | None = None
-    mcp_setup_error: str | None = None
-    if mcp_enabled:
-        try:
-            mcp_settings = Jin10Settings.from_env()
-            mcp_provider = _build_mcp_provider(mcp_settings)
-        except (ValueError, ProviderError) as error:
-            mcp_setup_error = str(error)
-            if mcp_provider is not None:
-                await mcp_provider.close()
-            mcp_provider = None
-
     local_provider: Jin10LocalProvider | None = None
     local_settings: Jin10LocalSettings | None = None
     local_setup_error: str | None = None
@@ -211,90 +160,37 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         )
 
     async def probe_client_source() -> ProviderProbe:
-        manager = runtime.manager
-        if manager is not None and not manager.is_enabled(JIN10_WEB_CHANNEL):
-            return ProviderProbe(
-                available=False,
-                state="price_channel_disabled",
-                detail="jin10_web 原始价格通道已停用; 组合源不会改用其他价格",
-                checked_at=datetime.now(UTC),
-                health=SourceHealth.UNAVAILABLE,
-            )
         web_probe = await probe_web_provider()
         local_probe = await probe_local_provider()
         if not web_probe.available:
             return ProviderProbe(
                 available=False,
-                state="price_channel_unavailable",
-                detail=(
-                    "实时价格通道 jin10_web 不可用; 不会改用 jin10_local 的价格。"
-                    f" {web_probe.detail or ''}"
-                ).strip(),
+                state="unavailable",
+                detail="金十客户端行情暂时没有可用的实时价格",
                 checked_at=datetime.now(UTC),
                 health=SourceHealth.UNAVAILABLE,
             )
-        local_enabled = manager is None or manager.is_enabled(JIN10_LOCAL_CHANNEL)
-        if not local_enabled or not local_probe.available:
+        if not local_probe.available:
             return ProviderProbe(
                 available=True,
-                state="supplement_degraded",
-                detail=(
-                    "jin10_web 实时价格可用; jin10_local 补充字段缺失或停滞。"
-                    f" {local_probe.detail or 'jin10_local 原始补充通道已停用'}"
-                ).strip(),
+                state="degraded",
+                detail="实时价格可用, 部分日内统计暂时缺失或停滞",
                 checked_at=datetime.now(UTC),
                 health=SourceHealth.DEGRADED,
             )
         return ProviderProbe(
             available=True,
             state="ready",
-            detail="官网价格通道与桌面会话补充通道均可用",
+            detail="完整聚合行情可用",
             checked_at=datetime.now(UTC),
             health=SourceHealth.HEALTHY,
-        )
-
-    async def connect_mcp_provider() -> ProviderProbe:
-        if mcp_provider is None:
-            raise ProviderUnavailableError(mcp_setup_error or "金十官方 MCP 尚未配置")
-        await mcp_provider.open()
-        return ProviderProbe(
-            available=True,
-            state="ready",
-            detail="协议握手与能力检查完成",
-            checked_at=datetime.now(UTC),
-        )
-
-    async def report_mcp_quotas() -> tuple[SourceQuota, ...]:
-        if mcp_provider is None or mcp_settings is None:
-            return ()
-        labels = {"get_quote": "报价", "get_kline": "K 线"}
-        snapshots = await mcp_provider.budget.snapshots(labels)
-        return tuple(
-            SourceQuota(
-                key=snapshot.tool_name,
-                label=labels[snapshot.tool_name],
-                used=snapshot.used,
-                limit=snapshot.limit,
-                reserve=snapshot.reserve,
-                available=snapshot.available,
-                usage_percent=snapshot.usage_percent,
-                warning_percent=mcp_settings.quota_warning_percent,
-                period=snapshot.period,
-                resets_at=snapshot.resets_at,
-                scope=snapshot.scope,
-            )
-            for snapshot in snapshots
         )
 
     registrations = (
         SourceRegistration(
             source_id=JIN10_CLIENT_SOURCE,
-            display_name="金十客户端组合行情",
-            description=(
-                "显式组合产品: jin10_web 只负责实时价格与涨跌, "
-                "jin10_local 只负责今开、最高、最低、成交量等补充字段。"
-                "两个原始通道分别存储, 组合视图不写入原始行情表。"
-            ),
+            display_name="金十客户端行情",
+            description=("统一提供实时价格、涨跌和日内统计。页面与合约路由只面对这一份聚合结果。"),
             capabilities=frozenset({SourceCapability.QUOTE}),
             default_enabled=True,
             default_priority=5,
@@ -304,63 +200,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             quote_poll_interval_seconds=0,
             quote_streaming=True,
             quote_service_tier=QuoteServiceTier.ENHANCED,
-            source_kind=SourceKind.COMPOSITE,
-            component_source_ids=(JIN10_WEB_CHANNEL, JIN10_LOCAL_CHANNEL),
-            field_ownership=(
-                SourceFieldOwnership(
-                    source_id=JIN10_WEB_CHANNEL,
-                    fields=("last", "change", "change_percent"),
-                ),
-                SourceFieldOwnership(
-                    source_id=JIN10_LOCAL_CHANNEL,
-                    fields=("open", "high", "low", "volume"),
-                ),
-            ),
+            routing_role=SourceRoutingRole.LOGICAL,
             access_model=SourceAccessModel.UNMETERED,
-            access_note=(
-                "组合视图本身不调用 MCP; 两个通道按合约订阅, 任一通道失败都不会静默替换。"
-            ),
+            access_note="事件驱动的结构化行情, 不使用限额接口。",
             probe=probe_client_source,
-        ),
-        SourceRegistration(
-            source_id="jin10_mcp",
-            display_name="金十官方 MCP",
-            description=(
-                "结构化官方接口能力已保留, 但当前项目策略冻结。"
-                "不会初始化、采集、补历史或参与校对。"
-            ),
-            capabilities=frozenset(
-                {
-                    SourceCapability.QUOTE,
-                    SourceCapability.CANDLES,
-                    SourceCapability.CATALOG,
-                    SourceCapability.NEWS,
-                    SourceCapability.CALENDAR,
-                }
-            ),
-            default_enabled=False,
-            default_priority=20,
-            delayed=False,
-            requires_running_app=False,
-            history_priority=10,
-            structured=True,
-            quote_poll_interval_seconds=60,
-            quote_streaming=False,
-            quote_service_tier=QuoteServiceTier.REFERENCE,
-            access_model=SourceAccessModel.LIMITED,
-            access_note=(
-                "每个用户、每个工具每天最多调用 "
-                f"{mcp_settings.daily_tool_limit if mcp_settings else 1500} 次; "
-                "北京时间自然日重置。用量为本应用运行期间记录, 不包含其他客户端。"
-            ),
-            manual_connection_required=True,
-            connector=connect_mcp_provider if mcp_provider is not None else None,
-            quota_reporter=report_mcp_quotas,
-            quote_provider=mcp_provider,
-            candle_provider=mcp_provider,
-            setup_error=mcp_setup_error,
-            frozen=not mcp_enabled,
-            frozen_reason=_MCP_FROZEN_REASON if not mcp_enabled else None,
         ),
         SourceRegistration(
             source_id="jin10_local",
@@ -384,6 +227,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             quote_poll_interval_seconds=0,
             quote_streaming=True,
             quote_service_tier=QuoteServiceTier.STANDARD,
+            routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
             quote_provider=local_provider,
             candle_provider=local_provider,
             probe=probe_local_provider if local_provider is not None else None,
@@ -406,6 +250,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             quote_poll_interval_seconds=0,
             quote_streaming=True,
             quote_service_tier=QuoteServiceTier.ENHANCED,
+            routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
             access_model=SourceAccessModel.UNMETERED,
             access_note="官网公开通道。无登录鉴权和调用次数额度。接口升级时需要重新验证协议。",
             quote_provider=web_provider,
@@ -413,7 +258,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             setup_error=web_setup_error,
         ),
     )
-    runtime.mcp_provider = mcp_provider
     runtime.local_provider = local_provider
     runtime.web_provider = web_provider
     runtime.manager = MarketSourceManager(
@@ -438,7 +282,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         runtime.persistence = BufferedMarketDataWriter(runtime.database_store)
         with suppress(Exception):
             await runtime.database_store.open()
-        if runtime.database_store.is_open and not mcp_enabled:
+        if runtime.database_store.is_open:
             await runtime.database_store.remove_source_from_standard_history("jin10_mcp")
         await runtime.persistence.start()
 
@@ -491,7 +335,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     stale_after_seconds = {
         JIN10_WEB_CHANNEL: web_settings.stale_after_seconds if web_settings else 12.0,
         JIN10_LOCAL_CHANNEL: local_settings.stale_after_seconds if local_settings else 12.0,
-        "jin10_mcp": 180.0,
     }
     quote_cache = LatestQuoteCache(load_latest_quote)
     runtime.quote_views = QuoteViewService(
@@ -527,8 +370,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             runtime.quote_stream.publish_unavailable(instrument, source_id, error)
 
     async def prepare_source(source_id):
-        if source_id == "jin10_mcp":
-            await _manager().connect_source(source_id)
+        del source_id
 
     runtime.acquisition = QuoteAcquisitionRouter(
         push_channels={
@@ -536,14 +378,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             for provider in (web_provider, local_provider)
             if provider is not None
         },
-        poll_channels=(
-            {mcp_provider.name: mcp_provider} if mcp_provider is not None else {}
-        ),
+        poll_channels={},
         source_channels={
             JIN10_CLIENT_SOURCE: (JIN10_WEB_CHANNEL, JIN10_LOCAL_CHANNEL),
-            JIN10_WEB_CHANNEL: (JIN10_WEB_CHANNEL,),
-            JIN10_LOCAL_CHANNEL: (JIN10_LOCAL_CHANNEL,),
-            "jin10_mcp": ("jin10_mcp",),
         },
         source_enabled=_manager().is_enabled,
         prepare_source=prepare_source,
@@ -565,7 +402,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         source_id = JIN10_CLIENT_SOURCE
         if runtime.database_store is not None and runtime.database_store.is_open:
             stored_source = await runtime.database_store.get_instrument_source(instrument)
-            if stored_source == "jin10_mcp" and not mcp_enabled:
+            if stored_source is not None and not _manager().is_logical_source(stored_source):
                 source_id = JIN10_CLIENT_SOURCE
                 await runtime.database_store.set_instrument_source(instrument, source_id)
             elif stored_source is not None:
@@ -588,13 +425,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await runtime.candle_history.close()
     if runtime.persistence is not None:
         await runtime.persistence.stop()
-    if runtime.mcp_provider is not None:
-        await runtime.mcp_provider.close()
     if runtime.local_provider is not None:
         await runtime.local_provider.close()
     if runtime.web_provider is not None:
         await runtime.web_provider.close()
-    runtime.mcp_provider = None
     runtime.local_provider = None
     runtime.web_provider = None
     runtime.manager = None
@@ -656,6 +490,45 @@ def _candle_history() -> LocalCandleHistoryService:
     return runtime.candle_history
 
 
+def _public_source(value: Any) -> dict[str, Any]:
+    """Expose logical-source outcomes, never their internal channel topology."""
+
+    return {
+        "source_id": value.source_id,
+        "display_name": value.display_name,
+        "description": value.description,
+        "capabilities": value.capabilities,
+        "selectable": value.enabled and not value.frozen,
+        "delayed": value.delayed,
+        "requires_running_app": value.requires_running_app,
+        "structured": value.structured,
+        "quote_poll_interval_seconds": value.quote_poll_interval_seconds,
+        "quote_streaming": value.quote_streaming,
+        "quote_service_tier": value.quote_service_tier,
+        "access_model": value.access_model,
+        "access_note": value.access_note,
+        "manual_connection_required": value.manual_connection_required,
+        "connection_active": value.connection_active,
+        "quotas": value.quotas,
+        "health": value.health,
+        "state": value.state,
+        "error": value.error,
+        "checked_at": value.checked_at,
+        "last_success_at": value.last_success_at,
+    }
+
+
+def _public_acquisition_status(value: dict[str, object] | None) -> dict[str, object] | None:
+    """Expose logical routes without leaking their physical channel topology."""
+
+    if value is None:
+        return None
+    return {
+        "state": "running",
+        "routes": value.get("routes", {}),
+    }
+
+
 @app.exception_handler(InstrumentNotSupportedError)
 async def instrument_error(_: Request, error: InstrumentNotSupportedError):
     from fastapi.responses import JSONResponse
@@ -694,53 +567,26 @@ async def health() -> dict[str, Any]:
     database_healthy = database["state"] == "healthy"
     return {
         "status": "ok" if healthy and database_healthy else "degraded",
-        "sources": [asdict(item) for item in sources],
+        "sources": [_public_source(item) for item in sources],
         "database": database,
-        "acquisition": (
+        "acquisition": _public_acquisition_status(
             runtime.acquisition.status() if runtime.acquisition is not None else None
         ),
         "history": {
             "mode": "postgres_validated_standard",
             "query_table": "standard_candles",
             "validation_table": "candle_validation_results",
-            "source_priority": manager.history_source_priority(),
-            "quote_derived_sources": manager.history_quote_derived_sources(),
-            "backfill_sources": manager.history_backfill_sources(),
-            "verification_sources": manager.history_verification_sources(),
             "backfill_pending": (
                 runtime.candle_history.pending_count() if runtime.candle_history is not None else 0
             ),
         },
-        "protocol_version": (
-            runtime.mcp_provider.client.negotiated_version
-            if runtime.mcp_provider is not None
-            else None
-        ),
     }
 
 
 @app.get("/api/sources")
 async def sources(refresh: bool = Query(default=True)) -> list[dict[str, Any]]:
     values = await _manager().list_sources(refresh=refresh)
-    return [asdict(value) for value in values]
-
-
-@app.patch("/api/sources/{source_id}")
-async def update_source(source_id: str, update: SourceUpdate) -> dict[str, Any]:
-    manager = _manager()
-    try:
-        manager.configure(
-            source_id,
-            enabled=update.enabled,
-            priority=update.priority,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    if runtime.acquisition is not None:
-        await runtime.acquisition.reconcile()
-    runtime.clear_caches()
-    values = await manager.list_sources(refresh=False)
-    return asdict(next(item for item in values if item.source_id == source_id))
+    return [_public_source(value) for value in values]
 
 
 @app.post("/api/sources/{source_id}/test")
@@ -748,45 +594,46 @@ async def test_source(source_id: str) -> dict[str, Any]:
     started = perf_counter()
     try:
         manager = _manager()
+        manager.validate_logical_source(
+            SourceCapability.QUOTE,
+            source_id,
+            require_connection=False,
+        )
         await manager.connect_source(source_id)
         await _acquisition().sample_source(source_id, SPOT_GOLD)
         value = await _quote_views().get(SPOT_GOLD, source_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except ProviderUnavailableError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     return {
         "source_id": source_id,
         "code": "XAUUSD",
-        "last": value.price.last,
-        "observed_at": value.price.source.observed_at,
+        "last": value.quote.last,
+        "observed_at": value.quote.source.observed_at,
         "latency_ms": max(1, round((perf_counter() - started) * 1000)),
-        "components": [asdict(component) for component in value.components],
+        "quality": value.quality,
+        "unavailable_fields": value.unavailable_fields,
+        "stale_fields": value.stale_fields,
     }
 
 
 @app.get("/api/instruments")
 async def instruments() -> list[dict[str, Any]]:
-    if runtime.mcp_provider is not None and _manager().is_connected("jin10_mcp"):
-        entries = await runtime.catalog_cache.get_or_load(
-            "jin10_mcp:catalog",
-            ttl_seconds=3600,
-            loader=runtime.mcp_provider.list_instruments,
-        )
-        supported = [entry for entry in entries if entry.instrument is not None]
-    else:
-        supported = [
-            InstrumentCatalogEntry(
-                provider="canonical",
-                provider_code="XAUUSD",
-                name="现货黄金",
-                instrument=SPOT_GOLD,
-            ),
-            InstrumentCatalogEntry(
-                provider="canonical",
-                provider_code="XAGUSD",
-                name="现货白银",
-                instrument=SPOT_SILVER,
-            ),
-        ]
+    supported = [
+        InstrumentCatalogEntry(
+            provider="canonical",
+            provider_code="XAUUSD",
+            name="现货黄金",
+            instrument=SPOT_GOLD,
+        ),
+        InstrumentCatalogEntry(
+            provider="canonical",
+            provider_code="XAGUSD",
+            name="现货白银",
+            instrument=SPOT_SILVER,
+        ),
+    ]
     return [asdict(entry) for entry in supported]
 
 
@@ -794,9 +641,10 @@ async def _instrument_source(code: str) -> tuple[str, Any, str]:
     normalized_code = code.upper()
     instrument = runtime.mapper.from_provider_code(normalized_code)
     store = _database_store()
-    source_id = await store.get_instrument_source(instrument) or JIN10_CLIENT_SOURCE
-    # Only the real-time route is contract-specific. Historical candles are global.
-    await store.set_instrument_source(instrument, source_id)
+    source_id = await store.get_instrument_source(instrument)
+    if source_id is None or not _manager().is_logical_source(source_id):
+        source_id = JIN10_CLIENT_SOURCE
+        await store.set_instrument_source(instrument, source_id)
     return normalized_code, instrument, source_id
 
 
@@ -817,57 +665,21 @@ async def update_instrument_source(
     normalized_code = code.upper()
     instrument = runtime.mapper.from_provider_code(normalized_code)
     try:
-        _manager().validate_source(SourceCapability.QUOTE, update.source_id)
+        _manager().validate_logical_source(SourceCapability.QUOTE, update.source_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except ProviderUnavailableError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     await _database_store().set_instrument_source(instrument, update.source_id)
     await _acquisition().set_route(instrument, update.source_id)
     runtime.clear_caches()
     return {"code": normalized_code, "source_id": update.source_id}
 
 
-@app.get("/api/instruments/{code}/source-routes", include_in_schema=False)
-async def legacy_instrument_source_routes(code: str) -> dict[str, Any]:
-    """Temporary read compatibility for clients from the split-route release."""
-
-    value = await instrument_source(code)
-    return {
-        "code": value["code"],
-        "routes": {
-            SourceCapability.QUOTE.value: value["source_id"],
-            SourceCapability.CANDLES.value: value["source_id"],
-        },
-    }
-
-
-@app.put("/api/instruments/{code}/source-routes", include_in_schema=False)
-async def legacy_update_instrument_source_route(
-    code: str,
-    update: InstrumentSourceUpdate,
-) -> dict[str, Any]:
-    value = await update_instrument_source(code, update)
-    return {
-        "code": value["code"],
-        "routes": {
-            SourceCapability.QUOTE.value: value["source_id"],
-            SourceCapability.CANDLES.value: value["source_id"],
-        },
-    }
-
-
 @app.get("/api/quotes/{code}")
-async def quote(
-    code: str,
-    source: str = Query(min_length=1),
-) -> dict[str, Any]:
-    normalized_code = code.upper()
-    instrument = runtime.mapper.from_provider_code(normalized_code)
-    _manager().validate_source(
-        SourceCapability.QUOTE,
-        source,
-        require_connection=False,
-    )
-    value = await _quote_views().get(instrument, source)
+async def quote(code: str) -> dict[str, Any]:
+    _, instrument, source_id = await _instrument_source(code)
+    value = await _quote_views().get(instrument, source_id)
     return asdict(value)
 
 
@@ -894,18 +706,14 @@ async def candles(
 
 @app.websocket("/api/stream/quotes/{code}")
 async def quote_stream(websocket: WebSocket, code: str) -> None:
-    source = websocket.query_params.get("source", "").strip()
-    if not source:
-        await websocket.close(code=1008, reason="a concrete source is required")
-        return
     try:
-        instrument = runtime.mapper.from_provider_code(code.upper())
+        _, instrument, source_id = await _instrument_source(code)
     except ProviderError:
         await websocket.close(code=1008, reason="instrument is not supported")
         return
     await websocket.accept()
     try:
-        async with _quote_stream().subscribe(instrument, source=source) as queue:
+        async with _quote_stream().subscribe(instrument, source=source_id) as queue:
             while True:
                 event = await queue.get()
                 await websocket.send_json(jsonable_encoder(asdict(event)))

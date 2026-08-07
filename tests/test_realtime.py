@@ -5,7 +5,11 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from market_analysis.application.quotes import QuoteView
+from market_analysis.application.quotes import (
+    LogicalQuoteSnapshot,
+    QuoteQuality,
+    QuoteView,
+)
 from market_analysis.application.realtime import QuoteStreamCoordinator
 from market_analysis.domain.errors import ProviderUnavailableError
 from market_analysis.domain.models import QuoteSnapshot, SourceMetadata
@@ -36,12 +40,20 @@ def view(source: str, price: str = "4242.65") -> QuoteView:
     value = quote(source, price)
     return QuoteView(
         source_id=source,
-        price=value,
-        supplement=None,
-        field_sources={"last": source},
-        components=(),
-        missing_channels=(),
-        stale_channels=(),
+        quote=LogicalQuoteSnapshot(
+            instrument=value.instrument,
+            last=value.last,
+            open=value.open,
+            high=value.high,
+            low=value.low,
+            volume=value.volume,
+            change=value.change,
+            change_percent=value.change_percent,
+            source=value.source,
+        ),
+        quality=QuoteQuality.COMPLETE,
+        unavailable_fields=(),
+        stale_fields=(),
         composed_at=datetime.now(UTC),
     )
 
@@ -96,7 +108,7 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 coordinator.publish(view("jin10_client", "4243.10"))
                 event = await asyncio.wait_for(queue.get(), 0.05)
 
-                self.assertEqual(event.quote.price.last, Decimal("4243.10"))
+                self.assertEqual(event.quote.quote.last, Decimal("4243.10"))
         finally:
             await coordinator.close()
 
@@ -113,8 +125,7 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     coordinator.publish(view("jin10_web", f"{4243 + index}.10"))
 
                 values = [
-                    (await asyncio.wait_for(queue.get(), 1)).quote.price.last
-                    for _ in range(20)
+                    (await asyncio.wait_for(queue.get(), 1)).quote.quote.last for _ in range(20)
                 ]
 
                 self.assertEqual(values[0], Decimal("4243.10"))

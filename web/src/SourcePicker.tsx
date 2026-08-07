@@ -40,7 +40,6 @@ interface SourcePickerProps {
   testResults: Partial<Record<SourceId, SourceTestFeedback>>;
   notice: string | null;
   onSelect: (source: SourceDescriptor) => void | Promise<void>;
-  onToggle: (source: SourceDescriptor) => void | Promise<void>;
   onTest: (source: SourceDescriptor) => void | Promise<void>;
   onOpenChange?: (open: boolean) => void;
 }
@@ -51,16 +50,6 @@ const capabilityLabels: Record<string, string> = {
   catalog: "品种",
   news: "资讯",
   calendar: "日历",
-};
-
-const quoteFieldLabels: Record<string, string> = {
-  last: "现价",
-  change: "涨跌额",
-  change_percent: "涨跌幅",
-  open: "今开",
-  high: "最高",
-  low: "最低",
-  volume: "成交量",
 };
 
 function ServiceTierIcon({ tier, size = 10 }: { tier: QuoteServiceTier; size?: number }) {
@@ -82,8 +71,6 @@ function formatQuotaReset(value: string): string {
 }
 
 function sourceUpdateLabel(source: SourceDescriptor): string {
-  if (source.frozen) return "暂停使用";
-  if (source.source_kind === "composite") return "双通道事件驱动";
   if (source.quote_service_tier === "enhanced" && source.quote_streaming) return "变化即推送";
   return formatRefreshFrequency(
     source.quote_poll_interval_seconds,
@@ -103,7 +90,6 @@ export function SourcePicker({
   testResults,
   notice,
   onSelect,
-  onToggle,
   onTest,
   onOpenChange,
 }: SourcePickerProps) {
@@ -123,16 +109,13 @@ export function SourcePicker({
     (peak, quota) => quota.usage_percent > peak.usage_percent ? quota : peak,
     selected.quotas[0],
   );
-  const selectedEnabled = selected?.enabled ?? false;
   const awaitingManualConnection = Boolean(
-    selectedEnabled
+    selected?.selectable
     && selected?.manual_connection_required
     && !selected.connection_active,
   );
-  const connectionLabel = selected?.frozen
-    ? "已冻结"
-    : !selectedEnabled
-      ? "已停用"
+  const connectionLabel = !selected?.selectable
+      ? "不可选择"
       : awaitingManualConnection
       ? "待连接"
       : connectionState === "live"
@@ -140,9 +123,7 @@ export function SourcePicker({
         : connectionState === "connecting"
           ? "连接中"
           : "已停滞";
-  const selectedHealth = selected?.frozen
-    ? "frozen"
-    : !selectedEnabled || awaitingManualConnection
+  const selectedHealth = !selected?.selectable || awaitingManualConnection
       ? "unknown"
       : connectionState === "live"
       ? "healthy"
@@ -186,7 +167,6 @@ export function SourcePicker({
     };
   }, [closeMenu, open]);
 
-  const enabledCount = options.filter((source) => source.enabled).length;
   const triggerTitle = connectionError ?? [
     selected?.display_name ?? fallbackLabel,
     selectedServiceLabel,
@@ -256,7 +236,7 @@ export function SourcePicker({
           id="market-source-console"
           className="source-picker-menu"
           role="dialog"
-          aria-label={contractCode + " 实时行情源控制台"}
+          aria-label={contractCode + " 逻辑数据源"}
           ref={menuRef}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
@@ -268,34 +248,29 @@ export function SourcePicker({
           <div className="source-console-head">
             <div>
               <span className="source-console-title">
-                <strong>实时来源</strong>
+                <strong>逻辑数据源</strong>
                 <b>{contractCode}</b>
               </span>
-              <small>每个合约独立设置，历史数据统一读取本地库</small>
+              <small>一个合约只保留一个绑定；新选择会原子替换旧来源</small>
             </div>
-            <span className="source-console-count">{enabledCount}/{options.length} 已启用</span>
+            <span className="source-console-count">{options.length} 个可选</span>
           </div>
 
-          <div className="source-console-list">
+          <div className="source-console-list" role="radiogroup" aria-label={contractCode + " 数据源"}>
             {options.map((source) => {
               const isSelected = source.source_id === selectedSource;
-              const awaitingConnection = source.enabled
+              const awaitingConnection = source.selectable
                 && source.manual_connection_required
                 && !source.connection_active;
               const isTesting = testingSourceId === source.source_id;
               const testResult = testResults[source.source_id];
-              const supportsRealtime = source.capabilities.includes("quote");
-              const optionHealth = source.frozen
-                ? "frozen"
-                : !source.enabled || awaitingConnection
+              const optionHealth = !source.selectable || awaitingConnection
                   ? "unknown"
                   : isSelected
                   ? selectedHealth
                   : source.health;
-              const optionState = source.frozen
-                ? "已冻结"
-                : !source.enabled
-                  ? "已停用"
+              const optionState = !source.selectable
+                  ? "不可选择"
                   : awaitingConnection
                   ? "待连接"
                   : isSelected
@@ -308,9 +283,7 @@ export function SourcePicker({
               const capabilitySummary = source.capabilities
                 .map((capability) => capabilityLabels[capability] ?? capability)
                 .join(" · ");
-              const accessSummary = source.frozen
-                ? "不调用"
-                : quoteQuota && candleQuota
+              const accessSummary = quoteQuota && candleQuota
                   ? "报 " + quoteQuota.used.toLocaleString("zh-CN") + " · K "
                     + candleQuota.used.toLocaleString("zh-CN")
                   : sourceAccessLabels[source.access_model];
@@ -319,9 +292,7 @@ export function SourcePicker({
                 "tier-" + optionServiceTier,
                 "health-" + optionHealth,
                 isSelected ? "is-current" : "",
-                source.enabled ? "" : "is-disabled",
-                source.frozen ? "is-frozen" : "",
-                "kind-" + source.source_kind,
+                source.selectable ? "" : "is-disabled",
               ].filter(Boolean).join(" ");
               return (
                 <section className={cardClassName} key={source.source_id}>
@@ -333,7 +304,7 @@ export function SourcePicker({
                       <span>
                         <strong>{source.display_name}</strong>
                         {isSelected ? (
-                          <b className="source-console-current"><Check size={9} />当前</b>
+                          <b className="source-console-current"><Check size={9} />已绑定</b>
                         ) : null}
                       </span>
                       <small>
@@ -343,22 +314,12 @@ export function SourcePicker({
                         {optionServiceLabel}
                       </small>
                     </div>
-                    <div className="source-console-enable">
-                      <span>{source.frozen ? "冻结" : source.enabled ? "启用" : "停用"}</span>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={source.enabled}
-                        aria-label={source.frozen
-                          ? source.display_name + "已冻结"
-                          : (source.enabled ? "停用" : "启用") + source.display_name}
-                        className={"source-console-switch " + (source.enabled ? "is-on" : "")}
-                        onClick={() => void onToggle(source)}
-                        disabled={busy || source.frozen}
-                      >
-                        <span />
-                      </button>
-                    </div>
+                    <span
+                      className={"source-console-radio-mark " + (isSelected ? "is-on" : "")}
+                      aria-hidden="true"
+                    >
+                      {isSelected ? <Check size={10} /> : null}
+                    </span>
                   </div>
 
                   <p className="source-console-description" title={source.description}>
@@ -371,8 +332,8 @@ export function SourcePicker({
                       <strong>{sourceUpdateLabel(source)}</strong>
                     </span>
                     <span>
-                      <small>运行</small>
-                      <strong>{source.frozen ? "归档冻结" : source.source_kind === "composite" ? "显式组合" : source.requires_running_app ? "需桌面端" : "独立通道"}</strong>
+                      <small>输出</small>
+                      <strong>{source.structured ? "结构化聚合" : "聚合结果"}</strong>
                     </span>
                     <span>
                       <small>{source.quotas.length > 0 ? "今日用量" : "访问"}</small>
@@ -382,9 +343,8 @@ export function SourcePicker({
 
                   <div className="source-console-meta">
                     <span className={"source-tier-note is-" + optionServiceTier}>
-                      {source.frozen ? "能力归档，不参与数据链路" : quoteServiceNotes[optionServiceTier]}
+                      {quoteServiceNotes[optionServiceTier]}
                     </span>
-                    <span>{source.structured ? "结构化" : "非结构化"}</span>
                     <span>{capabilitySummary}</span>
                     {source.access_model !== "unmetered" ? (
                       <span className={"source-access-badge is-" + source.access_model}>
@@ -392,21 +352,6 @@ export function SourcePicker({
                       </span>
                     ) : null}
                   </div>
-
-                  {source.source_kind === "composite" ? (
-                    <div className="source-console-composition">
-                      <div className="source-console-composition-head">
-                        <strong>固定字段归属</strong>
-                        <span>{source.component_source_ids.length} 个原始通道 · 分别落库</span>
-                      </div>
-                      {source.field_ownership.map((ownership) => (
-                        <div className="source-console-owner" key={ownership.source_id}>
-                          <b>{ownership.source_id}</b>
-                          <span>{ownership.fields.map((field) => quoteFieldLabels[field] ?? field).join(" · ")}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
 
                   {source.quotas.length > 0 ? (
                     <div className="source-console-quotas">
@@ -433,25 +378,25 @@ export function SourcePicker({
                   <div className="source-console-actions">
                     <button
                       type="button"
+                      role="radio"
+                      aria-checked={isSelected}
                       className={"source-console-action source-console-use " + (isSelected ? "is-current" : "")}
                       onClick={() => void onSelect(source)}
-                      disabled={busy || source.frozen || !source.enabled || awaitingConnection || !supportsRealtime || isSelected}
+                      disabled={busy || !source.selectable || awaitingConnection || isSelected}
                     >
                       {isSelected ? <Check size={13} /> : null}
-                      {isSelected ? contractCode + " 当前来源" : "用于 " + contractCode}
+                      {isSelected ? contractCode + " 当前绑定" : "绑定到 " + contractCode}
                     </button>
                     <button
                       type="button"
                       className="source-console-action source-console-test"
                       onClick={() => void onTest(source)}
-                      disabled={busy || source.frozen || testingSourceId !== null || !source.enabled}
+                      disabled={busy || !source.selectable || testingSourceId !== null}
                     >
                       {isTesting
                         ? <RefreshCw size={13} className="spin" />
                         : <PlugZap size={13} />}
-                      {source.frozen
-                        ? "已冻结"
-                        : isTesting
+                      {isTesting
                           ? "测试中…"
                           : awaitingConnection
                           ? "连接并测试"
@@ -481,7 +426,7 @@ export function SourcePicker({
 
           <div className="source-console-foot">
             <span aria-hidden="true" />
-            切换只作用于 {contractCode}；停用后不会静默改用其他来源。
+            物理采集通道由逻辑源内部管理，不作为合约可选项。
           </div>
         </div>
       ) : null}

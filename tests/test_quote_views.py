@@ -7,6 +7,7 @@ from decimal import Decimal
 from market_analysis.application.quotes import (
     JIN10_CLIENT_SOURCE,
     LatestQuoteCache,
+    QuoteQuality,
     QuoteViewService,
 )
 from market_analysis.domain.errors import ProviderUnavailableError
@@ -45,7 +46,7 @@ class QuoteViewServiceTests(unittest.IsolatedAsyncioTestCase):
         self.cache = LatestQuoteCache(loader)
         self.service = QuoteViewService(self.cache, stale_after=lambda _: 10)
 
-    async def test_client_view_keeps_raw_channels_and_fixed_field_ownership(self) -> None:
+    async def test_client_view_exposes_one_aggregated_logical_result(self) -> None:
         web = quote("jin10_web", "4252.34")
         local = quote("jin10_local", "4251.90")
         self.service.accept(web)
@@ -53,17 +54,18 @@ class QuoteViewServiceTests(unittest.IsolatedAsyncioTestCase):
 
         view = await self.service.get(SPOT_GOLD, JIN10_CLIENT_SOURCE)
 
-        self.assertIs(view.price, web)
-        self.assertIs(view.supplement, local)
-        self.assertEqual(view.field_sources["last"], "jin10_web")
-        self.assertEqual(view.field_sources["high"], "jin10_local")
-        self.assertEqual(view.missing_channels, ())
-        self.assertEqual(view.stale_channels, ())
+        self.assertEqual(view.source_id, JIN10_CLIENT_SOURCE)
+        self.assertEqual(view.quote.source.provider, JIN10_CLIENT_SOURCE)
+        self.assertEqual(view.quote.last, web.last)
+        self.assertEqual(view.quote.high, local.high)
+        self.assertEqual(view.quality, QuoteQuality.COMPLETE)
+        self.assertEqual(view.unavailable_fields, ())
+        self.assertEqual(view.stale_fields, ())
 
     async def test_client_view_never_uses_local_price_when_web_is_missing(self) -> None:
         self.service.accept(quote("jin10_local", "4251.90"))
 
-        with self.assertRaisesRegex(ProviderUnavailableError, "jin10_web"):
+        with self.assertRaisesRegex(ProviderUnavailableError, "实时价格"):
             await self.service.get(SPOT_GOLD, JIN10_CLIENT_SOURCE)
 
     async def test_client_view_marks_stale_supplement_without_replacing_price(self) -> None:
@@ -74,15 +76,19 @@ class QuoteViewServiceTests(unittest.IsolatedAsyncioTestCase):
 
         view = await self.service.get(SPOT_GOLD, JIN10_CLIENT_SOURCE)
 
-        self.assertIs(view.price, web)
-        self.assertIs(view.supplement, local)
-        self.assertEqual(view.stale_channels, ("jin10_local",))
+        self.assertEqual(view.quote.last, web.last)
+        self.assertIsNone(view.quote.high)
+        self.assertEqual(view.quality, QuoteQuality.DEGRADED)
+        self.assertEqual(
+            view.stale_fields,
+            ("open", "high", "low", "volume"),
+        )
 
     async def test_query_loads_only_from_local_loader(self) -> None:
         with self.assertRaises(ProviderUnavailableError):
             await self.service.get(SPOT_GOLD, "jin10_mcp")
 
-        self.assertEqual(self.loaded, ["jin10_mcp"])
+        self.assertEqual(self.loaded, [])
 
 
 if __name__ == "__main__":

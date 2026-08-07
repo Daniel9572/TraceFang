@@ -108,9 +108,7 @@ WHERE EXCLUDED.received_at >= candles.received_at
 _SELECT_INSTRUMENT_SOURCE = """
 SELECT source_id
 FROM instrument_source_routes
-WHERE instrument_symbol = $1
-ORDER BY CASE capability WHEN 'quote' THEN 0 ELSE 1 END
-LIMIT 1
+WHERE instrument_symbol = $1 AND capability = 'quote'
 """
 
 _UPSERT_SOURCE_ROUTE = """
@@ -478,9 +476,7 @@ def _quote_from_row(row: Mapping[str, object], instrument: Instrument) -> QuoteS
         volume=Decimal(row["volume"]) if row["volume"] is not None else None,
         change=Decimal(row["change"]) if row["change"] is not None else None,
         change_percent=(
-            Decimal(row["change_percent"])
-            if row["change_percent"] is not None
-            else None
+            Decimal(row["change_percent"]) if row["change_percent"] is not None else None
         ),
         source=SourceMetadata(
             provider=str(row["source_id"]),

@@ -91,7 +91,7 @@ class QuoteStreamCoordinator:
             self._pumps.clear()
 
     def publish(self, view: QuoteView) -> None:
-        key = (view.source_id, view.price.instrument.symbol)
+        key = (view.source_id, view.quote.instrument.symbol)
         pump = self._pumps.get(key)
         if pump is None:
             return

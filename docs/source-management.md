@@ -1,41 +1,38 @@
 # 数据来源管理
 
-## 路由规则
+## 两层模型
 
-- 每个来源声明能力：`quote / candles / catalog / news / calendar`。
-- 每个报价来源声明稳定的服务等级 `quote_service_tier`：`institutional / enhanced / standard / reference`。`institutional` 保留给有明确低延迟 SLA 的机构专业数据；当前金十官网高速行情属于 `enhanced`，定位是适合常规分析的优质分析级数据，不等同于机构级行情。
-- 实时路由粒度是“合约”：每个合约只选择一个实时产品/渠道。逻辑组合产品可以声明多个原始子通道，但字段归属必须固定并对外展示。
-- 实时调用方必须显式指定来源，`auto` 会被拒绝；失败直接返回错误，不尝试其他实时来源。
+- **逻辑数据源**是唯一面向用户和合约路由的对象。它输出一份完整或明确降级的聚合报价。
+- **物理采集通道**只在逻辑源内部负责采集、字段归属、健康诊断与原始证据落库，不是可选数据源。
+- 一个逻辑源可以由一个或多个物理通道实现；其构成不属于前端选择契约。
+- 每个逻辑报价源声明稳定的服务等级 `quote_service_tier`：`institutional / enhanced / standard / reference`。`institutional` 保留给有明确低延迟 SLA 的机构专业数据；当前金十客户端行情属于 `enhanced`，定位是适合常规分析的优质分析级数据，不等同于机构级行情。
+- 实时路由粒度是“合约”。数据库对每个合约只保留一行逻辑源绑定；选择新逻辑源时原子替换旧值，不存在多选、优先级回退或并行启用多个逻辑源。
+- REST 与 WebSocket 根据合约绑定解析逻辑源，调用方不能通过查询参数指定物理通道或绕过路由。
+- 逻辑源失败时直接报告，不尝试另一个逻辑源。
 - 历史 K 线不使用合约路由。所有合约和订阅者只读取 PostgreSQL `standard_candles`。
-- 历史数据不足时，后台只允许 `unmetered` 免费通道自动补缺。当前没有任何 `limited / metered` 活动数据源或校对候选。
+- 历史数据不足时，后台只允许 `unmetered` 免费物理通道自动补缺。历史证据必须保留真实渠道身份，但这些身份不会成为实时路由选项。
 - 连续结构化推送可以从各自的原始报价事件生成候选分钟 OHLC。候选必须经过结构、时序和多源价格一致性校验；接受/拒绝结果写入 `candle_validation_results`，只有接受记录进入 `standard_candles`。
-- 冻结来源不允许启用、连接、测试、选择或进入任何历史候选。
-- 启停与优先级原子写入 `data/sources.json`。
-- 图表工具栏中的“实时来源”下拉框就是完整控制台：直接完成启停、连接测试、合约切换、额度与运行条件查看，不再跳转到独立管理页面。
+- 图表工具栏中的“逻辑数据源”下拉框采用单选交互，只负责查看健康状态、测试连接和替换当前合约绑定，不提供互相独立的启停开关。
 
-当前来源：
+## 当前逻辑源与内部通道
 
-1. `jin10_client`（金十客户端组合行情）：逻辑产品。`jin10_web` 固定拥有 `last/change/change_percent`，`jin10_local` 固定拥有 `open/high/low/volume`；
-2. `jin10_web`（金十官网高速原始通道）：公开、无需登录口令的结构化价格变化推送；
-3. `jin10_local`（金十桌面会话原始通道）：本机金十客户端会话鉴权的结构化 WebSocket，提供日内统计、买卖价等补充字段；
-4. `jin10_mcp`（冻结归档）：能力代码与配置字段保留，但当前不实例化客户端，不属于可选数据源，也不参与实时、历史、补缺或校对。
+当前唯一可选逻辑源是 `jin10_client`（界面名称“金十客户端行情”）。它统一输出实时价格、涨跌和日内统计。
 
-`jin10_client` 的组合只发生在查询/展示层。`quote_events` 与 `latest_quotes` 中不会出现伪造的 `jin10_client` 原始记录。`jin10_web` 失败时不使用 `jin10_local.last` 顶替；`jin10_local` 失败时保留价格通道并显式返回补充字段缺失/过期状态。
+其内部使用 `jin10_web` 与 `jin10_local` 两个物理通道。二者在 `quote_events` 与 `latest_quotes` 中按真实渠道分别保存，绝不写成伪造的 `jin10_client` 原始记录。聚合结果只存在于内存查询/展示层：实时价格不可用时逻辑源停滞；日内统计不可用或过期时，最终结果以 `quality=degraded` 和字段列表说明，不用另一通道伪造字段。
 
-合约实时来源路由保存在 PostgreSQL；来源启停和页面顺序保存在 `data/sources.json`。历史来源优先级是独立策略，不随合约实时源切换。
+`jin10_web` 与 `jin10_local` 不出现在 `GET /api/sources`，不能写入合约路由，也不能由前端单独启停。它们仅在内部健康检查、原始审计和历史候选流程中保留渠道身份。
 
-启动时会把遗留的 `jin10_mcp` 合约路由迁移为 `jin10_client`，并强制把来源配置持久化为禁用。历史遗留的 MCP 原始记录保留作审计，但所有含 MCP 候选证据的标准 K 线和校验结果会被删除；历史查询还会按允许来源再次过滤。
+启动时会删除旧 `candles` 路由行，并把任何不是当前逻辑源的遗留绑定（包括 `jin10_web`、`jin10_local`、`jin10_mcp`）迁移为 `jin10_client`。数据库唯一索引继续保证一个合约最多一条绑定。
 
 ## 本地 API
 
-- `GET /api/sources?refresh=true|false`：来源、能力、连接策略、工具级额度和实时健康状态；
-- `PATCH /api/sources/{source_id}`：更新活动来源的 `enabled` 和/或 `priority`；对冻结 MCP 的修改会被拒绝；
-- `POST /api/sources/{source_id}/test`：主动验证活动来源的连接和当前帧；冻结 MCP 不可测试；
-- `GET /api/instruments/{code}/source`：读取该合约唯一行情源；
-- `PUT /api/instruments/{code}/source`：切换该合约的实时行情；
-- `GET /api/quotes/{code}?source=jin10_client|jin10_local|jin10_web`：只读本地最新帧；组合源返回 `price / supplement / field_sources / missing_channels / stale_channels`。传入 `jin10_mcp` 会返回冻结错误；
+- `GET /api/sources?refresh=true|false`：只返回可选逻辑源的能力、连接策略和健康状态；
+- `POST /api/sources/{source_id}/test`：主动测试一个逻辑源并返回最终聚合结果质量；
+- `GET /api/instruments/{code}/source`：读取该合约唯一逻辑源；
+- `PUT /api/instruments/{code}/source`：原子替换该合约的唯一逻辑源；
+- `GET /api/quotes/{code}`：按合约绑定只读本地聚合最新帧，不接受 `source` 参数；返回 `quote / quality / unavailable_fields / stale_fields`；
 - `GET /api/candles/{code}`：只从全局本地标准历史读取分钟 K 线；旧版 `source` 参数暂时兼容但被忽略；
-- `WS /api/stream/quotes/{code}?source=...`：持续报价与状态事件。
+- `WS /api/stream/quotes/{code}`：按合约绑定持续发送聚合报价与状态事件，不接受来源参数。
 
 ## 成本、限额与连接策略
 
@@ -45,15 +42,16 @@
 - `limited`：存在固定周期请求上限；
 - `metered`：按调用量计费。
 
-当前没有启用的限额或付费来源。金十 MCP 不是“等待用户连接”，而是明确冻结：启动时不创建 MCP 客户端，页面开关、合约选择和测试按钮均锁定，后端即使收到直接请求也会拒绝。
+当前没有启用的限额或付费逻辑源。未来接入此类逻辑源时，额度属于逻辑源的运行状态，不改变“一个合约一条绑定”的规则。
 
 额度按工具返回 `used / limit / reserve / available / usage_percent / resets_at`。当前 `used` 是本应用进程内计数，不包含同一账号在其他客户端产生的调用，因此 UI 明确标注为本应用记录；上游返回的限流错误始终具有最终权威性。
 
 ## 金十 MCP 冻结策略
 
-历史协议实现和额度配置仍保留，方便未来重新评审，但当前运行规则为：
+历史协议实现只保留在归档代码和 [jin10-mcp.md](jin10-mcp.md) 中，方便未来重新评审；当前运行规则为：
 
-- `JIN10_MCP_ENABLED=false` 为默认冻结开关；未显式改变项目策略前不得修改；
+- 应用运行时不读取 MCP 开关、Token、地址或额度配置；`.env.example` 不再提供这些字段；
+- MCP 不注册为逻辑源或物理通道，`GET /api/sources`、合约路由和前端均看不到 MCP；
 - 不执行 `initialize`、`tools/list`、`resources/list` 或 `tools/call`；
 - 不采集报价或 K 线，不提供资讯/日历，不进入实时路由、历史补缺或主动校对列表；
 - 历史 MCP 原始记录仅作审计归档，不能成为 `standard_candles` 的主来源或候选证据；
@@ -62,8 +60,8 @@
 - 同次采样中，本机后端接收至网页采样器平均 1.27ms、中位 0.96ms、P95 2.52ms；上游源时间只有整秒精度，不能据此伪造精确的公网单向延迟；
 - 新页面和新 WebSocket 订阅者从内存或 `latest_quotes` 回放最新帧；最新分钟 K 线从 `standard_candles` 读取，缺口只尝试免费通道。
 
-`.env.example` 中的 Token、额度与协议配置仅为冻结归档，不代表当前可用来源。页面显示 MCP 为“已冻结”，不会展示为待连接。
+本机 `.env` 中即使遗留 MCP 字段也会被应用忽略。恢复 MCP 必须先进行新的架构评审和代码变更，不能通过修改环境变量重新启用。
 
 WebSocket 解决浏览器到本机后端的持续传递，不能把低频上游变成逐笔行情。
 
-页面用全局标准历史的最近一分钟 K 线作为基线，并只用所选产品的价格角色更新当前柱。对于 `jin10_client`，当前柱严格使用 `jin10_web` 帧；`jin10_local` 只更新日内统计，不进入价格时间线。同一源时间秒内的多个价格事件以本地接收时间排序，全部参与当前柱高低收计算；收盘倒计时完全在浏览器本地计算。
+页面用全局标准历史的最近一分钟 K 线作为基线，并用当前合约绑定的逻辑源报价更新当前柱。逻辑源内部只有价格事件会推进时间线，日内统计只进入最终聚合字段；该实现细节不暴露为可选来源。同一源时间秒内的多个价格事件以本地接收时间排序，全部参与当前柱高低收计算；收盘倒计时完全在浏览器本地计算。

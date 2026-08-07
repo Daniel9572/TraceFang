@@ -56,23 +56,26 @@ class QuoteAcquisitionRouterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.web = FakePushChannel("jin10_web")
         self.local = FakePushChannel("jin10_local")
-        self.mcp = FakePollChannel("jin10_mcp")
+        self.backup = FakePushChannel("backup_channel")
+        self.polled = FakePollChannel("polled_channel")
         self.enabled = {
             "jin10_client": True,
-            "jin10_web": True,
-            "jin10_local": True,
-            "jin10_mcp": True,
+            "backup_source": True,
+            "polled_source": True,
         }
         self.received = []
         self.errors = []
         self.router = QuoteAcquisitionRouter(
-            push_channels={"jin10_web": self.web, "jin10_local": self.local},
-            poll_channels={"jin10_mcp": self.mcp},
+            push_channels={
+                "jin10_web": self.web,
+                "jin10_local": self.local,
+                "backup_channel": self.backup,
+            },
+            poll_channels={"polled_channel": self.polled},
             source_channels={
                 "jin10_client": ("jin10_web", "jin10_local"),
-                "jin10_web": ("jin10_web",),
-                "jin10_local": ("jin10_local",),
-                "jin10_mcp": ("jin10_mcp",),
+                "backup_source": ("backup_channel",),
+                "polled_source": ("polled_channel",),
             },
             source_enabled=lambda source: self.enabled[source],
             prepare_source=lambda _source: asyncio.sleep(0),
@@ -88,40 +91,43 @@ class QuoteAcquisitionRouterTests(unittest.IsolatedAsyncioTestCase):
         await self.router.start(
             {
                 SPOT_GOLD: "jin10_client",
-                SPOT_SILVER: "jin10_web",
+                SPOT_SILVER: "backup_source",
             }
         )
 
-        self.assertEqual(set(self.web.subscriptions), {SPOT_GOLD, SPOT_SILVER})
+        self.assertEqual(self.web.subscriptions, (SPOT_GOLD,))
         self.assertEqual(self.local.subscriptions, (SPOT_GOLD,))
-        self.assertEqual(self.mcp.calls, 0)
+        self.assertEqual(self.backup.subscriptions, (SPOT_SILVER,))
+        self.assertEqual(self.polled.calls, 0)
 
     async def test_route_change_removes_obsolete_channel_subscription(self) -> None:
         await self.router.start({SPOT_GOLD: "jin10_client"})
-        await self.router.set_route(SPOT_GOLD, "jin10_web")
+        await self.router.set_route(SPOT_GOLD, "backup_source")
 
-        self.assertEqual(self.web.subscriptions, (SPOT_GOLD,))
+        self.assertEqual(self.web.subscriptions, ())
         self.assertEqual(self.local.subscriptions, ())
+        self.assertEqual(self.backup.subscriptions, (SPOT_GOLD,))
         self.assertEqual(
             self.router.status()["active_channels"],
-            {"jin10_web": ("XAU/USD",)},
+            {"backup_channel": ("XAU/USD",)},
         )
 
     async def test_polling_runs_without_any_ui_subscriber(self) -> None:
-        await self.router.start({SPOT_GOLD: "jin10_mcp"})
+        await self.router.start({SPOT_GOLD: "polled_source"})
         await asyncio.sleep(0.01)
 
-        self.assertEqual(self.mcp.calls, 1)
-        self.assertEqual(self.received[0].source.provider, "jin10_mcp")
+        self.assertEqual(self.polled.calls, 1)
+        self.assertEqual(self.received[0].source.provider, "polled_channel")
 
     async def test_source_test_temporarily_subscribes_then_restores_route(self) -> None:
-        await self.router.start({SPOT_GOLD: "jin10_web"})
+        await self.router.start({SPOT_GOLD: "backup_source"})
 
         values = await self.router.sample_source("jin10_client", SPOT_SILVER)
 
         self.assertEqual(set(values), {"jin10_web", "jin10_local"})
-        self.assertEqual(self.web.subscriptions, (SPOT_GOLD,))
+        self.assertEqual(self.web.subscriptions, ())
         self.assertEqual(self.local.subscriptions, ())
+        self.assertEqual(self.backup.subscriptions, (SPOT_GOLD,))
 
 
 if __name__ == "__main__":

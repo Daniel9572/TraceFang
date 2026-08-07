@@ -8,9 +8,8 @@ from market_analysis.application.sources import (
     QuoteServiceTier,
     SourceAccessModel,
     SourceCapability,
-    SourceFieldOwnership,
-    SourceKind,
     SourceRegistration,
+    SourceRoutingRole,
 )
 from market_analysis.domain.errors import ProviderUnavailableError
 from market_analysis.domain.models import QuoteSnapshot, SourceMetadata
@@ -103,9 +102,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     source_id="jin10_mcp",
                     display_name="frozen MCP",
                     description="frozen",
-                    capabilities=frozenset(
-                        {SourceCapability.QUOTE, SourceCapability.CANDLES}
-                    ),
+                    capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
                     default_enabled=True,
                     default_priority=1,
                     delayed=False,
@@ -164,7 +161,9 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sources[0].quote_service_tier, QuoteServiceTier.ENHANCED)
 
-    async def test_exposes_composite_channels_without_treating_view_as_raw_history(self) -> None:
+    async def test_internal_channels_are_not_exposed_as_logical_sources(self) -> None:
+        store = MemoryStore()
+        store.values = {"jin10_web": {"enabled": False, "priority": 1}}
         manager = MarketSourceManager(
             (
                 SourceRegistration(
@@ -177,12 +176,6 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     delayed=False,
                     requires_running_app=False,
                     quote_streaming=True,
-                    source_kind=SourceKind.COMPOSITE,
-                    component_source_ids=("jin10_web", "jin10_local"),
-                    field_ownership=(
-                        SourceFieldOwnership("jin10_web", ("last",)),
-                        SourceFieldOwnership("jin10_local", ("high", "low")),
-                    ),
                 ),
                 SourceRegistration(
                     source_id="jin10_web",
@@ -194,17 +187,29 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     delayed=False,
                     requires_running_app=False,
                     quote_streaming=True,
+                    routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
                     quote_provider=FakeProvider("jin10_web", "4242"),
                 ),
             ),
-            store=MemoryStore(),
+            store=store,
         )
 
         sources = await manager.list_sources()
-        composite = next(item for item in sources if item.source_id == "jin10_client")
+        all_sources = await manager.list_sources(include_internal=True)
 
-        self.assertEqual(composite.source_kind, SourceKind.COMPOSITE)
-        self.assertEqual(composite.component_source_ids, ("jin10_web", "jin10_local"))
+        self.assertEqual([item.source_id for item in sources], ["jin10_client"])
+        self.assertEqual(
+            {item.source_id for item in all_sources},
+            {"jin10_client", "jin10_web"},
+        )
+        self.assertEqual(manager.logical_source_ids(), ("jin10_client",))
+        self.assertNotIn("jin10_web", store.values)
+        internal = next(item for item in all_sources if item.source_id == "jin10_web")
+        self.assertTrue(internal.enabled)
+        with self.assertRaisesRegex(ProviderUnavailableError, "internal channel"):
+            manager.validate_logical_source(SourceCapability.QUOTE, "jin10_web")
+        with self.assertRaisesRegex(ValueError, "internal channel"):
+            manager.configure("jin10_web", enabled=False)
         self.assertEqual(manager.history_quote_derived_sources(), ("jin10_web",))
 
     async def test_explicit_candle_source_failure_does_not_call_free_source(self) -> None:
@@ -360,6 +365,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     requires_running_app=False,
                     history_priority=10,
                     access_model=SourceAccessModel.LIMITED,
+                    routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
                     manual_connection_required=True,
                     connector=connector,
                     candle_provider=FakeProvider("official", "4242"),
@@ -376,6 +382,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     history_priority=20,
                     access_model=SourceAccessModel.UNMETERED,
                     quote_streaming=True,
+                    routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
                     candle_provider=FakeProvider("free", "4242"),
                 ),
             ),

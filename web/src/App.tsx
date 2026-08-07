@@ -52,16 +52,12 @@ const defaultInstruments: InstrumentEntry[] = [
 ];
 
 const sourceLabels: Record<SourceId, string> = {
-  jin10_client: "金十客户端组合行情",
-  jin10_mcp: "金十官方 MCP",
-  jin10_local: "金十桌面会话原始通道",
-  jin10_web: "金十官网高速原始通道",
+  jin10_client: "金十客户端行情",
 };
 
 const errorTranslations: Array<[RegExp, string]> = [
-  [/local structured realtime capture channel/i, "本地结构化实时通道尚未接通"],
-  [/本地结构化实时采集通道尚未接通/i, "本地结构化实时通道尚未接通"],
-  [/JIN10_MCP_BEARER_TOKEN is required/i, "官方 MCP Token 尚未配置"],
+  [/internal channel.*not a selectable logical source/i, "该来源不是可绑定的逻辑数据源"],
+  [/not a selectable logical quote source/i, "该来源不是可绑定的逻辑数据源"],
 ];
 
 function translateError(error: unknown): string {
@@ -150,8 +146,7 @@ export default function App() {
   const selectedSourceReady = Boolean(
     sourcesLoaded
     && selectedSourceDescriptor
-    && !selectedSourceDescriptor.frozen
-    && selectedSourceDescriptor.enabled
+    && selectedSourceDescriptor.selectable
     && (!selectedSourceDescriptor.manual_connection_required || selectedSourceDescriptor.connection_active),
   );
 
@@ -269,18 +264,16 @@ export default function App() {
 
     if (!selectedSourceReady) {
       setQuoteStreamState("unavailable");
-      setQuoteError(selectedSourceDescriptor?.frozen
-        ? `${selectedSourceDescriptor.display_name}已冻结，不会用于实时或历史数据`
-        : selectedSourceDescriptor && !selectedSourceDescriptor.enabled
-          ? `${selectedSourceDescriptor.display_name}已停用，请在实时来源菜单中重新启用`
-          : `${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在实时来源菜单中点击连接并测试`);
+      setQuoteError(selectedSourceDescriptor && !selectedSourceDescriptor.selectable
+        ? `${selectedSourceDescriptor.display_name}当前不可选择`
+        : `${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在逻辑数据源菜单中测试连接`);
       setLoadingQuote(false);
       return;
     }
 
     const connect = () => {
       if (disposed) return;
-      socket = marketApi.openQuoteStream(selectedCode, selectedSource);
+      socket = marketApi.openQuoteStream(selectedCode);
       socket.onopen = () => {
         retryCount = 0;
         setQuoteStreamState("connecting");
@@ -292,9 +285,9 @@ export default function App() {
         if (event.kind === "quote" && event.quote) {
           setQuote(event.quote);
           setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteView }));
-          const sampleValue = numeric(event.quote.price.last);
-          const observedTime = new Date(event.quote.price.source.observed_at).getTime() / 1_000;
-          const receivedTime = new Date(event.quote.price.source.received_at).getTime() / 1_000;
+          const sampleValue = numeric(event.quote.quote.last);
+          const observedTime = new Date(event.quote.quote.source.observed_at).getTime() / 1_000;
+          const receivedTime = new Date(event.quote.quote.source.received_at).getTime() / 1_000;
           if (
             sampleValue !== null
             && Number.isFinite(observedTime)
@@ -307,11 +300,11 @@ export default function App() {
                 observedTime,
                 value: sampleValue,
                 eventId: [
-                  event.quote?.price.source.provider,
-                  event.quote?.price.source.provider_symbol,
-                  event.quote?.price.source.observed_at,
-                  event.quote?.price.source.received_at,
-                  String(event.quote?.price.last),
+                  event.quote?.source_id,
+                  event.quote?.quote.source.provider_symbol,
+                  event.quote?.quote.source.observed_at,
+                  event.quote?.quote.source.received_at,
+                  String(event.quote?.quote.last),
                 ].join("|"),
               },
             ));
@@ -392,29 +385,11 @@ export default function App() {
         const source = instrumentSources[item.provider_code] ?? "jin10_client";
         const descriptor = sourceById.get(source);
         if (!descriptor || (descriptor.manual_connection_required && !descriptor.connection_active)) return;
-        const value = await marketApi.quote(item.provider_code, source);
+        const value = await marketApi.quote(item.provider_code);
         setWatchQuotes((current) => ({ ...current, [item.provider_code]: value }));
       }),
     );
   }, [instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded, watchQuotes]);
-
-  const updateSource = async (
-    source: SourceDescriptor,
-    update: { enabled?: boolean; priority?: number },
-  ) => {
-    setSourceBusy(true);
-    try {
-      await marketApi.updateSource(source.source_id, update);
-      await loadSources();
-      if (update.enabled !== undefined) {
-        setTestMessage(`${source.display_name}已${update.enabled ? "启用" : "停用"}`);
-      }
-    } catch (error) {
-      setTestMessage(`更新失败：${translateError(error)}`);
-    } finally {
-      setSourceBusy(false);
-    }
-  };
 
   const preferSource = async (source: SourceDescriptor) => {
     setSourceBusy(true);
@@ -470,12 +445,8 @@ export default function App() {
     }
   }, []);
 
-  const priceQuote = quote?.price ?? null;
-  const dailyQuote = quote?.source_id === "jin10_client"
-    ? quote.stale_channels.includes("jin10_local")
-      ? null
-      : quote.supplement
-    : priceQuote;
+  const priceQuote = quote?.quote ?? null;
+  const dailyQuote = priceQuote;
   const livePrice = numeric(priceQuote?.last);
   const quoteObservedAt = priceQuote?.source.observed_at ?? null;
   const chartBars = useMemo(
@@ -519,11 +490,10 @@ export default function App() {
         : "分钟级";
 
   const quoteTrend = trendClass(priceQuote);
-  const quoteProvider = priceQuote?.source.provider as SourceId | undefined;
-  const supplementState = quote?.missing_channels.includes("jin10_local")
-    ? "补充通道缺失"
-    : quote?.stale_channels.includes("jin10_local")
-      ? "补充通道已过期"
+  const aggregateState = quote?.stale_fields.length
+    ? "部分聚合字段已过期"
+    : quote?.unavailable_fields.length
+      ? "部分聚合字段缺失"
       : null;
 
   return (
@@ -617,7 +587,7 @@ export default function App() {
         <div className="instrument-list">
           {instruments.map((item) => {
             const itemQuote = watchQuotes[item.provider_code];
-            const direction = trendClass(itemQuote?.price ?? null);
+            const direction = trendClass(itemQuote?.quote ?? null);
             return (
               <button
                 type="button"
@@ -630,8 +600,8 @@ export default function App() {
                   <span>{item.provider_code}</span>
                 </div>
                 <div className={direction}>
-                  <strong>{formatPrice(itemQuote?.price.last, item.provider_code)}</strong>
-                  <span>{formatSigned(itemQuote?.price.change_percent)}%</span>
+                  <strong>{formatPrice(itemQuote?.quote.last, item.provider_code)}</strong>
+                  <span>{formatSigned(itemQuote?.quote.change_percent)}%</span>
                 </div>
               </button>
             );
@@ -688,7 +658,6 @@ export default function App() {
             testResults={sourceTestResults}
             notice={testMessage}
             onSelect={preferSource}
-            onToggle={(source) => void updateSource(source, { enabled: !source.enabled })}
             onTest={(source) => void testSource(source)}
             onOpenChange={handleSourceMenuOpenChange}
           />
@@ -725,7 +694,7 @@ export default function App() {
                 <span>
                   {quoteError
                     ? quoteError
-                    : `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · 价格 ${sourceById.get(quoteProvider ?? selectedSource)?.display_name ?? sourceLabels[quoteProvider ?? selectedSource]} · ${priceQuote ? new Date(priceQuote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}${supplementState ? ` · ${supplementState}` : ""}`}
+                    : `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · ${priceQuote ? new Date(priceQuote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}${aggregateState ? ` · ${aggregateState}` : ""}`}
                 </span>
               </div>
             </div>

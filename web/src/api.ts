@@ -117,23 +117,15 @@ export const marketApi = {
     }),
   sources: (refresh = true) =>
     request<SourceDescriptor[]>(`/api/sources?refresh=${refresh ? "true" : "false"}`),
-  quote: (code: string, source: SourceId) =>
-    request<QuoteView>(`/api/quotes/${code}?source=${encodeURIComponent(source)}`),
+  quote: (code: string) =>
+    request<QuoteView>(`/api/quotes/${encodeURIComponent(code)}`),
   candles: fetchCandles,
   candleHistory: fetchCandleHistory,
-  openQuoteStream: (code: string, source: SourceId) => {
+  openQuoteStream: (code: string) => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}?source=${encodeURIComponent(source)}`;
+    const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}`;
     return new WebSocket(url);
   },
   testSource: (sourceId: SourceId) =>
     request<SourceConnectionTest>(`/api/sources/${sourceId}/test`, { method: "POST" }),
-  updateSource: (
-    sourceId: SourceId,
-    update: { enabled?: boolean; priority?: number },
-  ) =>
-    request<SourceDescriptor>(`/api/sources/${sourceId}`, {
-      method: "PATCH",
-      body: JSON.stringify(update),
-    }),
 };
