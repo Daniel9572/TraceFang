@@ -8,6 +8,8 @@ from market_analysis.application.sources import (
     QuoteServiceTier,
     SourceAccessModel,
     SourceCapability,
+    SourceFieldOwnership,
+    SourceKind,
     SourceRegistration,
 )
 from market_analysis.domain.errors import ProviderUnavailableError
@@ -90,6 +92,54 @@ def registration(source_id, priority, provider):
 
 
 class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_frozen_source_is_excluded_from_runtime_and_history(self) -> None:
+        store = MemoryStore()
+        store.values = {"jin10_mcp": {"enabled": True, "priority": 1}}
+        connector = FakeConnector()
+        provider = FakeProvider("jin10_mcp", "4242")
+        manager = MarketSourceManager(
+            (
+                SourceRegistration(
+                    source_id="jin10_mcp",
+                    display_name="frozen MCP",
+                    description="frozen",
+                    capabilities=frozenset(
+                        {SourceCapability.QUOTE, SourceCapability.CANDLES}
+                    ),
+                    default_enabled=True,
+                    default_priority=1,
+                    delayed=False,
+                    requires_running_app=False,
+                    access_model=SourceAccessModel.LIMITED,
+                    manual_connection_required=True,
+                    connector=connector,
+                    quote_provider=provider,
+                    candle_provider=provider,
+                    frozen=True,
+                    frozen_reason="temporarily frozen",
+                ),
+            ),
+            store=store,
+        )
+
+        descriptor = (await manager.list_sources())[0]
+        self.assertTrue(descriptor.frozen)
+        self.assertFalse(descriptor.enabled)
+        self.assertEqual(descriptor.health, "frozen")
+        self.assertFalse(store.values["jin10_mcp"]["enabled"])
+        self.assertEqual(manager.history_source_priority(), ())
+        self.assertEqual(manager.history_backfill_sources(), ())
+        self.assertEqual(manager.history_verification_sources(), ())
+
+        with self.assertRaisesRegex(ProviderUnavailableError, "temporarily frozen"):
+            manager.configure("jin10_mcp", enabled=True)
+        with self.assertRaisesRegex(ProviderUnavailableError, "temporarily frozen"):
+            await manager.connect_source("jin10_mcp")
+        with self.assertRaisesRegex(ProviderUnavailableError, "temporarily frozen"):
+            await manager.get_quote(SPOT_GOLD, source="jin10_mcp")
+        self.assertEqual(connector.calls, 0)
+        self.assertEqual(provider.calls, 0)
+
     async def test_exposes_quote_service_tier_as_source_metadata(self) -> None:
         manager = MarketSourceManager(
             (
@@ -113,6 +163,49 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
         sources = await manager.list_sources()
 
         self.assertEqual(sources[0].quote_service_tier, QuoteServiceTier.ENHANCED)
+
+    async def test_exposes_composite_channels_without_treating_view_as_raw_history(self) -> None:
+        manager = MarketSourceManager(
+            (
+                SourceRegistration(
+                    source_id="jin10_client",
+                    display_name="client",
+                    description="explicit composition",
+                    capabilities=frozenset({SourceCapability.QUOTE}),
+                    default_enabled=True,
+                    default_priority=5,
+                    delayed=False,
+                    requires_running_app=False,
+                    quote_streaming=True,
+                    source_kind=SourceKind.COMPOSITE,
+                    component_source_ids=("jin10_web", "jin10_local"),
+                    field_ownership=(
+                        SourceFieldOwnership("jin10_web", ("last",)),
+                        SourceFieldOwnership("jin10_local", ("high", "low")),
+                    ),
+                ),
+                SourceRegistration(
+                    source_id="jin10_web",
+                    display_name="web",
+                    description="raw channel",
+                    capabilities=frozenset({SourceCapability.QUOTE}),
+                    default_enabled=True,
+                    default_priority=10,
+                    delayed=False,
+                    requires_running_app=False,
+                    quote_streaming=True,
+                    quote_provider=FakeProvider("jin10_web", "4242"),
+                ),
+            ),
+            store=MemoryStore(),
+        )
+
+        sources = await manager.list_sources()
+        composite = next(item for item in sources if item.source_id == "jin10_client")
+
+        self.assertEqual(composite.source_kind, SourceKind.COMPOSITE)
+        self.assertEqual(composite.component_source_ids, ("jin10_web", "jin10_local"))
+        self.assertEqual(manager.history_quote_derived_sources(), ("jin10_web",))
 
     async def test_explicit_candle_source_failure_does_not_call_free_source(self) -> None:
         free = FakeProvider("free", "4242")
@@ -292,11 +385,13 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.history_source_priority(), ("official", "free"))
         self.assertEqual(manager.history_quote_derived_sources(), ("free",))
         self.assertEqual(manager.history_backfill_sources(), ("free",))
+        self.assertEqual(manager.history_verification_sources(), ())
         self.assertEqual(connector.calls, 0)
 
         await manager.connect_source("official")
 
-        self.assertEqual(manager.history_backfill_sources(), ("free", "official"))
+        self.assertEqual(manager.history_backfill_sources(), ("free",))
+        self.assertEqual(manager.history_verification_sources(), ("official",))
         self.assertEqual(connector.calls, 1)
 
 

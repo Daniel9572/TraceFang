@@ -5,6 +5,7 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from market_analysis.application.quotes import QuoteView
 from market_analysis.application.realtime import QuoteStreamCoordinator
 from market_analysis.domain.errors import ProviderUnavailableError
 from market_analysis.domain.models import QuoteSnapshot, SourceMetadata
@@ -31,19 +32,29 @@ def quote(source: str, price: str = "4242.65") -> QuoteSnapshot:
     )
 
 
+def view(source: str, price: str = "4242.65") -> QuoteView:
+    value = quote(source, price)
+    return QuoteView(
+        source_id=source,
+        price=value,
+        supplement=None,
+        field_sources={"last": source},
+        components=(),
+        missing_channels=(),
+        stale_channels=(),
+        composed_at=datetime.now(UTC),
+    )
+
+
 class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_failure_is_published_without_trying_another_source(self) -> None:
+    async def test_local_cache_failure_is_published_without_fallback(self) -> None:
         calls = []
 
-        async def fetch(_instrument, source):
+        async def load(_instrument, source):
             calls.append(source)
             raise ProviderUnavailableError("offline")
 
-        coordinator = QuoteStreamCoordinator(
-            fetch_quote=fetch,
-            record_quote=lambda _: None,
-            poll_interval=lambda _: 60,
-        )
+        coordinator = QuoteStreamCoordinator(load_quote=load)
         try:
             async with coordinator.subscribe(SPOT_GOLD, source="primary") as queue:
                 self.assertEqual((await asyncio.wait_for(queue.get(), 1)).state, "connecting")
@@ -53,50 +64,62 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await coordinator.close()
 
-    async def test_success_is_recorded_and_broadcast(self) -> None:
-        recorded = []
+    async def test_local_cache_seed_is_broadcast_without_recording_or_polling(self) -> None:
+        calls = []
 
-        async def fetch(_instrument, source):
-            return quote(source)
+        async def load(_instrument, source):
+            calls.append(source)
+            return view(source)
 
-        coordinator = QuoteStreamCoordinator(
-            fetch_quote=fetch,
-            record_quote=recorded.append,
-            poll_interval=lambda _: 60,
-        )
+        coordinator = QuoteStreamCoordinator(load_quote=load)
         try:
             async with coordinator.subscribe(SPOT_GOLD, source="primary") as queue:
                 await asyncio.wait_for(queue.get(), 1)
                 event = await asyncio.wait_for(queue.get(), 1)
                 self.assertEqual(event.state, "live")
-                self.assertEqual(event.quote.source.provider, "primary")
-                self.assertEqual(recorded, [event.quote])
+                self.assertEqual(event.quote.source_id, "primary")
+                await asyncio.sleep(0.02)
+                self.assertEqual(calls, ["primary"])
         finally:
             await coordinator.close()
 
-    async def test_push_source_broadcasts_without_waiting_for_poll_interval(self) -> None:
-        calls = []
+    async def test_published_view_is_delivered_in_current_event_loop_turn(self) -> None:
+        async def load(_instrument, source):
+            return view(source)
 
-        async def fetch(_instrument, source):
-            calls.append(source)
-            return quote(source)
-
-        coordinator = QuoteStreamCoordinator(
-            fetch_quote=fetch,
-            record_quote=lambda _: None,
-            poll_interval=lambda _: 60,
-            is_push_source=lambda source: source == "local",
-        )
+        coordinator = QuoteStreamCoordinator(load_quote=load)
         try:
-            async with coordinator.subscribe(SPOT_GOLD, source="local") as queue:
+            async with coordinator.subscribe(SPOT_GOLD, source="jin10_client") as queue:
                 await asyncio.wait_for(queue.get(), 1)
                 await asyncio.wait_for(queue.get(), 1)
 
-                coordinator.publish_quote(quote("local", "4243.10"))
+                coordinator.publish(view("jin10_client", "4243.10"))
                 event = await asyncio.wait_for(queue.get(), 0.05)
 
-                self.assertEqual(event.quote.last, Decimal("4243.10"))
-                self.assertEqual(calls, ["local"])
+                self.assertEqual(event.quote.price.last, Decimal("4243.10"))
+        finally:
+            await coordinator.close()
+
+    async def test_more_than_eight_intermediate_frames_are_not_discarded(self) -> None:
+        async def load(_instrument, source):
+            return view(source)
+
+        coordinator = QuoteStreamCoordinator(load_quote=load)
+        try:
+            async with coordinator.subscribe(SPOT_GOLD, source="jin10_web") as queue:
+                await asyncio.wait_for(queue.get(), 1)
+                await asyncio.wait_for(queue.get(), 1)
+                for index in range(20):
+                    coordinator.publish(view("jin10_web", f"{4243 + index}.10"))
+
+                values = [
+                    (await asyncio.wait_for(queue.get(), 1)).quote.price.last
+                    for _ in range(20)
+                ]
+
+                self.assertEqual(values[0], Decimal("4243.10"))
+                self.assertEqual(values[-1], Decimal("4262.10"))
+                self.assertEqual(len(values), 20)
         finally:
             await coordinator.close()
 

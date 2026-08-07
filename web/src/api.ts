@@ -2,7 +2,7 @@ import type {
   Candle,
   InstrumentEntry,
   InstrumentSourceSelection,
-  QuoteSnapshot,
+  QuoteView,
   SourceConnectionTest,
   SourceDescriptor,
   SourceId,
@@ -118,7 +118,7 @@ export const marketApi = {
   sources: (refresh = true) =>
     request<SourceDescriptor[]>(`/api/sources?refresh=${refresh ? "true" : "false"}`),
   quote: (code: string, source: SourceId) =>
-    request<QuoteSnapshot>(`/api/quotes/${code}?source=${encodeURIComponent(source)}`),
+    request<QuoteView>(`/api/quotes/${code}?source=${encodeURIComponent(source)}`),
   candles: fetchCandles,
   candleHistory: fetchCandleHistory,
   openQuoteStream: (code: string, source: SourceId) => {

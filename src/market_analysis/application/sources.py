@@ -28,6 +28,7 @@ class SourceHealth(StrEnum):
     DEGRADED = "degraded"
     UNAVAILABLE = "unavailable"
     UNCONFIGURED = "unconfigured"
+    FROZEN = "frozen"
     UNKNOWN = "unknown"
 
 
@@ -44,12 +45,24 @@ class QuoteServiceTier(StrEnum):
     REFERENCE = "reference"
 
 
+class SourceKind(StrEnum):
+    CHANNEL = "channel"
+    COMPOSITE = "composite"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFieldOwnership:
+    source_id: str
+    fields: tuple[str, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderProbe:
     available: bool
     state: str
     detail: str | None = None
     checked_at: datetime | None = None
+    health: SourceHealth | None = None
 
 
 class SourceConfigurationStore(Protocol):
@@ -95,6 +108,9 @@ class SourceRegistration:
     quote_poll_interval_seconds: float = 60.0
     quote_streaming: bool = False
     quote_service_tier: QuoteServiceTier = QuoteServiceTier.REFERENCE
+    source_kind: SourceKind = SourceKind.CHANNEL
+    component_source_ids: tuple[str, ...] = ()
+    field_ownership: tuple[SourceFieldOwnership, ...] = ()
     access_model: SourceAccessModel = SourceAccessModel.UNMETERED
     access_note: str | None = None
     manual_connection_required: bool = False
@@ -104,6 +120,8 @@ class SourceRegistration:
     candle_provider: CandleProvider | None = None
     probe: Probe | None = None
     setup_error: str | None = None
+    frozen: bool = False
+    frozen_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +138,9 @@ class SourceDescriptor:
     quote_poll_interval_seconds: float
     quote_streaming: bool
     quote_service_tier: QuoteServiceTier
+    source_kind: SourceKind
+    component_source_ids: tuple[str, ...]
+    field_ownership: tuple[SourceFieldOwnership, ...]
     access_model: SourceAccessModel
     access_note: str | None
     manual_connection_required: bool
@@ -130,6 +151,8 @@ class SourceDescriptor:
     error: str | None
     checked_at: datetime | None
     last_success_at: datetime | None
+    frozen: bool
+    frozen_reason: str | None
 
 
 @dataclass(slots=True)
@@ -158,6 +181,10 @@ class MarketSourceManager:
             raise ValueError("source ids must be unique")
         self._store = store
         self._configuration = self._merged_configuration(store.load())
+        if any(item.frozen for item in registrations):
+            # Persist the effective disabled state so a stale local preference
+            # cannot silently reactivate a source after restart.
+            self._store.save(self._configuration)
         self._runtime = {
             source_id: _RuntimeState(
                 connection_active=not registration.manual_connection_required,
@@ -166,7 +193,15 @@ class MarketSourceManager:
         }
         self._connection_locks = {source_id: asyncio.Lock() for source_id in self._registrations}
         for source_id, registration in self._registrations.items():
-            if registration.setup_error:
+            if registration.frozen:
+                self._runtime[source_id] = _RuntimeState(
+                    connection_active=False,
+                    health=SourceHealth.FROZEN,
+                    state="frozen",
+                    error=registration.frozen_reason or "source is frozen",
+                    checked_at=datetime.now(UTC),
+                )
+            elif registration.setup_error:
                 self._runtime[source_id] = _RuntimeState(
                     connection_active=False,
                     health=SourceHealth.UNCONFIGURED,
@@ -195,7 +230,11 @@ class MarketSourceManager:
         for source_id, registration in self._registrations.items():
             configured = stored.get(source_id, {})
             result[source_id] = {
-                "enabled": bool(configured.get("enabled", registration.default_enabled)),
+                "enabled": (
+                    False
+                    if registration.frozen
+                    else bool(configured.get("enabled", registration.default_enabled))
+                ),
                 "priority": int(configured.get("priority", registration.default_priority)),
             }
         return result
@@ -228,6 +267,9 @@ class MarketSourceManager:
                     quote_poll_interval_seconds=registration.quote_poll_interval_seconds,
                     quote_streaming=registration.quote_streaming,
                     quote_service_tier=registration.quote_service_tier,
+                    source_kind=registration.source_kind,
+                    component_source_ids=registration.component_source_ids,
+                    field_ownership=registration.field_ownership,
                     access_model=registration.access_model,
                     access_note=registration.access_note,
                     manual_connection_required=registration.manual_connection_required,
@@ -238,6 +280,8 @@ class MarketSourceManager:
                     error=runtime.error,
                     checked_at=runtime.checked_at,
                     last_success_at=runtime.last_success_at,
+                    frozen=registration.frozen,
+                    frozen_reason=registration.frozen_reason,
                 )
             )
         rows.sort(key=lambda item: (item.priority, item.source_id))
@@ -257,7 +301,9 @@ class MarketSourceManager:
             self._mark_failure(registration.source_id, error)
             return
         state = self._runtime[registration.source_id]
-        state.health = SourceHealth.HEALTHY if probe.available else SourceHealth.UNAVAILABLE
+        state.health = probe.health or (
+            SourceHealth.HEALTHY if probe.available else SourceHealth.UNAVAILABLE
+        )
         state.state = probe.state
         state.error = probe.detail
         state.checked_at = probe.checked_at or datetime.now(UTC)
@@ -269,7 +315,11 @@ class MarketSourceManager:
         enabled: bool | None = None,
         priority: int | None = None,
     ) -> None:
-        self._registration(source_id)
+        registration = self._registration(source_id)
+        if registration.frozen and (enabled is not None or priority is not None):
+            raise ProviderUnavailableError(
+                registration.frozen_reason or f"{source_id} is frozen"
+            )
         if priority is not None and not 0 <= priority <= 1000:
             raise ValueError("priority must be between 0 and 1000")
         value = self._configuration[source_id]
@@ -288,6 +338,10 @@ class MarketSourceManager:
 
     async def connect_source(self, source_id: str) -> None:
         registration = self._registration(source_id)
+        if registration.frozen:
+            raise ProviderUnavailableError(
+                registration.frozen_reason or f"{source_id} is frozen"
+            )
         if not bool(self._configuration[source_id]["enabled"]):
             raise ProviderUnavailableError(f"{source_id} is disabled")
         if not registration.manual_connection_required:
@@ -321,6 +375,10 @@ class MarketSourceManager:
     def is_connected(self, source_id: str) -> bool:
         self._registration(source_id)
         return self._runtime[source_id].connection_active
+
+    def is_enabled(self, source_id: str) -> bool:
+        self._registration(source_id)
+        return bool(self._configuration[source_id]["enabled"])
 
     async def get_quote(
         self,
@@ -382,7 +440,7 @@ class MarketSourceManager:
         registrations = (
             item
             for item in self._registrations.values()
-            if SourceCapability.CANDLES in item.capabilities
+            if SourceCapability.CANDLES in item.capabilities and not item.frozen
         )
         return tuple(
             item.source_id
@@ -401,6 +459,8 @@ class MarketSourceManager:
             if SourceCapability.QUOTE in item.capabilities
             and item.quote_streaming
             and item.structured
+            and item.source_kind is SourceKind.CHANNEL
+            and not item.frozen
         )
         return tuple(
             item.source_id
@@ -411,7 +471,25 @@ class MarketSourceManager:
         )
 
     def history_backfill_sources(self) -> tuple[str, ...]:
-        """Returns usable history providers with free channels ahead of limited ones."""
+        """Returns only unmetered providers allowed for automatic history repair."""
+
+        return tuple(
+            item.source_id
+            for item in self._usable_history_registrations()
+            if item.access_model is SourceAccessModel.UNMETERED
+        )
+
+    def history_verification_sources(self) -> tuple[str, ...]:
+        """Returns channels available only to an explicit historical verification."""
+
+        return tuple(
+            item.source_id
+            for item in self._usable_history_registrations()
+            if item.access_model is not SourceAccessModel.UNMETERED
+        )
+
+    def _usable_history_registrations(self) -> tuple[SourceRegistration, ...]:
+        """Orders usable raw history channels without initiating any connection."""
 
         access_rank = {
             SourceAccessModel.UNMETERED: 0,
@@ -440,20 +518,40 @@ class MarketSourceManager:
                 item.source_id,
             )
         )
-        return tuple(item.source_id for item in registrations)
+        return tuple(registrations)
 
-    def validate_source(self, capability: SourceCapability, source: str) -> None:
-        self._selected(capability, source)
+    def validate_source(
+        self,
+        capability: SourceCapability,
+        source: str,
+        *,
+        require_connection: bool = True,
+    ) -> None:
+        self._selected(capability, source, require_connection=require_connection)
 
-    def _selected(self, capability: SourceCapability, source: str) -> SourceRegistration:
+    def _selected(
+        self,
+        capability: SourceCapability,
+        source: str,
+        *,
+        require_connection: bool = True,
+    ) -> SourceRegistration:
         if source == "auto":
             raise ValueError("automatic source fallback is disabled; select a concrete source")
         registration = self._registration(source)
+        if registration.frozen:
+            raise ProviderUnavailableError(
+                registration.frozen_reason or f"{source} is frozen"
+            )
         if capability not in registration.capabilities:
             raise ProviderUnavailableError(f"{source} does not provide {capability.value} data")
         if not bool(self._configuration[source]["enabled"]):
             raise ProviderUnavailableError(f"{source} is disabled")
-        if registration.manual_connection_required and not self._runtime[source].connection_active:
+        if (
+            require_connection
+            and registration.manual_connection_required
+            and not self._runtime[source].connection_active
+        ):
             raise ProviderUnavailableError(
                 f"{registration.display_name} 尚未连接, 请先在实时来源菜单中点击连接并测试"
             )

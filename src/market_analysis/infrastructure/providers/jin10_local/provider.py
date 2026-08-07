@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -50,6 +50,7 @@ class Jin10LocalProvider:
     ) -> None:
         self.settings = settings
         self.symbol_mapper = symbol_mapper or Jin10LocalSymbolMapper()
+        self._subscriptions = self.symbol_mapper.provider_codes
         self._latest: dict[str, QuoteSnapshot] = {}
         self._minute_candles: dict[str, dict[datetime, Candle]] = {}
         self._updates = {code: asyncio.Event() for code in self.symbol_mapper.provider_codes}
@@ -67,9 +68,30 @@ class Jin10LocalProvider:
         await self.close()
 
     async def open(self) -> None:
+        if not self._subscriptions:
+            return
         if self._task is not None and not self._task.done():
             return
         self._task = asyncio.create_task(self._run(), name="jin10-local-quotes")
+
+    async def set_subscriptions(self, instruments: Sequence[Instrument]) -> None:
+        subscriptions = tuple(
+            dict.fromkeys(
+                self.symbol_mapper.to_provider_code(instrument) for instrument in instruments
+            )
+        )
+        if subscriptions == self._subscriptions:
+            if subscriptions:
+                await self.open()
+            return
+        await self.close()
+        self._subscriptions = subscriptions
+        if subscriptions:
+            await self.open()
+
+    @property
+    def subscribed_provider_codes(self) -> tuple[str, ...]:
+        return self._subscriptions
 
     async def close(self) -> None:
         task = self._task
@@ -88,6 +110,8 @@ class Jin10LocalProvider:
         self._quote_listeners.discard(listener)
 
     def health(self) -> tuple[bool, str, str | None]:
+        if not self._subscriptions:
+            return True, "idle", "当前没有合约分配到金十桌面会话原始通道"
         now = datetime.now(UTC)
         fresh = [
             quote
@@ -108,6 +132,10 @@ class Jin10LocalProvider:
 
     async def get_quote(self, instrument: Instrument) -> QuoteSnapshot:
         provider_code = self.symbol_mapper.to_provider_code(instrument)
+        if provider_code not in self._subscriptions:
+            raise ProviderUnavailableError(
+                f"{instrument.symbol} is not subscribed on the Jin10 local channel"
+            )
         if self._task is None or self._task.done():
             raise ProviderUnavailableError("Jin10 local quote stream is not open")
         event = self._updates[provider_code]
@@ -204,7 +232,7 @@ class Jin10LocalProvider:
             self._last_error = None
             await self._send_login(socket, key)
             subscription = encode_quote_subscription(
-                provider_codes=self.symbol_mapper.provider_codes,
+                provider_codes=self._subscriptions,
                 frequency_ms=self.settings.quote_frequency_ms,
             )
             await socket.send(xor_cipher(subscription, key))

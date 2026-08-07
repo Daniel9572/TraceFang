@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Protocol
@@ -22,6 +22,17 @@ class LocalCandleStore(Protocol):
     ) -> tuple[Candle, ...]: ...
 
     async def save_candles(self, candles: Sequence[Candle]) -> None: ...
+
+    async def standardize_candles(
+        self,
+        instrument: Instrument,
+        *,
+        source_priority: Sequence[str],
+        quote_derived_sources: Sequence[str],
+        start: datetime,
+        end: datetime,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> None: ...
 
 
 CandleFetcher = Callable[
@@ -62,6 +73,11 @@ class LocalCandleHistoryService:
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]:
+        await self._standardize_local_candidates(
+            instrument,
+            start=start,
+            count=count,
+        )
         rows = await self._store.load_candles(
             instrument,
             source_priority=self._source_priority(),
@@ -69,6 +85,7 @@ class LocalCandleHistoryService:
             start=start,
             count=count,
         )
+        self._validate_channel_pure_series(rows, instrument=instrument)
         if self._needs_backfill(rows, start=start, count=count):
             self._schedule_backfill(
                 instrument,
@@ -148,12 +165,87 @@ class LocalCandleHistoryService:
                     break
                 try:
                     rows = await self._fetch_candles(instrument, source_id, start, count)
+                    self._validate_channel_pure_series(
+                        rows,
+                        instrument=instrument,
+                        expected_source=source_id,
+                    )
                 except Exception:
                     continue
                 if rows:
                     await self._store.save_candles(rows)
+                    await self._standardize_local_candidates(
+                        instrument,
+                        start=start,
+                        count=count,
+                    )
         finally:
             self._cooldown_until[key] = monotonic() + self._retry_cooldown_seconds
 
     def pending_count(self) -> int:
         return len(self._tasks)
+
+    async def _standardize_local_candidates(
+        self,
+        instrument: Instrument,
+        *,
+        start: datetime | None,
+        count: int,
+    ) -> None:
+        current_minute = datetime.now(UTC).replace(second=0, microsecond=0)
+        if start is None:
+            validation_end = current_minute
+            validation_start = validation_end - timedelta(minutes=max(180, count * 3))
+        else:
+            validation_start = start.replace(second=0, microsecond=0)
+            validation_end = min(
+                validation_start + timedelta(minutes=count),
+                current_minute,
+            )
+        if validation_end <= validation_start:
+            return
+        await self._store.standardize_candles(
+            instrument,
+            source_priority=self._source_priority(),
+            quote_derived_sources=self._quote_derived_sources(),
+            start=validation_start,
+            end=validation_end,
+        )
+
+    @staticmethod
+    def _validate_channel_pure_series(
+        rows: Sequence[Candle],
+        *,
+        instrument: Instrument,
+        expected_source: str | None = None,
+    ) -> None:
+        sources = {row.source.provider for row in rows}
+        if len(sources) > 1:
+            raise RuntimeError(
+                "local history query returned multiple raw channels in one series"
+            )
+        if expected_source is not None and sources and sources != {expected_source}:
+            raise RuntimeError(
+                f"history provider {expected_source} returned rows owned by {sorted(sources)}"
+            )
+        if sources == {"standard_history"}:
+            for row in rows:
+                payload = row.source.raw_payload
+                if (
+                    not isinstance(payload, Mapping)
+                    or payload.get("validation_state") != "accepted"
+                ):
+                    raise RuntimeError(
+                        "standard history row is missing accepted validation lineage"
+                    )
+        seen_times = set()
+        previous_time = None
+        for row in rows:
+            if row.instrument != instrument:
+                raise RuntimeError("history provider returned a different instrument")
+            if row.open_time in seen_times:
+                raise RuntimeError("history provider returned duplicate candle times")
+            if previous_time is not None and row.open_time < previous_time:
+                raise RuntimeError("history provider returned candles out of order")
+            seen_times.add(row.open_time)
+            previous_time = row.open_time

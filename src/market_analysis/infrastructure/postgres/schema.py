@@ -92,4 +92,42 @@ CREATE TABLE IF NOT EXISTS candles (
 
 CREATE INDEX IF NOT EXISTS ix_candles_instrument_interval_time
     ON candles (instrument_symbol, interval_seconds, open_time DESC);
+
+CREATE TABLE IF NOT EXISTS candle_validation_results (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    validation_state TEXT NOT NULL CHECK (validation_state IN ('accepted', 'rejected')),
+    source_count INTEGER NOT NULL CHECK (source_count > 0),
+    max_close_deviation_ratio NUMERIC(38, 18) NOT NULL,
+    evidence JSONB NOT NULL,
+    evaluated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_symbol, interval_seconds, open_time)
+);
+
+CREATE TABLE IF NOT EXISTS standard_candles (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    validated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    open NUMERIC(38, 18) NOT NULL,
+    high NUMERIC(38, 18) NOT NULL,
+    low NUMERIC(38, 18) NOT NULL,
+    close NUMERIC(38, 18) NOT NULL,
+    volume NUMERIC(38, 18),
+    primary_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    source_count INTEGER NOT NULL CHECK (source_count > 0),
+    validation_method TEXT NOT NULL,
+    max_close_deviation_ratio NUMERIC(38, 18) NOT NULL,
+    evidence JSONB NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    CHECK (low <= open AND open <= high),
+    CHECK (low <= close AND close <= high),
+    PRIMARY KEY (instrument_symbol, interval_seconds, open_time)
+);
+
+CREATE INDEX IF NOT EXISTS ix_standard_candles_instrument_time
+    ON standard_candles (instrument_symbol, interval_seconds, open_time DESC);
 """

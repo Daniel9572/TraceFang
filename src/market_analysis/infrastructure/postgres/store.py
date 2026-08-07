@@ -60,6 +60,31 @@ ON CONFLICT (instrument_symbol, source_id) DO UPDATE SET
 WHERE EXCLUDED.observed_at >= latest_quotes.observed_at
 """
 
+_SELECT_LATEST_QUOTE = """
+SELECT
+    instrument_symbol, source_id, provider_symbol, observed_at, received_at,
+    last, open, high, low, volume, change, change_percent, raw_payload
+FROM latest_quotes
+WHERE instrument_symbol = $1 AND source_id = $2
+"""
+
+_REMOVE_SOURCE_FROM_STANDARD_HISTORY = """
+WITH deleted_standard AS (
+    DELETE FROM standard_candles
+    WHERE primary_source_id = $1
+       OR COALESCE(evidence -> 'candidates', '[]'::jsonb)
+          @> jsonb_build_array(jsonb_build_object('source_id', $1))
+    RETURNING 1
+), deleted_validation AS (
+    DELETE FROM candle_validation_results
+    WHERE evidence @> jsonb_build_array(jsonb_build_object('source_id', $1))
+    RETURNING 1
+)
+SELECT
+    (SELECT count(*)::integer FROM deleted_standard) AS standard_rows,
+    (SELECT count(*)::integer FROM deleted_validation) AS validation_rows
+"""
+
 _UPSERT_CANDLE = """
 INSERT INTO candles (
     instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
@@ -96,7 +121,7 @@ ON CONFLICT (instrument_symbol, capability) DO UPDATE SET
     updated_at = now()
 """
 
-_SELECT_CANONICAL_CANDLES_FROM = """
+_STANDARDIZE_CANDLES = """
 WITH persisted AS (
     SELECT
         instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
@@ -105,7 +130,9 @@ WITH persisted AS (
     FROM candles
     WHERE instrument_symbol = $1
       AND interval_seconds = $2
+      AND source_id = ANY($3::text[])
       AND open_time >= $5
+      AND open_time < $6
 ), quote_derived AS (
     SELECT
         instrument_symbol,
@@ -129,83 +156,181 @@ WITH persisted AS (
       AND observed_at >= $5
       AND observed_at < $6
     GROUP BY instrument_symbol, source_id, date_trunc('minute', observed_at)
-), selected AS (
-    SELECT DISTINCT ON (open_time)
-        instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
-        observed_at, received_at, open, high, low, close, volume, raw_payload
-    FROM (
-        SELECT * FROM persisted
-        UNION ALL
-        SELECT * FROM quote_derived
-    ) AS candidates
-    ORDER BY
-        open_time ASC,
-        COALESCE(array_position($3::text[], source_id), 2147483647) ASC,
-        record_rank ASC,
-        received_at DESC
-)
-SELECT
-    instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
-    observed_at, received_at, open, high, low, close, volume, raw_payload
-FROM selected
-ORDER BY open_time ASC
-LIMIT $7
-"""
-
-_SELECT_CANONICAL_LATEST_CANDLES = """
-WITH persisted AS (
-    SELECT
+), within_source AS (
+    SELECT DISTINCT ON (source_id, open_time)
         instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
         observed_at, received_at, open, high, low, close, volume, raw_payload,
-        0 AS record_rank
-    FROM candles
-    WHERE instrument_symbol = $1
-      AND interval_seconds = $2
-), quote_derived AS (
-    SELECT
-        instrument_symbol,
-        source_id,
-        (array_agg(provider_symbol ORDER BY observed_at, id))[1] AS provider_symbol,
-        60 AS interval_seconds,
-        date_trunc('minute', observed_at) AS open_time,
-        max(observed_at) AS observed_at,
-        max(received_at) AS received_at,
-        (array_agg(last ORDER BY observed_at, id))[1] AS open,
-        max(last) AS high,
-        min(last) AS low,
-        (array_agg(last ORDER BY observed_at DESC, id DESC))[1] AS close,
-        NULL::numeric AS volume,
-        jsonb_build_object('derived_from', 'persisted_quote_events') AS raw_payload,
-        1 AS record_rank
-    FROM quote_events
-    WHERE instrument_symbol = $1
-      AND $2 = 60
-      AND source_id = ANY($4::text[])
-      AND observed_at >= $5
-    GROUP BY instrument_symbol, source_id, date_trunc('minute', observed_at)
-), selected AS (
-    SELECT DISTINCT ON (open_time)
-        instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
-        observed_at, received_at, open, high, low, close, volume, raw_payload
+        record_rank
     FROM (
         SELECT * FROM persisted
         UNION ALL
         SELECT * FROM quote_derived
     ) AS candidates
+    ORDER BY source_id, open_time, record_rank, received_at DESC
+), minute_stats AS (
+    SELECT
+        open_time,
+        count(*)::integer AS source_count,
+        COALESCE(
+            (max(close) - min(close)) / NULLIF(abs(avg(close)), 0),
+            0
+        ) AS max_close_deviation_ratio,
+        jsonb_agg(
+            jsonb_build_object(
+                'source_id', source_id,
+                'provider_symbol', provider_symbol,
+                'open', open::text,
+                'high', high::text,
+                'low', low::text,
+                'close', close::text,
+                'observed_at', observed_at,
+                'received_at', received_at
+            )
+            ORDER BY
+                COALESCE(array_position($3::text[], source_id), 2147483647),
+                source_id
+        ) AS candidate_evidence
+    FROM within_source
+    GROUP BY open_time
+), validation_log AS (
+    INSERT INTO candle_validation_results (
+        instrument_symbol, interval_seconds, open_time, validation_state,
+        source_count, max_close_deviation_ratio, evidence
+    )
+    SELECT
+        $1,
+        $2,
+        open_time,
+        CASE
+            WHEN source_count = 1 OR max_close_deviation_ratio <= $7
+                THEN 'accepted'
+            ELSE 'rejected'
+        END,
+        source_count,
+        max_close_deviation_ratio,
+        candidate_evidence
+    FROM minute_stats
+    ON CONFLICT (instrument_symbol, interval_seconds, open_time) DO UPDATE SET
+        validation_state = EXCLUDED.validation_state,
+        source_count = EXCLUDED.source_count,
+        max_close_deviation_ratio = EXCLUDED.max_close_deviation_ratio,
+        evidence = EXCLUDED.evidence,
+        evaluated_at = now()
+    RETURNING open_time, validation_state
+), accepted_minutes AS (
+    SELECT stats.*
+    FROM minute_stats AS stats
+    JOIN validation_log AS logged USING (open_time)
+    WHERE logged.validation_state = 'accepted'
+), chosen AS (
+    SELECT DISTINCT ON (candidate.open_time)
+        candidate.*,
+        stats.source_count,
+        stats.max_close_deviation_ratio,
+        stats.candidate_evidence
+    FROM within_source AS candidate
+    JOIN accepted_minutes AS stats USING (open_time)
     ORDER BY
-        open_time DESC,
-        COALESCE(array_position($3::text[], source_id), 2147483647) ASC,
-        record_rank ASC,
-        received_at DESC
-), recent AS (
-    SELECT * FROM selected
-    ORDER BY open_time DESC
-    LIMIT $6
+        candidate.open_time,
+        COALESCE(array_position($3::text[], candidate.source_id), 2147483647),
+        candidate.record_rank,
+        candidate.received_at DESC
+), accepted AS (
+    SELECT
+        chosen.*,
+        CASE
+            WHEN chosen.source_count > 1 THEN 'cross_source_consensus'
+            ELSE 'single_source_structural'
+        END AS validation_method,
+        jsonb_build_object(
+            'validation_state', 'accepted',
+            'primary_source_id', chosen.source_id,
+            'source_count', chosen.source_count,
+            'max_close_deviation_ratio', chosen.max_close_deviation_ratio::text,
+            'candidates', chosen.candidate_evidence
+        ) AS evidence
+    FROM chosen
+)
+INSERT INTO standard_candles (
+    instrument_symbol, interval_seconds, open_time, observed_at, received_at,
+    open, high, low, close, volume, primary_source_id, source_count,
+    validation_method, max_close_deviation_ratio, evidence
 )
 SELECT
-    instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
-    observed_at, received_at, open, high, low, close, volume, raw_payload
-FROM recent
+    instrument_symbol, interval_seconds, open_time, observed_at, received_at,
+    open, high, low, close, volume, source_id, source_count,
+    validation_method, max_close_deviation_ratio, evidence
+FROM accepted
+ON CONFLICT (instrument_symbol, interval_seconds, open_time) DO UPDATE SET
+    observed_at = EXCLUDED.observed_at,
+    received_at = EXCLUDED.received_at,
+    validated_at = now(),
+    open = EXCLUDED.open,
+    high = EXCLUDED.high,
+    low = EXCLUDED.low,
+    close = EXCLUDED.close,
+    volume = EXCLUDED.volume,
+    primary_source_id = EXCLUDED.primary_source_id,
+    source_count = EXCLUDED.source_count,
+    validation_method = EXCLUDED.validation_method,
+    max_close_deviation_ratio = EXCLUDED.max_close_deviation_ratio,
+    evidence = EXCLUDED.evidence,
+    revision = standard_candles.revision + 1
+WHERE standard_candles.evidence IS DISTINCT FROM EXCLUDED.evidence
+   OR EXCLUDED.received_at > standard_candles.received_at
+"""
+
+_SELECT_STANDARD_CANDLES_FROM = """
+SELECT
+    instrument_symbol, 'standard_history' AS source_id,
+    instrument_symbol AS provider_symbol, interval_seconds, open_time,
+    observed_at, received_at, open, high, low, close, volume,
+    evidence || jsonb_build_object(
+        'validation_method', validation_method,
+        'validated_at', validated_at,
+        'revision', revision
+    ) AS raw_payload
+FROM standard_candles
+WHERE instrument_symbol = $1
+  AND interval_seconds = $2
+  AND open_time >= $3
+  AND primary_source_id = ANY($4::text[])
+  AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(
+          COALESCE(standard_candles.evidence -> 'candidates', '[]'::jsonb)
+      ) AS candidate(value)
+      WHERE NOT ((candidate.value ->> 'source_id') = ANY($4::text[]))
+  )
+ORDER BY open_time ASC
+LIMIT $5
+"""
+
+_SELECT_STANDARD_LATEST_CANDLES = """
+SELECT *
+FROM (
+    SELECT
+        instrument_symbol, 'standard_history' AS source_id,
+        instrument_symbol AS provider_symbol, interval_seconds, open_time,
+        observed_at, received_at, open, high, low, close, volume,
+        evidence || jsonb_build_object(
+            'validation_method', validation_method,
+            'validated_at', validated_at,
+            'revision', revision
+        ) AS raw_payload
+    FROM standard_candles
+    WHERE instrument_symbol = $1 AND interval_seconds = $2
+      AND primary_source_id = ANY($3::text[])
+      AND NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+              COALESCE(standard_candles.evidence -> 'candidates', '[]'::jsonb)
+          ) AS candidate(value)
+          WHERE NOT ((candidate.value ->> 'source_id') = ANY($3::text[]))
+      )
+    ORDER BY open_time DESC
+    LIMIT $4
+) AS recent
 ORDER BY open_time ASC
 """
 
@@ -343,6 +468,30 @@ def _candle_from_row(row: Mapping[str, object], instrument: Instrument) -> Candl
     )
 
 
+def _quote_from_row(row: Mapping[str, object], instrument: Instrument) -> QuoteSnapshot:
+    return QuoteSnapshot(
+        instrument=instrument,
+        last=Decimal(row["last"]),
+        open=Decimal(row["open"]) if row["open"] is not None else None,
+        high=Decimal(row["high"]) if row["high"] is not None else None,
+        low=Decimal(row["low"]) if row["low"] is not None else None,
+        volume=Decimal(row["volume"]) if row["volume"] is not None else None,
+        change=Decimal(row["change"]) if row["change"] is not None else None,
+        change_percent=(
+            Decimal(row["change_percent"])
+            if row["change_percent"] is not None
+            else None
+        ),
+        source=SourceMetadata(
+            provider=str(row["source_id"]),
+            provider_symbol=str(row["provider_symbol"]),
+            observed_at=row["observed_at"],
+            received_at=row["received_at"],
+            raw_payload=_raw_payload(row["raw_payload"]),
+        ),
+    )
+
+
 class PostgresMarketDataStore:
     def __init__(self, settings: PostgresSettings) -> None:
         self._settings = settings
@@ -388,6 +537,20 @@ class PostgresMarketDataStore:
             await connection.execute(_INSERT_QUOTE, *values)
             await connection.execute(_UPSERT_LATEST_QUOTE, *values)
 
+    async def load_latest_quote(
+        self,
+        instrument: Instrument,
+        source_id: str,
+    ) -> QuoteSnapshot | None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                _SELECT_LATEST_QUOTE,
+                instrument.symbol,
+                source_id,
+            )
+        return _quote_from_row(row, instrument) if row is not None else None
+
     async def save_candles(self, candles: Sequence[Candle]) -> None:
         if not candles:
             return
@@ -400,6 +563,59 @@ class PostgresMarketDataStore:
             for source_id in sources:
                 await connection.execute(_UPSERT_SOURCE, source_id)
             await connection.executemany(_UPSERT_CANDLE, [_candle_values(row) for row in candles])
+
+    async def remove_source_from_standard_history(
+        self,
+        source_id: str,
+    ) -> Mapping[str, int]:
+        if not source_id.strip():
+            raise ValueError("source_id is required")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                _REMOVE_SOURCE_FROM_STANDARD_HISTORY,
+                source_id,
+            )
+        return {
+            "standard_rows": int(row["standard_rows"]),
+            "validation_rows": int(row["validation_rows"]),
+        }
+
+    async def standardize_candles(
+        self,
+        instrument: Instrument,
+        *,
+        source_priority: Sequence[str],
+        quote_derived_sources: Sequence[str],
+        start: datetime,
+        end: datetime,
+        interval: timedelta = timedelta(minutes=1),
+        max_close_deviation_ratio: Decimal = Decimal("0.001"),
+    ) -> None:
+        if start.tzinfo is None or start.utcoffset() is None:
+            raise ValueError("start must be timezone-aware")
+        if end.tzinfo is None or end.utcoffset() is None:
+            raise ValueError("end must be timezone-aware")
+        if end <= start:
+            raise ValueError("end must be after start")
+        interval_seconds = int(interval.total_seconds())
+        if interval_seconds < 1:
+            raise ValueError("interval must be positive")
+        if not Decimal(0) <= max_close_deviation_ratio <= Decimal("0.1"):
+            raise ValueError("max close deviation ratio is outside the supported range")
+        priority = tuple(dict.fromkeys((*source_priority, *quote_derived_sources)))
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            await connection.execute(
+                _STANDARDIZE_CANDLES,
+                instrument.symbol,
+                interval_seconds,
+                priority,
+                tuple(quote_derived_sources),
+                start,
+                end,
+                max_close_deviation_ratio,
+            )
 
     async def load_candles(
         self,
@@ -418,31 +634,26 @@ class PostgresMarketDataStore:
             raise ValueError("interval must be positive")
         if start is not None and (start.tzinfo is None or start.utcoffset() is None):
             raise ValueError("start must be timezone-aware")
-        priority = tuple(source_priority)
-        derived_sources = tuple(quote_derived_sources)
+        allowed_sources = tuple(dict.fromkeys((*source_priority, *quote_derived_sources)))
+        if not allowed_sources:
+            return ()
         pool = self._require_pool()
         async with pool.acquire() as connection:
             if start is None:
-                quote_cutoff = datetime.now(UTC) - timedelta(minutes=max(7 * 24 * 60, count * 3))
                 rows = await connection.fetch(
-                    _SELECT_CANONICAL_LATEST_CANDLES,
+                    _SELECT_STANDARD_LATEST_CANDLES,
                     instrument.symbol,
                     interval_seconds,
-                    priority,
-                    derived_sources,
-                    quote_cutoff,
+                    allowed_sources,
                     count,
                 )
             else:
-                quote_end = start + timedelta(days=7)
                 rows = await connection.fetch(
-                    _SELECT_CANONICAL_CANDLES_FROM,
+                    _SELECT_STANDARD_CANDLES_FROM,
                     instrument.symbol,
                     interval_seconds,
-                    priority,
-                    derived_sources,
                     start,
-                    quote_end,
+                    allowed_sources,
                     count,
                 )
         return tuple(_candle_from_row(row, instrument) for row in rows)

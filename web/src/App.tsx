@@ -30,6 +30,7 @@ import type {
   InstrumentEntry,
   QuoteSnapshot,
   QuoteStreamEvent,
+  QuoteView,
   SourceDescriptor,
   SourceId,
   TimelineSample,
@@ -51,9 +52,10 @@ const defaultInstruments: InstrumentEntry[] = [
 ];
 
 const sourceLabels: Record<SourceId, string> = {
+  jin10_client: "金十客户端组合行情",
   jin10_mcp: "金十官方 MCP",
-  jin10_local: "金十桌面会话行情",
-  jin10_web: "金十官网高速行情",
+  jin10_local: "金十桌面会话原始通道",
+  jin10_web: "金十官网高速原始通道",
 };
 
 const errorTranslations: Array<[RegExp, string]> = [
@@ -112,8 +114,8 @@ export default function App() {
   const [selectedCode, setSelectedCode] = useState("XAUUSD");
   const [instrumentSources, setInstrumentSources] = useState<Record<string, SourceId>>({});
   const [instrumentSourcesLoaded, setInstrumentSourcesLoaded] = useState(false);
-  const [quote, setQuote] = useState<QuoteSnapshot | null>(null);
-  const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteSnapshot>>({});
+  const [quote, setQuote] = useState<QuoteView | null>(null);
+  const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteView>>({});
   const [candles, setCandles] = useState<Candle[]>([]);
   const [timelineSamples, setTimelineSamples] = useState<TimelineSample[]>([]);
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
@@ -138,7 +140,7 @@ export default function App() {
 
   const selectedInstrument =
     instruments.find((instrument) => instrument.provider_code === selectedCode) ?? defaultInstruments[0];
-  const selectedSource = instrumentSources[selectedCode] ?? "jin10_local";
+  const selectedSource = instrumentSources[selectedCode] ?? "jin10_client";
   const selectedPeriod = chartPeriodById(periodId);
   const sourceById = useMemo(
     () => new Map(sources.map((source) => [source.source_id, source])),
@@ -148,6 +150,7 @@ export default function App() {
   const selectedSourceReady = Boolean(
     sourcesLoaded
     && selectedSourceDescriptor
+    && !selectedSourceDescriptor.frozen
     && selectedSourceDescriptor.enabled
     && (!selectedSourceDescriptor.manual_connection_required || selectedSourceDescriptor.connection_active),
   );
@@ -234,7 +237,7 @@ export default function App() {
           const value = await marketApi.instrumentSource(instrument.provider_code);
           return [instrument.provider_code, value.source_id] as const;
         } catch {
-          return [instrument.provider_code, "jin10_local" as SourceId] as const;
+          return [instrument.provider_code, "jin10_client" as SourceId] as const;
         }
       }),
     ).then((values) => {
@@ -266,9 +269,11 @@ export default function App() {
 
     if (!selectedSourceReady) {
       setQuoteStreamState("unavailable");
-      setQuoteError(selectedSourceDescriptor && !selectedSourceDescriptor.enabled
-        ? `${selectedSourceDescriptor.display_name}已停用，请在实时来源菜单中重新启用`
-        : `${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在实时来源菜单中点击连接并测试`);
+      setQuoteError(selectedSourceDescriptor?.frozen
+        ? `${selectedSourceDescriptor.display_name}已冻结，不会用于实时或历史数据`
+        : selectedSourceDescriptor && !selectedSourceDescriptor.enabled
+          ? `${selectedSourceDescriptor.display_name}已停用，请在实时来源菜单中重新启用`
+          : `${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在实时来源菜单中点击连接并测试`);
       setLoadingQuote(false);
       return;
     }
@@ -286,10 +291,10 @@ export default function App() {
         setQuoteStreamState(event.state);
         if (event.kind === "quote" && event.quote) {
           setQuote(event.quote);
-          setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteSnapshot }));
-          const sampleValue = numeric(event.quote.last);
-          const observedTime = new Date(event.quote.source.observed_at).getTime() / 1_000;
-          const receivedTime = new Date(event.quote.source.received_at).getTime() / 1_000;
+          setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteView }));
+          const sampleValue = numeric(event.quote.price.last);
+          const observedTime = new Date(event.quote.price.source.observed_at).getTime() / 1_000;
+          const receivedTime = new Date(event.quote.price.source.received_at).getTime() / 1_000;
           if (
             sampleValue !== null
             && Number.isFinite(observedTime)
@@ -302,11 +307,11 @@ export default function App() {
                 observedTime,
                 value: sampleValue,
                 eventId: [
-                  event.quote?.source.provider,
-                  event.quote?.source.provider_symbol,
-                  event.quote?.source.observed_at,
-                  event.quote?.source.received_at,
-                  String(event.quote?.last),
+                  event.quote?.price.source.provider,
+                  event.quote?.price.source.provider_symbol,
+                  event.quote?.price.source.observed_at,
+                  event.quote?.price.source.received_at,
+                  String(event.quote?.price.last),
                 ].join("|"),
               },
             ));
@@ -384,7 +389,7 @@ export default function App() {
     if (missing.length === 0) return;
     void Promise.allSettled(
       missing.map(async (item) => {
-        const source = instrumentSources[item.provider_code] ?? "jin10_local";
+        const source = instrumentSources[item.provider_code] ?? "jin10_client";
         const descriptor = sourceById.get(source);
         if (!descriptor || (descriptor.manual_connection_required && !descriptor.connection_active)) return;
         const value = await marketApi.quote(item.provider_code, source);
@@ -465,8 +470,14 @@ export default function App() {
     }
   }, []);
 
-  const livePrice = numeric(quote?.last);
-  const quoteObservedAt = quote?.source.observed_at ?? null;
+  const priceQuote = quote?.price ?? null;
+  const dailyQuote = quote?.source_id === "jin10_client"
+    ? quote.stale_channels.includes("jin10_local")
+      ? null
+      : quote.supplement
+    : priceQuote;
+  const livePrice = numeric(priceQuote?.last);
+  const quoteObservedAt = priceQuote?.source.observed_at ?? null;
   const chartBars = useMemo(
     () => buildChartBars(
       candles,
@@ -479,11 +490,11 @@ export default function App() {
   );
   const displayBar = hover ?? chartBars.at(-1) ?? null;
   const timelineReferencePrice = useMemo(() => {
-    const last = numeric(quote?.last);
-    const change = numeric(quote?.change);
+    const last = numeric(priceQuote?.last);
+    const change = numeric(priceQuote?.change);
     if (last !== null && change !== null) return last - change;
     return chartBars[0]?.open ?? null;
-  }, [chartBars, quote?.change, quote?.last]);
+  }, [chartBars, priceQuote?.change, priceQuote?.last]);
   const timelineChange = displayBar && timelineReferencePrice !== null
     ? displayBar.close - timelineReferencePrice
     : null;
@@ -507,8 +518,13 @@ export default function App() {
         ? `${Math.round(timelineSamplingSeconds)}秒`
         : "分钟级";
 
-  const quoteTrend = trendClass(quote);
-  const quoteProvider = quote?.source.provider as SourceId | undefined;
+  const quoteTrend = trendClass(priceQuote);
+  const quoteProvider = priceQuote?.source.provider as SourceId | undefined;
+  const supplementState = quote?.missing_channels.includes("jin10_local")
+    ? "补充通道缺失"
+    : quote?.stale_channels.includes("jin10_local")
+      ? "补充通道已过期"
+      : null;
 
   return (
     <div className={`terminal-shell ${watchOpen && watchPinned ? "is-watch-docked" : ""}`}>
@@ -601,7 +617,7 @@ export default function App() {
         <div className="instrument-list">
           {instruments.map((item) => {
             const itemQuote = watchQuotes[item.provider_code];
-            const direction = trendClass(itemQuote ?? null);
+            const direction = trendClass(itemQuote?.price ?? null);
             return (
               <button
                 type="button"
@@ -614,8 +630,8 @@ export default function App() {
                   <span>{item.provider_code}</span>
                 </div>
                 <div className={direction}>
-                  <strong>{formatPrice(itemQuote?.last, item.provider_code)}</strong>
-                  <span>{formatSigned(itemQuote?.change_percent)}%</span>
+                  <strong>{formatPrice(itemQuote?.price.last, item.provider_code)}</strong>
+                  <span>{formatSigned(itemQuote?.price.change_percent)}%</span>
                 </div>
               </button>
             );
@@ -690,26 +706,26 @@ export default function App() {
                 <small><LiveClock /></small>
               </div>
               <div className={`hero-price chart-hero-price ${quoteTrend}`}>
-                <strong>{loadingQuote && !quote ? "读取中" : formatPrice(quote?.last, selectedCode)}</strong>
-                {numeric(quote?.change) === null ? null : (
-                  <span>{(numeric(quote?.change) ?? 0) >= 0 ? "↑" : "↓"}</span>
+                <strong>{loadingQuote && !quote ? "读取中" : formatPrice(priceQuote?.last, selectedCode)}</strong>
+                {numeric(priceQuote?.change) === null ? null : (
+                  <span>{(numeric(priceQuote?.change) ?? 0) >= 0 ? "↑" : "↓"}</span>
                 )}
-                <small>{formatSigned(quote?.change_percent)}%</small>
-                <small>{formatSigned(quote?.change, digitsFor(selectedCode))}</small>
+                <small>{formatSigned(priceQuote?.change_percent)}%</small>
+                <small>{formatSigned(priceQuote?.change, digitsFor(selectedCode))}</small>
               </div>
             </div>
             <div className="chart-context-secondary">
               <dl className="chart-daily-stats">
-                <div><dt>最高</dt><dd className="trend-up">{formatPrice(quote?.high, selectedCode)}</dd></div>
-                <div><dt>最低</dt><dd className="trend-down">{formatPrice(quote?.low, selectedCode)}</dd></div>
-                <div><dt>今开</dt><dd>{formatPrice(quote?.open, selectedCode)}</dd></div>
+                <div><dt>最高</dt><dd className="trend-up">{formatPrice(dailyQuote?.high, selectedCode)}</dd></div>
+                <div><dt>最低</dt><dd className="trend-down">{formatPrice(dailyQuote?.low, selectedCode)}</dd></div>
+                <div><dt>今开</dt><dd>{formatPrice(dailyQuote?.open, selectedCode)}</dd></div>
               </dl>
               <div className="chart-freshness">
                 <span className={`status-dot ${quoteError ? "is-error" : ""}`} />
                 <span>
                   {quoteError
                     ? quoteError
-                    : `${sourceById.get(quoteProvider ?? selectedSource)?.display_name ?? sourceLabels[quoteProvider ?? selectedSource]} · ${quote ? new Date(quote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}`}
+                    : `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · 价格 ${sourceById.get(quoteProvider ?? selectedSource)?.display_name ?? sourceLabels[quoteProvider ?? selectedSource]} · ${priceQuote ? new Date(priceQuote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}${supplementState ? ` · ${supplementState}` : ""}`}
                 </span>
               </div>
             </div>

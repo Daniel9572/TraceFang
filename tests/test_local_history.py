@@ -48,8 +48,35 @@ class FakeStore:
         merged.update((row.open_time, row) for row in values)
         self.rows = tuple(sorted(merged.values(), key=lambda row: row.open_time))
 
+    async def standardize_candles(self, _instrument, **_kwargs) -> None:
+        return None
+
 
 class LocalCandleHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejects_a_history_series_mixed_from_raw_channels(self) -> None:
+        store = FakeStore(
+            (
+                candle(0, source="jin10_web"),
+                candle(1, source="jin10_local"),
+            )
+        )
+        service = LocalCandleHistoryService(
+            store,
+            fetch_candles=lambda *_args: asyncio.sleep(0, result=()),
+            source_priority=lambda: ("jin10_web", "jin10_local"),
+            quote_derived_sources=lambda: ("jin10_web", "jin10_local"),
+            backfill_sources=lambda: (),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "multiple raw channels"):
+            await service.get_candles(
+                INSTRUMENT,
+                start=datetime(2026, 8, 6, 8, 0, tzinfo=UTC),
+                count=2,
+            )
+
+        await service.close()
+
     async def test_returns_global_local_history_before_background_work(self) -> None:
         existing = (candle(0, source="jin10_mcp"),)
         store = FakeStore(existing)

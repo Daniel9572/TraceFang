@@ -10,6 +10,7 @@ export const sourceHealthLabels: Record<SourceDescriptor["health"], string> = {
   degraded: "降级",
   unavailable: "暂不可用",
   unconfigured: "待配置",
+  frozen: "已冻结",
   unknown: "待检测",
 };
 

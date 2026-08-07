@@ -11,8 +11,10 @@ from market_analysis.infrastructure.providers.jin10 import (
 
 
 @unittest.skipUnless(
-    os.environ.get("RUN_JIN10_LIVE") == "1" and os.environ.get("JIN10_MCP_BEARER_TOKEN"),
-    "set RUN_JIN10_LIVE=1 and JIN10_MCP_BEARER_TOKEN to run",
+    os.environ.get("JIN10_MCP_ENABLED", "").lower() == "true"
+    and os.environ.get("RUN_JIN10_LIVE") == "1"
+    and os.environ.get("JIN10_MCP_BEARER_TOKEN"),
+    "MCP is frozen; explicitly enable it before running the archived contract test",
 )
 class Jin10LiveContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_gold_silver_quotes_and_gold_kline(self) -> None:

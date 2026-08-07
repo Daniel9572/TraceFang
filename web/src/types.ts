@@ -1,6 +1,7 @@
-export type SourceId = "jin10_mcp" | "jin10_local" | "jin10_web";
+export type SourceId = "jin10_client" | "jin10_mcp" | "jin10_local" | "jin10_web";
 export type SourceAccessModel = "unmetered" | "limited" | "metered";
 export type QuoteServiceTier = "institutional" | "enhanced" | "standard" | "reference";
+export type SourceKind = "channel" | "composite";
 
 export interface SourceQuota {
   key: string;
@@ -50,6 +51,27 @@ export interface QuoteSnapshot {
   source: SourceMetadata;
 }
 
+export interface QuoteComponent {
+  source_id: SourceId;
+  role: "realtime_price" | "session_supplement" | "complete_quote" | string;
+  fields: string[];
+  available: boolean;
+  stale: boolean;
+  age_seconds: number | null;
+  quote: QuoteSnapshot | null;
+}
+
+export interface QuoteView {
+  source_id: SourceId;
+  price: QuoteSnapshot;
+  supplement: QuoteSnapshot | null;
+  field_sources: Record<string, SourceId>;
+  components: QuoteComponent[];
+  missing_channels: SourceId[];
+  stale_channels: SourceId[];
+  composed_at: string;
+}
+
 export interface Candle {
   instrument: Instrument;
   interval: number | string;
@@ -75,16 +97,21 @@ export interface SourceDescriptor {
   quote_poll_interval_seconds: number;
   quote_streaming: boolean;
   quote_service_tier: QuoteServiceTier;
+  source_kind: SourceKind;
+  component_source_ids: SourceId[];
+  field_ownership: Array<{ source_id: SourceId; fields: string[] }>;
   access_model: SourceAccessModel;
   access_note: string | null;
   manual_connection_required: boolean;
   connection_active: boolean;
   quotas: SourceQuota[];
-  health: "healthy" | "degraded" | "unavailable" | "unconfigured" | "unknown";
+  health: "healthy" | "degraded" | "unavailable" | "unconfigured" | "frozen" | "unknown";
   state: string;
   error: string | null;
   checked_at: string | null;
   last_success_at: string | null;
+  frozen: boolean;
+  frozen_reason: string | null;
 }
 
 export interface SourceConnectionTest {
@@ -93,6 +120,7 @@ export interface SourceConnectionTest {
   last: number | string;
   observed_at: string;
   latency_ms: number;
+  components: QuoteComponent[];
 }
 
 export interface InstrumentSourceSelection {
@@ -104,7 +132,7 @@ export interface QuoteStreamEvent {
   kind: "quote" | "status";
   state: "connecting" | "live" | "unavailable";
   emitted_at: string;
-  quote: QuoteSnapshot | null;
+  quote: QuoteView | null;
   error: string | null;
 }
 

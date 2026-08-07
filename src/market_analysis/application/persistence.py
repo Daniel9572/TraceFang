@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -23,7 +23,29 @@ class MarketDataStore(Protocol):
 
     async def save_quote(self, quote: QuoteSnapshot) -> None: ...
 
+    async def load_latest_quote(
+        self,
+        instrument: Instrument,
+        source_id: str,
+    ) -> QuoteSnapshot | None: ...
+
     async def save_candles(self, candles: Sequence[Candle]) -> None: ...
+
+    async def remove_source_from_standard_history(
+        self,
+        source_id: str,
+    ) -> Mapping[str, int]: ...
+
+    async def standardize_candles(
+        self,
+        instrument: Instrument,
+        *,
+        source_priority: Sequence[str],
+        quote_derived_sources: Sequence[str],
+        start: datetime,
+        end: datetime,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> None: ...
 
     async def load_candles(
         self,

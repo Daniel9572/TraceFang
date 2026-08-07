@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -44,6 +44,7 @@ class Jin10WebProvider:
     ) -> None:
         self.settings = settings
         self.symbol_mapper = symbol_mapper or Jin10WebSymbolMapper()
+        self._subscriptions = self.symbol_mapper.provider_codes
         self._latest: dict[str, QuoteSnapshot] = {}
         self._updates = {code: asyncio.Event() for code in self.symbol_mapper.provider_codes}
         self._task: asyncio.Task[None] | None = None
@@ -61,9 +62,30 @@ class Jin10WebProvider:
         await self.close()
 
     async def open(self) -> None:
+        if not self._subscriptions:
+            return
         if self._task is not None and not self._task.done():
             return
         self._task = asyncio.create_task(self._run(), name="jin10-web-quotes")
+
+    async def set_subscriptions(self, instruments: Sequence[Instrument]) -> None:
+        subscriptions = tuple(
+            dict.fromkeys(
+                self.symbol_mapper.to_provider_code(instrument) for instrument in instruments
+            )
+        )
+        if subscriptions == self._subscriptions:
+            if subscriptions:
+                await self.open()
+            return
+        await self.close()
+        self._subscriptions = subscriptions
+        if subscriptions:
+            await self.open()
+
+    @property
+    def subscribed_provider_codes(self) -> tuple[str, ...]:
+        return self._subscriptions
 
     async def close(self) -> None:
         task = self._task
@@ -82,6 +104,8 @@ class Jin10WebProvider:
         self._quote_listeners.discard(listener)
 
     def health(self) -> tuple[bool, str, str | None]:
+        if not self._subscriptions:
+            return True, "idle", "当前没有合约分配到金十官网原始通道"
         now = datetime.now(UTC)
         fresh = [
             quote
@@ -102,6 +126,10 @@ class Jin10WebProvider:
 
     async def get_quote(self, instrument: Instrument) -> QuoteSnapshot:
         provider_code = self.symbol_mapper.to_provider_code(instrument)
+        if provider_code not in self._subscriptions:
+            raise ProviderUnavailableError(
+                f"{instrument.symbol} is not subscribed on the Jin10 web channel"
+            )
         if self._task is None or self._task.done():
             raise ProviderUnavailableError("Jin10 web quote stream is not open")
         event = self._updates[provider_code]
@@ -162,7 +190,7 @@ class Jin10WebProvider:
             max_size=1024 * 1024,
         ) as socket:
             subscription = encode_quote_subscription(
-                provider_codes=self.symbol_mapper.provider_codes,
+                provider_codes=self._subscriptions,
                 frequency_ms=self.settings.quote_frequency_ms,
             )
             await socket.send(subscription)
