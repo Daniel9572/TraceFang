@@ -24,7 +24,7 @@ button { color: inherit; }
 button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 235, .68); outline-offset: 2px; }
 
 .terminal-shell {
-  --watch-width: 300px;
+  --watch-width: 420px;
   position: relative;
   display: grid;
   grid-template-columns: 0 minmax(680px, 1fr);
@@ -92,24 +92,30 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
 .watch-panel-actions button:hover { color: var(--blue); background: #f2f6fc; }
 .watch-panel-actions button.is-active { color: var(--blue); background: var(--blue-soft); }
 
-.watch-section-title { display: flex; flex: 0 0 38px; justify-content: space-between; align-items: center; height: 38px; padding: 0 15px; border-bottom: 1px solid #f3f5f8; }
-.watch-section-title div { display: flex; align-items: center; gap: 7px; }
-.watch-section-title strong { font-size: 14px; }
-.watch-section-title span { color: var(--blue); font-size: 9px; }
-.watch-section-title svg { padding: 2px; border-radius: 50%; color: var(--blue); background: var(--blue-soft); }
-.watch-list-head { display: grid; flex: 0 0 27px; grid-template-columns: 86px 96px; column-gap: 8px; justify-content: start; align-items: center; height: 27px; padding: 0 14px; color: #9aa3af; background: #fafbfd; border-bottom: 1px solid var(--line); font-size: 9px; }
+.watch-list-head { display: grid; flex: 0 0 44px; grid-template-columns: minmax(108px, 1fr) 94px 88px 76px; column-gap: 6px; align-items: center; height: 44px; padding: 0 14px; color: #8c929a; background: #fff; border-bottom: 1px solid #f1f2f4; font-size: 10px; }
+.watch-list-head > span:nth-child(2) { grid-column: 3; text-align: right; }
+.watch-list-head > span:nth-child(3) { text-align: right; }
+.watch-list-modes { display: flex; grid-column: 1 / 3; align-items: center; gap: 20px; color: #8d9298; }
+.watch-list-modes svg:first-child { color: var(--blue); }
 
 .instrument-list { min-height: 0; overflow: auto; padding: 0; }
-.instrument-row { position: relative; display: grid; grid-template-columns: 86px 96px; column-gap: 8px; justify-content: start; align-items: center; width: 100%; min-height: 70px; padding: 10px 14px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; transition: 150ms ease; }
-.instrument-row:hover { background: #fafcff; }
-.instrument-row.is-selected { background: linear-gradient(90deg, #edf3ff 0%, #f8fbff 100%); }
-.instrument-row.is-selected::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 3px; background: var(--blue); }
-.instrument-row > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-.instrument-row > div:last-child { align-items: flex-start; }
-.instrument-row > div:first-child strong, .instrument-row > div:first-child span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.instrument-row strong { font-size: 14px; font-weight: 600; }
-.instrument-row > div:last-child strong { font-size: 18px; font-variant-numeric: tabular-nums; }
-.instrument-row span { color: #999fa7; font-size: 10px; }
+.instrument-row { position: relative; display: grid; grid-template-columns: minmax(108px, 1fr) 94px 88px 76px; column-gap: 6px; align-items: center; width: calc(100% - 8px); min-height: 106px; margin: 0 4px; padding: 13px 10px; border: 0; border-bottom: 1px solid #eceef1; border-radius: 6px; background: transparent; text-align: left; cursor: pointer; transition: background 150ms ease; }
+.instrument-row:hover { background: #fafafa; }
+.instrument-row.is-selected { background: #f5f5f5; }
+.instrument-row > div { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.instrument-row > div:not(:first-child) { align-items: flex-end; }
+.instrument-row > div:first-child strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.42; }
+.instrument-row > div:first-child span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instrument-row strong { font-size: 16px; font-weight: 500; }
+.instrument-price strong { font-family: "Segoe UI Variable", "Segoe UI", sans-serif; font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: .1px; }
+.instrument-row span { color: #969a9f; font-size: 12px; }
+.instrument-change strong { min-width: 70px; padding: 5px 7px; border-radius: 3px; color: #fff; background: #aeb5bf; font-family: "Segoe UI Variable", "Segoe UI", sans-serif; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; text-align: center; }
+.instrument-change.trend-up strong { background: var(--up); }
+.instrument-change.trend-down strong { background: var(--down); }
+.instrument-change span { color: currentColor; font-family: "Segoe UI Variable", "Segoe UI", sans-serif; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.watch-sparkline { width: 94px; height: 54px; justify-self: center; overflow: visible; }
+.watch-spark-reference { stroke: #c8cbd0; stroke-width: 1; stroke-dasharray: 6 4; }
+.watch-spark-line { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 
 .watch-reveal-button { position: absolute; z-index: 9; top: 50%; left: 0; display: grid; width: 22px; height: 48px; padding: 0; place-items: center; border: 1px solid #e0e5eb; border-left: 0; border-radius: 0 7px 7px 0; color: #707c8c; background: rgba(250, 251, 253, .94); box-shadow: 2px 0 7px rgba(35, 47, 64, .06); cursor: pointer; transform: translateY(-50%); transition: color 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 140ms ease; }
 .watch-reveal-button svg { transition: transform 140ms ease; }
@@ -515,7 +521,11 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
 @keyframes live-price-tick { from { filter: brightness(1.2); transform: translateY(-15px) translateX(4px); } }
 
 @media (max-width: 1320px) {
-  .terminal-shell { --watch-width: 290px; }
+  .terminal-shell { --watch-width: 400px; }
+  .watch-list-head, .instrument-row { grid-template-columns: minmax(96px, 1fr) 88px 82px 72px; column-gap: 5px; }
+  .watch-sparkline { width: 88px; }
+  .instrument-price strong { font-size: 20px; }
+  .instrument-change strong { min-width: 66px; font-size: 14px; }
   .top-brand { flex-basis: 145px; }
   .top-tool-icons { padding-right: 5px; margin-right: 3px; }
   .top-tool-icons button { width: 32px; }

@@ -92,6 +92,92 @@ function trendClass(quote: QuoteSnapshot | null): string {
   return change >= 0 ? "trend-up" : "trend-down";
 }
 
+const WATCH_SPARKLINE_LIMIT = 48;
+const WATCH_SPARKLINE_CANDLE_WINDOW = 480;
+
+function downsamplePrices(values: number[], limit: number): number[] {
+  if (values.length <= limit) return values;
+  return Array.from({ length: limit }, (_, index) => (
+    values[Math.round(index * (values.length - 1) / (limit - 1))]
+  ));
+}
+
+function appendWatchPriceSample(
+  current: Record<string, number[]>,
+  code: string,
+  value: QuoteView,
+): Record<string, number[]> {
+  const price = numeric(value.quote.last);
+  if (price === null) return current;
+  const previous = current[code] ?? [];
+  return {
+    ...current,
+    [code]: [...previous.slice(-(WATCH_SPARKLINE_LIMIT - 1)), price],
+  };
+}
+
+function WatchSparkline({
+  code,
+  quote,
+  samples,
+}: {
+  code: string;
+  quote: QuoteSnapshot | null;
+  samples: number[];
+}) {
+  const width = 94;
+  const height = 54;
+  const padding = 3;
+  const last = numeric(quote?.last);
+  const change = numeric(quote?.change);
+  const reference = last !== null && change !== null ? last - change : null;
+  const observed = samples.length > 0 ? samples : last !== null ? [last] : [];
+  const plotted = observed.length === 1 && reference !== null
+    ? [reference, observed[0]]
+    : observed;
+  const domain = reference === null ? plotted : [...plotted, reference];
+  const minimum = domain.length > 0 ? Math.min(...domain) : 0;
+  const maximum = domain.length > 0 ? Math.max(...domain) : 1;
+  const spread = maximum - minimum;
+  const domainPadding = spread === 0 ? Math.max(Math.abs(maximum) * 0.0005, 0.01) : spread * 0.16;
+  const floor = minimum - domainPadding;
+  const ceiling = maximum + domainPadding;
+  const xFor = (index: number) => padding + (plotted.length <= 1
+    ? width - padding * 2
+    : index * (width - padding * 2) / (plotted.length - 1));
+  const yFor = (value: number) => padding + (ceiling - value) / (ceiling - floor) * (height - padding * 2);
+  const linePath = plotted.map((value, index) => `${index === 0 ? "M" : "L"}${xFor(index).toFixed(2)},${yFor(value).toFixed(2)}`).join(" ");
+  const areaPath = linePath
+    ? `${linePath} L${xFor(plotted.length - 1).toFixed(2)},${height - padding} L${xFor(0).toFixed(2)},${height - padding} Z`
+    : "";
+  const gradientId = `watch-spark-${code.replace(/[^a-z0-9_-]/gi, "-")}`;
+
+  return (
+    <svg
+      className={`watch-sparkline ${trendClass(quote)}`}
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label={`${code}实时走势`}
+    >
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="currentColor" stopOpacity="0.16" />
+          <stop offset="1" stopColor="currentColor" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <line
+        x1={padding}
+        x2={width - padding}
+        y1={reference === null ? height / 2 : yFor(reference)}
+        y2={reference === null ? height / 2 : yFor(reference)}
+        className="watch-spark-reference"
+      />
+      {areaPath ? <path d={areaPath} fill={`url(#${gradientId})`} /> : null}
+      {linePath ? <path d={linePath} className="watch-spark-line" /> : null}
+    </svg>
+  );
+}
+
 function LiveClock() {
   const [now, setNow] = useState(() => Date.now());
 
@@ -112,6 +198,7 @@ export default function App() {
   const [instrumentSourcesLoaded, setInstrumentSourcesLoaded] = useState(false);
   const [quote, setQuote] = useState<QuoteView | null>(null);
   const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteView>>({});
+  const [watchPriceSeries, setWatchPriceSeries] = useState<Record<string, number[]>>({});
   const [candles, setCandles] = useState<Candle[]>([]);
   const [timelineSamples, setTimelineSamples] = useState<TimelineSample[]>([]);
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
@@ -239,6 +326,7 @@ export default function App() {
       if (disposed) return;
       setInstrumentSources(Object.fromEntries(values));
       setWatchQuotes({});
+      setWatchPriceSeries({});
       setInstrumentSourcesLoaded(true);
     });
     return () => {
@@ -285,6 +373,7 @@ export default function App() {
         if (event.kind === "quote" && event.quote) {
           setQuote(event.quote);
           setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteView }));
+          setWatchPriceSeries((current) => appendWatchPriceSample(current, selectedCode, event.quote as QuoteView));
           const sampleValue = numeric(event.quote.quote.last);
           const observedTime = new Date(event.quote.quote.source.observed_at).getTime() / 1_000;
           const receivedTime = new Date(event.quote.quote.source.received_at).getTime() / 1_000;
@@ -387,9 +476,34 @@ export default function App() {
         if (!descriptor || (descriptor.manual_connection_required && !descriptor.connection_active)) return;
         const value = await marketApi.quote(item.provider_code);
         setWatchQuotes((current) => ({ ...current, [item.provider_code]: value }));
+        setWatchPriceSeries((current) => appendWatchPriceSample(current, item.provider_code, value));
       }),
     );
   }, [instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded, watchQuotes]);
+
+  useEffect(() => {
+    if (!instrumentSourcesLoaded || !sourcesLoaded) return;
+    let disposed = false;
+    void Promise.allSettled(
+      instruments.map(async (item) => {
+        const rows = await marketApi.candles(item.provider_code, { count: WATCH_SPARKLINE_CANDLE_WINDOW });
+        const prices = downsamplePrices(rows
+          .map((row) => numeric(row.close))
+          .filter((value): value is number => value !== null), WATCH_SPARKLINE_LIMIT);
+        if (disposed || prices.length === 0) return;
+        setWatchPriceSeries((current) => {
+          const live = current[item.provider_code] ?? [];
+          return {
+            ...current,
+            [item.provider_code]: [...prices, ...live].slice(-WATCH_SPARKLINE_LIMIT),
+          };
+        });
+      }),
+    );
+    return () => {
+      disposed = true;
+    };
+  }, [instrumentSourcesLoaded, instruments, sourcesLoaded]);
 
   const preferSource = async (source: SourceDescriptor) => {
     setSourceBusy(true);
@@ -397,6 +511,11 @@ export default function App() {
       const value = await marketApi.updateInstrumentSource(selectedCode, source.source_id);
       setInstrumentSources((current) => ({ ...current, [selectedCode]: value.source_id }));
       setWatchQuotes((current) => {
+        const next = { ...current };
+        delete next[selectedCode];
+        return next;
+      });
+      setWatchPriceSeries((current) => {
         const next = { ...current };
         delete next[selectedCode];
         return next;
@@ -547,9 +666,9 @@ export default function App() {
       >
         <div className="market-tabs">
           <div className="market-tab-list">
-            <button type="button">自选</button>
+            <button type="button" className="is-active">自选</button>
             <button type="button">外汇</button>
-            <button type="button" className="is-active">贵金属</button>
+            <button type="button">贵金属</button>
             <button type="button">能源</button>
           </div>
           <div className="watch-panel-actions">
@@ -576,13 +695,10 @@ export default function App() {
           </div>
         </div>
 
-        <div className="watch-section-title">
-          <div><ChevronDown size={15} /><strong>贵金属</strong></div>
-          <span>实时观察</span>
-        </div>
         <div className="watch-list-head" aria-hidden="true">
-          <span>名称 / 代码</span>
-          <span>现价 / 涨跌</span>
+          <span className="watch-list-modes"><Activity size={17} /><Waypoints size={16} /></span>
+          <span>价格</span>
+          <span>涨跌</span>
         </div>
         <div className="instrument-list">
           {instruments.map((item) => {
@@ -599,9 +715,21 @@ export default function App() {
                   <strong>{item.name}</strong>
                   <span>{item.provider_code}</span>
                 </div>
-                <div className={direction}>
+                <WatchSparkline
+                  code={item.provider_code}
+                  quote={itemQuote?.quote ?? null}
+                  samples={watchPriceSeries[item.provider_code] ?? []}
+                />
+                <div className={`instrument-price ${direction}`}>
                   <strong>{formatPrice(itemQuote?.quote.last, item.provider_code)}</strong>
-                  <span>{formatSigned(itemQuote?.quote.change_percent)}%</span>
+                </div>
+                <div className={`instrument-change ${direction}`}>
+                  <strong>
+                    {numeric(itemQuote?.quote.change_percent) === null
+                      ? "—"
+                      : `${formatSigned(itemQuote?.quote.change_percent)}%`}
+                  </strong>
+                  <span>{formatSigned(itemQuote?.quote.change, digitsFor(item.provider_code))}</span>
                 </div>
               </button>
             );
