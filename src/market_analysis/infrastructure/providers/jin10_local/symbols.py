@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from market_analysis.domain.errors import InstrumentNotSupportedError
 from market_analysis.domain.models import Instrument
-from market_analysis.infrastructure.providers.jin10.symbols import SPOT_GOLD, SPOT_SILVER
+from market_analysis.instruments import SPOT_GOLD, SPOT_SILVER, USD_CNH
 
 
 class Jin10LocalSymbolMapper:
@@ -10,6 +10,7 @@ class Jin10LocalSymbolMapper:
         self._to_provider = {
             SPOT_GOLD: "XAUUSD.GOODS",
             SPOT_SILVER: "XAGUSD.GOODS",
+            USD_CNH: "USDCNH.FXCM",
         }
         self._from_provider = {value: key for key, value in self._to_provider.items()}
 
