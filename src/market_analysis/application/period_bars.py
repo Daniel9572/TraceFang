@@ -7,7 +7,10 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from market_analysis.application.realtime_bars import RealtimeBarService
+from market_analysis.application.realtime_bars import (
+    REALTIME_BAR_READ_PAGE_SIZE_MAX,
+    RealtimeBarService,
+)
 from market_analysis.domain.market_events import BarState, RealtimeBar
 from market_analysis.domain.models import Instrument, SourceMetadata
 
@@ -40,8 +43,7 @@ PERIOD_DEFINITIONS: dict[str, PeriodDefinition] = {
     "1y": PeriodDefinition("1y", calendar_unit="year"),
 }
 
-_MINUTE_PAGE_SIZE = 10_000
-_BAR_PAGE_SIZE = 500
+_DEFAULT_BAR_PAGE_SIZE = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,19 +282,32 @@ class PeriodBarService:
         period_id: str,
         schedule: Mapping[str, Any] | None,
         before: datetime | None = None,
+        page_size: int = _DEFAULT_BAR_PAGE_SIZE,
     ) -> PeriodBarPage:
         if period_id not in PERIOD_DEFINITIONS:
             raise ValueError(f"unsupported chart period {period_id!r}")
+        if page_size < 1:
+            raise ValueError("page_size must be positive")
+        definition = PERIOD_DEFINITIONS[period_id]
+        estimated_minutes_per_bar = definition.minutes or 24 * 60
         cursor = before
         minute_rows: dict[datetime, RealtimeBar] = {}
         exhausted = False
         projected: tuple[RealtimeBar, ...] = ()
-        while len(projected) <= _BAR_PAGE_SIZE:
+        while len(projected) <= page_size:
+            remaining_bars = page_size + 1 - len(projected)
+            minute_transport_size = max(
+                1,
+                min(
+                    REALTIME_BAR_READ_PAGE_SIZE_MAX,
+                    remaining_bars * estimated_minutes_per_bar,
+                ),
+            )
             page = await self._realtime_bars.get_bars_before(
                 instrument,
                 source_id=source_id,
                 before=cursor,
-                count=_MINUTE_PAGE_SIZE,
+                count=minute_transport_size,
             )
             if not page:
                 exhausted = True
@@ -315,7 +330,7 @@ class PeriodBarService:
                 period_id=period_id,
                 schedule=schedule,
             )
-        items = projected[-_BAR_PAGE_SIZE:]
+        items = projected[-page_size:]
         oldest_component = None
         if items:
             payload = items[0].source.raw_payload or {}
@@ -328,5 +343,5 @@ class PeriodBarService:
             period_id=period_id,
             items=items,
             next_before=oldest_component,
-            has_more=len(projected) > _BAR_PAGE_SIZE or not exhausted,
+            has_more=len(projected) > page_size or not exhausted,
         )

@@ -142,6 +142,20 @@ class _PagedMinuteReader:
         return candidates[-200:]
 
 
+class _StrictPagedMinuteReader:
+    def __init__(self, rows: tuple[RealtimeBar, ...]) -> None:
+        self.rows = rows
+        self.requested_counts: list[int] = []
+
+    async def get_bars_before(self, _instrument, *, source_id, before=None, count=10_000):
+        del source_id
+        if count > 10_000:
+            raise ValueError("cursor page count must be between 1 and 10000")
+        self.requested_counts.append(count)
+        candidates = tuple(row for row in self.rows if before is None or row.open_time < before)
+        return candidates[-count:]
+
+
 class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_transport_pages_continue_until_chart_page_is_complete(self) -> None:
         start = datetime(2026, 1, 1, tzinfo=UTC)
@@ -163,6 +177,49 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(page.has_more)
         self.assertEqual(reader.calls, 3)
         self.assertEqual(page.items[0].open_time, start + timedelta(minutes=10))
+
+    async def test_transport_page_size_is_configurable_without_limiting_total_history(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(510)
+        )
+        reader = _PagedMinuteReader(rows)
+        service = PeriodBarService(reader)  # type: ignore[arg-type]
+
+        page = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="1m",
+            schedule=None,
+            page_size=300,
+        )
+
+        self.assertEqual(len(page.items), 300)
+        self.assertTrue(page.has_more)
+        self.assertEqual(reader.calls, 2)
+
+    async def test_large_period_reads_multiple_internal_pages_without_a_history_cap(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(15_030)
+        )
+        reader = _StrictPagedMinuteReader(rows)
+        service = PeriodBarService(reader)  # type: ignore[arg-type]
+
+        page = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="30m",
+            schedule=None,
+            page_size=500,
+        )
+
+        self.assertEqual(len(page.items), 500)
+        self.assertTrue(page.has_more)
+        self.assertGreater(len(reader.requested_counts), 1)
+        self.assertLessEqual(max(reader.requested_counts), 10_000)
 
 
 if __name__ == "__main__":

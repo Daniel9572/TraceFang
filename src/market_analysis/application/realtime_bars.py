@@ -17,7 +17,14 @@ from market_analysis.domain.market_events import (
     QuoteSample,
     RealtimeBar,
 )
-from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
+from market_analysis.domain.models import (
+    Candle,
+    Instrument,
+    QuoteSnapshot,
+    SourceMetadata,
+)
+
+REALTIME_BAR_READ_PAGE_SIZE_MAX = 10_000
 
 
 class SourceBarStore(Protocol):
@@ -660,7 +667,7 @@ class RealtimeBarService:
     ) -> tuple[RealtimeBar, ...]:
         """Reads one internal cursor page; callers may continue until the page is empty."""
 
-        if not 1 <= count <= 10_000:
+        if not 1 <= count <= REALTIME_BAR_READ_PAGE_SIZE_MAX:
             raise ValueError("cursor page count must be between 1 and 10000")
         if before is not None and (before.tzinfo is None or before.utcoffset() is None):
             raise ValueError("before must be timezone-aware")
@@ -1041,7 +1048,7 @@ class RealtimeBarService:
 
     @staticmethod
     def _validate_window(start: datetime | None, count: int) -> None:
-        if not 1 <= count <= 10_000:
+        if not 1 <= count <= REALTIME_BAR_READ_PAGE_SIZE_MAX:
             raise ValueError("count must be between 1 and 10000")
         if start is not None and (start.tzinfo is None or start.utcoffset() is None):
             raise ValueError("start must be timezone-aware")
