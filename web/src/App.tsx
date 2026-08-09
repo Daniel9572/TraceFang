@@ -1102,7 +1102,7 @@ export default function App() {
         ? `${Math.round(timelineSamplingSeconds)}秒`
         : "分钟级";
 
-  const sharedIndicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${selectedCode}:${candles.at(-1)?.source.provider ?? selectedSource}:${selectedPeriod.id}`;
+  const sharedIndicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${selectedCode}:${candles.at(-1)?.source.provider ?? selectedSource}:${selectedBarPeriodId}`;
   const sharedIndicatorSeries = useMemo(
     () => buildExpertIndicatorSeriesAt(
       candles,

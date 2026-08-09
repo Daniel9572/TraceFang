@@ -83,8 +83,7 @@ import type {
   ExpertStrategyId,
 } from "./expertTypes";
 import { formatDateInTimeZone, formatDateTimeInTimeZone } from "./chartTimeAxis";
-import type { ChartPeriodId } from "./chartPeriods";
-import { chartPeriodById } from "./chartPeriods";
+import { barDataPeriodId, chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
 import type { Candle, HoverCandle, MarketPhase, MarketSchedule, TimelineSample } from "./types";
@@ -249,6 +248,7 @@ export function ExpertModeWorkspace({
   onExit,
 }: ExpertModeWorkspaceProps) {
   const period = chartPeriodById(periodId);
+  const expertBarPeriodId = barDataPeriodId(period);
   const [displayTimeZone, setDisplayTimeZone] = useState("Asia/Shanghai");
   const [enabledStrategies, setEnabledStrategies] = useState<ExpertStrategyId[]>(readStrategies);
   const [capitalDominanceEnabled, setCapitalDominanceEnabled] = useState(readCapitalDominanceStrategy);
@@ -409,7 +409,7 @@ export function ExpertModeWorkspace({
     setHover(null);
   }, [replayBoundary, replayEnabled]);
   const analysisIndex = replayEnabled ? replayIndex : candles.length - 1;
-  const indicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${code}:${candles.at(-1)?.source.provider ?? "pending"}:${period.id}`;
+  const indicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${code}:${candles.at(-1)?.source.provider ?? "pending"}:${expertBarPeriodId}`;
   const analysis = useMemo(
     () => buildExpertAnalysisAt(candles, enabledStrategies, analysisIndex, indicatorHistoryKey),
     [analysisIndex, candles, enabledStrategies, indicatorHistoryKey],

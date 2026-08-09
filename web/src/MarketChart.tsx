@@ -222,8 +222,9 @@ interface TimelineSeriesRenderState {
 }
 
 interface TimelineSeriesCache {
-  sourceCandles: Candle[];
-  sourceSamples: TimelineSample[];
+  datasetKey: string;
+  windowCandles: Candle[];
+  windowSamples: TimelineSample[];
   windowStart: number | null;
   livePrice: number | null;
   observedAt: string | null;
@@ -320,6 +321,26 @@ function lowerBoundTimelineSampleTime(
     else high = middle;
   }
   return low;
+}
+
+function stableTailSlice<T>(
+  source: T[],
+  startIndex: number,
+  previous: T[] | null,
+): T[] {
+  if (startIndex <= 0) return source;
+  const length = source.length - startIndex;
+  if (previous && previous.length === length) {
+    let unchanged = true;
+    for (let index = 0; index < length; index += 1) {
+      if (source[startIndex + index] !== previous[index]) {
+        unchanged = false;
+        break;
+      }
+    }
+    if (unchanged) return previous;
+  }
+  return source.slice(startIndex);
 }
 
 function sameHoverCandle(left: HoverCandle | null, right: HoverCandle | null): boolean {
@@ -538,6 +559,8 @@ export function MarketChart({
   const timelineSeriesRef = useRef<TimelineClockSeriesApi | null>(null);
   const timelineSeriesRenderStateRef = useRef<TimelineSeriesRenderState | null>(null);
   const timelineSeriesCacheRef = useRef<TimelineSeriesCache | null>(null);
+  const timelineWindowCandlesRef = useRef<Candle[] | null>(null);
+  const timelineWindowSamplesRef = useRef<TimelineSample[] | null>(null);
   const candleSeriesRenderStateRef = useRef<CandleSeriesRenderState | null>(null);
   const referenceLineRef = useRef<IPriceLine | null>(null);
   const eventMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
@@ -622,11 +645,11 @@ export function MarketChart({
   const [, setTimelineMaterializationRevision] = useState(0);
 
   const latestCandleIdentity = candles.at(-1);
-  const timelineMaterializationKey = [
-    period.mode,
+  const timelineDatasetKey = [
     latestCandleIdentity?.instrument.symbol ?? "",
     latestCandleIdentity?.source.provider ?? "",
   ].join(":");
+  const timelineMaterializationKey = `${period.mode}:${timelineDatasetKey}`;
   if (timelineMaterializationKeyRef.current !== timelineMaterializationKey) {
     timelineMaterializationKeyRef.current = timelineMaterializationKey;
     timelineMaterializedDayCountRef.current = INITIAL_TIMELINE_MATERIALIZED_DAYS;
@@ -745,12 +768,16 @@ export function MarketChart({
   const timelineWindowCandles = useMemo(() => {
     if (period.mode !== "timeline" || timelineWindowStart === null) return candles;
     const firstIndex = lowerBoundCandleTime(candles, timelineWindowStart);
-    return firstIndex === 0 ? candles : candles.slice(firstIndex);
+    const window = stableTailSlice(candles, firstIndex, timelineWindowCandlesRef.current);
+    timelineWindowCandlesRef.current = window;
+    return window;
   }, [candles, period.mode, timelineWindowStart]);
   const timelineWindowSamples = useMemo(() => {
     if (period.mode !== "timeline" || timelineWindowStart === null) return timelineSamples;
     const firstIndex = lowerBoundTimelineSampleTime(timelineSamples, timelineWindowStart);
-    return firstIndex === 0 ? timelineSamples : timelineSamples.slice(firstIndex);
+    const window = stableTailSlice(timelineSamples, firstIndex, timelineWindowSamplesRef.current);
+    timelineWindowSamplesRef.current = window;
+    return window;
   }, [period.mode, timelineSamples, timelineWindowStart]);
   const earliestLoadedTimelineTime = Math.min(
     candleTimes[0]?.actualTime ?? Number.POSITIVE_INFINITY,
@@ -764,13 +791,14 @@ export function MarketChart({
   const rawTimelineData = useMemo(() => {
     const cache = timelineSeriesCacheRef.current;
     if (period.mode !== "timeline") {
-      return cache?.sourceCandles === candles && cache.sourceSamples === timelineSamples
+      return cache?.datasetKey === timelineDatasetKey
         ? cache.data
         : [];
     }
     if (
-      cache?.sourceCandles === candles
-      && cache.sourceSamples === timelineSamples
+      cache?.datasetKey === timelineDatasetKey
+      && cache.windowCandles === timelineWindowCandles
+      && cache.windowSamples === timelineWindowSamples
       && cache.windowStart === timelineWindowStart
       && cache.livePrice === timelineSnapshotPrice
       && cache.observedAt === timelineSnapshotObservedAt
@@ -782,8 +810,9 @@ export function MarketChart({
       timelineSnapshotObservedAt,
     );
     timelineSeriesCacheRef.current = {
-      sourceCandles: candles,
-      sourceSamples: timelineSamples,
+      datasetKey: timelineDatasetKey,
+      windowCandles: timelineWindowCandles,
+      windowSamples: timelineWindowSamples,
       windowStart: timelineWindowStart,
       livePrice: timelineSnapshotPrice,
       observedAt: timelineSnapshotObservedAt,
@@ -791,9 +820,8 @@ export function MarketChart({
     };
     return data;
   }, [
-    candles,
     period.mode,
-    timelineSamples,
+    timelineDatasetKey,
     timelineSnapshotObservedAt,
     timelineSnapshotPrice,
     timelineWindowCandles,
