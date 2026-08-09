@@ -30,6 +30,39 @@ VALUES ($1)
 ON CONFLICT (source_id) DO UPDATE SET last_seen_at = now()
 """
 
+_INITIALIZE_WATCHLIST = """
+INSERT INTO watchlists (profile_id)
+VALUES ($1)
+ON CONFLICT (profile_id) DO NOTHING
+RETURNING profile_id
+"""
+
+_INSERT_WATCHLIST_ITEM = """
+INSERT INTO watchlist_items (profile_id, instrument_symbol, position)
+VALUES ($1, $2, $3)
+ON CONFLICT (profile_id, instrument_symbol) DO NOTHING
+"""
+
+_ADD_WATCHLIST_ITEM = """
+INSERT INTO watchlist_items (profile_id, instrument_symbol, position)
+SELECT $1, $2, COALESCE(max(position) + 1, 0)
+FROM watchlist_items
+WHERE profile_id = $1
+ON CONFLICT (profile_id, instrument_symbol) DO NOTHING
+"""
+
+_SELECT_WATCHLIST = """
+SELECT instrument_symbol
+FROM watchlist_items
+WHERE profile_id = $1
+ORDER BY position, added_at, instrument_symbol
+"""
+
+_REMOVE_WATCHLIST_ITEM = """
+DELETE FROM watchlist_items
+WHERE profile_id = $1 AND instrument_symbol = $2
+"""
+
 _INSERT_QUOTE = """
 INSERT INTO quote_events (
     instrument_symbol, source_id, provider_symbol, observed_at, received_at,
@@ -108,7 +141,7 @@ WHERE EXCLUDED.received_at >= candles.received_at
 _SELECT_INSTRUMENT_SOURCE = """
 SELECT source_id
 FROM instrument_source_routes
-WHERE instrument_symbol = $1 AND capability = 'quote'
+WHERE instrument_symbol = $1 AND capability = 'realtime'
 """
 
 _UPSERT_SOURCE_ROUTE = """
@@ -373,6 +406,60 @@ ORDER BY open_time
 LIMIT $5
 """
 
+_SELECT_RECENT_SOURCE_CANDLES = """
+SELECT *
+FROM (
+    SELECT
+        instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
+        observed_at, received_at, open, high, low, close, volume, raw_payload
+    FROM candles
+    WHERE instrument_symbol = $1 AND source_id = $2 AND interval_seconds = $3
+    ORDER BY open_time DESC
+    LIMIT $4
+) AS recent
+ORDER BY open_time
+"""
+
+_SELECT_RANGE_SOURCE_CANDLES = """
+SELECT
+    instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
+    observed_at, received_at, open, high, low, close, volume, raw_payload
+FROM candles
+WHERE instrument_symbol = $1
+  AND source_id = $2
+  AND interval_seconds = $3
+  AND open_time >= $4
+  AND open_time < $5
+ORDER BY open_time
+LIMIT $6
+"""
+
+_SELECT_CANDLE_CACHE_RANGES = """
+SELECT range_start, range_end
+FROM realtime_candle_cache_ranges
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND interval_seconds = $3
+  AND range_end > $4
+  AND range_start < $5
+ORDER BY range_start, range_end
+"""
+
+_UPSERT_CANDLE_CACHE_RANGE = """
+INSERT INTO realtime_candle_cache_ranges (
+    instrument_symbol, realtime_source_id, upstream_channel_id, provider_symbol,
+    interval_seconds, range_start, range_end, row_count
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (
+    instrument_symbol, realtime_source_id, interval_seconds, range_start, range_end
+) DO UPDATE SET
+    upstream_channel_id = EXCLUDED.upstream_channel_id,
+    provider_symbol = EXCLUDED.provider_symbol,
+    row_count = EXCLUDED.row_count,
+    fetched_at = now()
+"""
+
 
 def _json_default(value: object) -> object:
     if isinstance(value, Decimal):
@@ -524,6 +611,72 @@ class PostgresMarketDataStore:
             raise RuntimeError("PostgreSQL store is not connected")
         return self._pool
 
+    async def initialize_watchlist(
+        self,
+        instruments: Sequence[Instrument],
+        *,
+        profile_id: str = "default",
+    ) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            created = await connection.fetchval(_INITIALIZE_WATCHLIST, profile_id)
+            if created is None:
+                return
+            for position, instrument in enumerate(instruments):
+                await connection.execute(
+                    _UPSERT_INSTRUMENT,
+                    *_instrument_values(instrument),
+                )
+                await connection.execute(
+                    _INSERT_WATCHLIST_ITEM,
+                    profile_id,
+                    instrument.symbol,
+                    position,
+                )
+
+    async def load_watchlist_symbols(
+        self,
+        *,
+        profile_id: str = "default",
+    ) -> tuple[str, ...]:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(_SELECT_WATCHLIST, profile_id)
+        return tuple(str(row["instrument_symbol"]) for row in rows)
+
+    async def add_watchlist_instrument(
+        self,
+        instrument: Instrument,
+        *,
+        profile_id: str = "default",
+    ) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(_INITIALIZE_WATCHLIST, profile_id)
+            await connection.execute(
+                _UPSERT_INSTRUMENT,
+                *_instrument_values(instrument),
+            )
+            await connection.execute(
+                _ADD_WATCHLIST_ITEM,
+                profile_id,
+                instrument.symbol,
+            )
+
+    async def remove_watchlist_instrument(
+        self,
+        instrument: Instrument,
+        *,
+        profile_id: str = "default",
+    ) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            await connection.execute(
+                _REMOVE_WATCHLIST_ITEM,
+                profile_id,
+                instrument.symbol,
+            )
+
     async def save_quote(self, quote: QuoteSnapshot) -> None:
         pool = self._require_pool()
         values = _quote_values(quote)
@@ -674,8 +827,139 @@ class PostgresMarketDataStore:
             await connection.execute(
                 _UPSERT_SOURCE_ROUTE,
                 instrument.symbol,
-                "quote",
+                "realtime",
                 source_id,
+            )
+
+    async def load_source_candles(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        interval: timedelta = timedelta(minutes=1),
+        start: datetime | None = None,
+        count: int = 100,
+    ) -> tuple[Candle, ...]:
+        if not 1 <= count <= 10_000:
+            raise ValueError("count must be between 1 and 10000")
+        if start is not None and (start.tzinfo is None or start.utcoffset() is None):
+            raise ValueError("start must be timezone-aware")
+        interval_seconds = int(interval.total_seconds())
+        if interval_seconds < 1:
+            raise ValueError("interval must be positive")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            if start is None:
+                rows = await connection.fetch(
+                    _SELECT_RECENT_SOURCE_CANDLES,
+                    instrument.symbol,
+                    source_id,
+                    interval_seconds,
+                    count,
+                )
+            else:
+                rows = await connection.fetch(
+                    _SELECT_RANGE_SOURCE_CANDLES,
+                    instrument.symbol,
+                    source_id,
+                    interval_seconds,
+                    start,
+                    start + interval * count,
+                    count,
+                )
+        return tuple(_candle_from_row(row, instrument) for row in rows)
+
+    async def candle_missing_ranges(
+        self,
+        instrument: Instrument,
+        *,
+        realtime_source_id: str,
+        start: datetime,
+        end: datetime,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> tuple[tuple[datetime, datetime], ...]:
+        if start.tzinfo is None or start.utcoffset() is None:
+            raise ValueError("start must be timezone-aware")
+        if end.tzinfo is None or end.utcoffset() is None:
+            raise ValueError("end must be timezone-aware")
+        if end <= start:
+            raise ValueError("end must be after start")
+        interval_seconds = int(interval.total_seconds())
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                _SELECT_CANDLE_CACHE_RANGES,
+                instrument.symbol,
+                realtime_source_id,
+                interval_seconds,
+                start,
+                end,
+            )
+        missing: list[tuple[datetime, datetime]] = []
+        covered_until = start
+        for row in rows:
+            range_start = max(start, row["range_start"])
+            range_end = min(end, row["range_end"])
+            if range_end <= covered_until:
+                continue
+            if range_start > covered_until:
+                missing.append((covered_until, range_start))
+            covered_until = max(covered_until, range_end)
+            if covered_until >= end:
+                break
+        if covered_until < end:
+            missing.append((covered_until, end))
+        return tuple(missing)
+
+    async def candle_range_is_cached(
+        self,
+        instrument: Instrument,
+        *,
+        realtime_source_id: str,
+        start: datetime,
+        end: datetime,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> bool:
+        return not await self.candle_missing_ranges(
+            instrument,
+            realtime_source_id=realtime_source_id,
+            start=start,
+            end=end,
+            interval=interval,
+        )
+
+    async def record_candle_cache_range(
+        self,
+        instrument: Instrument,
+        *,
+        realtime_source_id: str,
+        upstream_channel_id: str,
+        provider_symbol: str,
+        start: datetime,
+        end: datetime,
+        row_count: int,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> None:
+        if end <= start:
+            raise ValueError("end must be after start")
+        if row_count < 0:
+            raise ValueError("row_count cannot be negative")
+        interval_seconds = int(interval.total_seconds())
+        pool = self._require_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
+            await connection.execute(_UPSERT_SOURCE, realtime_source_id)
+            await connection.execute(_UPSERT_SOURCE, upstream_channel_id)
+            await connection.execute(
+                _UPSERT_CANDLE_CACHE_RANGE,
+                instrument.symbol,
+                realtime_source_id,
+                upstream_channel_id,
+                provider_symbol,
+                interval_seconds,
+                start,
+                end,
+                row_count,
             )
 
     async def load_quote_candles(

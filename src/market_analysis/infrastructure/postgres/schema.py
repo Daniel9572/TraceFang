@@ -8,6 +8,23 @@ CREATE TABLE IF NOT EXISTS instruments (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS watchlists (
+    profile_id TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS watchlist_items (
+    profile_id TEXT NOT NULL REFERENCES watchlists(profile_id) ON DELETE CASCADE,
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (profile_id, instrument_symbol)
+);
+
+CREATE INDEX IF NOT EXISTS ix_watchlist_items_order
+    ON watchlist_items (profile_id, position, added_at);
+
 CREATE TABLE IF NOT EXISTS market_sources (
     source_id TEXT PRIMARY KEY,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -61,9 +78,7 @@ CREATE TABLE IF NOT EXISTS latest_quotes (
 
 CREATE TABLE IF NOT EXISTS instrument_source_routes (
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
-    capability TEXT NOT NULL CHECK (
-        capability IN ('quote', 'candles', 'catalog', 'news', 'calendar')
-    ),
+    capability TEXT NOT NULL CHECK (capability = 'realtime'),
     source_id TEXT NOT NULL REFERENCES market_sources(source_id),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (instrument_symbol, capability)
@@ -72,10 +87,21 @@ CREATE TABLE IF NOT EXISTS instrument_source_routes (
 CREATE INDEX IF NOT EXISTS ix_instrument_source_routes_source
     ON instrument_source_routes (source_id, capability);
 
--- Releases before the logical-source boundary stored one route per capability.
--- History is now global, so only the single contract-level quote binding remains.
+-- Releases before the realtime-source boundary stored one route per capability.
+-- Preserve the former quote binding as the contract's complete realtime-source binding.
+ALTER TABLE instrument_source_routes
+    DROP CONSTRAINT IF EXISTS instrument_source_routes_capability_check;
+
+UPDATE instrument_source_routes
+SET capability = 'realtime'
+WHERE capability = 'quote';
+
 DELETE FROM instrument_source_routes
-WHERE capability <> 'quote';
+WHERE capability <> 'realtime';
+
+ALTER TABLE instrument_source_routes
+    ADD CONSTRAINT instrument_source_routes_capability_check
+    CHECK (capability = 'realtime');
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_instrument_source_routes_instrument
     ON instrument_source_routes (instrument_symbol);
@@ -100,6 +126,35 @@ CREATE TABLE IF NOT EXISTS candles (
 
 CREATE INDEX IF NOT EXISTS ix_candles_instrument_interval_time
     ON candles (instrument_symbol, interval_seconds, open_time DESC);
+
+CREATE TABLE IF NOT EXISTS realtime_candle_cache_ranges (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    upstream_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    range_start TIMESTAMPTZ NOT NULL,
+    range_end TIMESTAMPTZ NOT NULL,
+    row_count INTEGER NOT NULL CHECK (row_count >= 0),
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (range_end > range_start),
+    PRIMARY KEY (
+        instrument_symbol,
+        realtime_source_id,
+        interval_seconds,
+        range_start,
+        range_end
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_realtime_candle_cache_coverage
+    ON realtime_candle_cache_ranges (
+        instrument_symbol,
+        realtime_source_id,
+        interval_seconds,
+        range_start,
+        range_end
+    );
 
 CREATE TABLE IF NOT EXISTS candle_validation_results (
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),

@@ -5,25 +5,38 @@ import unittest
 from market_analysis.infrastructure.postgres.schema import SCHEMA_SQL
 from market_analysis.infrastructure.postgres.store import (
     _INSERT_QUOTE,
-    _REMOVE_SOURCE_FROM_STANDARD_HISTORY,
+    _SELECT_CANDLE_CACHE_RANGES,
     _SELECT_INSTRUMENT_SOURCE,
-    _SELECT_STANDARD_CANDLES_FROM,
-    _SELECT_STANDARD_LATEST_CANDLES,
-    _STANDARDIZE_CANDLES,
+    _SELECT_RANGE_QUOTE_CANDLES,
+    _SELECT_RANGE_SOURCE_CANDLES,
+    _SELECT_RECENT_QUOTE_CANDLES,
+    _SELECT_RECENT_SOURCE_CANDLES,
 )
 
 
 class QuoteEventPersistenceTests(unittest.TestCase):
-    def test_each_contract_has_one_logical_source_binding(self) -> None:
+    def test_watchlist_has_a_persistent_profile_and_ordered_items(self) -> None:
+        self.assertIn("CREATE TABLE IF NOT EXISTS watchlists", SCHEMA_SQL)
+        self.assertIn("CREATE TABLE IF NOT EXISTS watchlist_items", SCHEMA_SQL)
         self.assertIn(
-            "DELETE FROM instrument_source_routes\nWHERE capability <> 'quote'",
+            "PRIMARY KEY (profile_id, instrument_symbol)",
+            SCHEMA_SQL,
+        )
+        self.assertIn(
+            "ON watchlist_items (profile_id, position, added_at)",
+            SCHEMA_SQL,
+        )
+
+    def test_each_contract_has_one_realtime_source_binding(self) -> None:
+        self.assertIn(
+            "DELETE FROM instrument_source_routes\nWHERE capability <> 'realtime'",
             SCHEMA_SQL,
         )
         self.assertIn(
             "UNIQUE INDEX IF NOT EXISTS ux_instrument_source_routes_instrument",
             SCHEMA_SQL,
         )
-        self.assertIn("capability = 'quote'", _SELECT_INSTRUMENT_SOURCE)
+        self.assertIn("capability = 'realtime'", _SELECT_INSTRUMENT_SOURCE)
         self.assertNotIn("ORDER BY CASE capability", _SELECT_INSTRUMENT_SOURCE)
 
     def test_distinguishes_every_received_frame_inside_the_same_source_second(self) -> None:
@@ -36,26 +49,26 @@ class QuoteEventPersistenceTests(unittest.TestCase):
             SCHEMA_SQL,
         )
 
-    def test_history_query_reads_only_validated_standard_rows(self) -> None:
+    def test_kline_cache_queries_one_exact_raw_channel(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS standard_candles", SCHEMA_SQL)
-        self.assertIn("'validation_state', 'accepted'", _STANDARDIZE_CANDLES)
-        self.assertIn("cross_source_consensus", _STANDARDIZE_CANDLES)
-        self.assertIn("max_close_deviation_ratio <= $7", _STANDARDIZE_CANDLES)
-        self.assertIn("source_id = ANY($3::text[])", _STANDARDIZE_CANDLES)
-        for query in (_SELECT_STANDARD_CANDLES_FROM, _SELECT_STANDARD_LATEST_CANDLES):
-            self.assertIn("FROM standard_candles", query)
-            self.assertNotIn("FROM quote_events", query)
-            self.assertNotIn("FROM candles\n", query)
-            self.assertIn("primary_source_id = ANY", query)
-            self.assertIn("jsonb_array_elements", query)
+        for query in (_SELECT_RECENT_QUOTE_CANDLES, _SELECT_RANGE_QUOTE_CANDLES):
+            self.assertIn("FROM quote_events", query)
+            self.assertIn("source_id = $2", query)
+            self.assertNotIn("source_id = ANY", query)
+            self.assertNotIn("standard_candles", query)
 
-    def test_frozen_source_can_be_removed_from_standard_and_validation_history(self) -> None:
-        self.assertIn("DELETE FROM standard_candles", _REMOVE_SOURCE_FROM_STANDARD_HISTORY)
-        self.assertIn(
-            "DELETE FROM candle_validation_results",
-            _REMOVE_SOURCE_FROM_STANDARD_HISTORY,
-        )
-        self.assertIn("'source_id', $1", _REMOVE_SOURCE_FROM_STANDARD_HISTORY)
+    def test_history_rows_and_completed_ranges_are_source_scoped(self) -> None:
+        self.assertIn("CREATE TABLE IF NOT EXISTS realtime_candle_cache_ranges", SCHEMA_SQL)
+        self.assertIn("realtime_source_id TEXT NOT NULL", SCHEMA_SQL)
+        self.assertIn("upstream_channel_id TEXT NOT NULL", SCHEMA_SQL)
+        self.assertIn("CHECK (range_end > range_start)", SCHEMA_SQL)
+        for query in (_SELECT_RECENT_SOURCE_CANDLES, _SELECT_RANGE_SOURCE_CANDLES):
+            self.assertIn("FROM candles", query)
+            self.assertIn("source_id = $2", query)
+            self.assertNotIn("standard_candles", query)
+        self.assertIn("realtime_source_id = $2", _SELECT_CANDLE_CACHE_RANGES)
+        self.assertIn("range_end > $4", _SELECT_CANDLE_CACHE_RANGES)
+        self.assertIn("range_start < $5", _SELECT_CANDLE_CACHE_RANGES)
 
 
 if __name__ == "__main__":
