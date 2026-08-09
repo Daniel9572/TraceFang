@@ -28,7 +28,7 @@ if (Test-ConfiguredValue -Path $baseEnvFile -Name "MARKET_ANALYSIS_DATABASE_URL"
 
 $databaseName = "market_analysis"
 $databaseUser = "market_analysis"
-$databasePort = "54329"
+$databasePort = "15432"
 $databasePassword = (
     [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
 )
