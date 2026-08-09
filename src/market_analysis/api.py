@@ -4,7 +4,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -18,19 +18,24 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from market_analysis.application.acquisition import QuoteAcquisitionRouter
-from market_analysis.application.history import LocalCandleHistoryService
 from market_analysis.application.quotes import (
     JIN10_CLIENT_SOURCE,
     JIN10_LOCAL_CHANNEL,
     JIN10_WEB_CHANNEL,
+    TONGHUASHUN_FUTURES_SOURCE,
     LatestQuoteCache,
     QuoteViewService,
 )
 from market_analysis.application.realtime import QuoteStreamCoordinator
+from market_analysis.application.realtime_klines import (
+    RealtimeKlineBinding,
+    RealtimeKlineService,
+)
 from market_analysis.application.sources import (
     MarketSourceManager,
     ProviderProbe,
     QuoteServiceTier,
+    RealtimeSourceComposition,
     SourceAccessModel,
     SourceCapability,
     SourceHealth,
@@ -44,17 +49,12 @@ from market_analysis.domain.errors import (
     ProviderRateLimitError,
     ProviderUnavailableError,
 )
-from market_analysis.domain.models import InstrumentCatalogEntry
+from market_analysis.domain.models import Instrument
 from market_analysis.environment import load_project_environment
 from market_analysis.infrastructure.postgres import (
     BufferedMarketDataWriter,
     PostgresMarketDataStore,
     PostgresSettings,
-)
-from market_analysis.infrastructure.providers.jin10 import (
-    SPOT_GOLD,
-    SPOT_SILVER,
-    Jin10SymbolMapper,
 )
 from market_analysis.infrastructure.providers.jin10_local import (
     Jin10LocalProvider,
@@ -64,7 +64,23 @@ from market_analysis.infrastructure.providers.jin10_web import (
     Jin10WebProvider,
     Jin10WebSettings,
 )
+from market_analysis.infrastructure.providers.tonghuashun_futures import (
+    TonghuashunFuturesProvider,
+    TonghuashunFuturesSettings,
+)
 from market_analysis.infrastructure.source_config import JsonSourceConfigurationStore
+from market_analysis.instruments import (
+    DEFAULT_WATCHLIST_CODES,
+    INSTRUMENT_CATALOG,
+    SPOT_GOLD,
+    SPOT_GOLD_CNH_PER_GRAM,
+    USD_CNH,
+    InstrumentDefinition,
+    definition_for_instrument,
+    definition_for_symbol,
+    direct_requirements,
+    instrument_definition,
+)
 
 _repo_root = Path(__file__).resolve().parents[2]
 load_project_environment(_repo_root)
@@ -74,6 +90,7 @@ class Runtime:
     def __init__(self) -> None:
         self.local_provider: Jin10LocalProvider | None = None
         self.web_provider: Jin10WebProvider | None = None
+        self.tonghuashun_futures_provider: TonghuashunFuturesProvider | None = None
         self.manager: MarketSourceManager | None = None
         self.persistence: BufferedMarketDataWriter | None = None
         self.database_store: PostgresMarketDataStore | None = None
@@ -81,8 +98,9 @@ class Runtime:
         self.quote_stream: QuoteStreamCoordinator | None = None
         self.quote_views: QuoteViewService | None = None
         self.acquisition: QuoteAcquisitionRouter | None = None
-        self.candle_history: LocalCandleHistoryService | None = None
-        self.mapper = Jin10SymbolMapper()
+        self.realtime_klines: RealtimeKlineService | None = None
+        self.instrument_sources: dict[str, str] = {}
+        self.watchlist_codes: list[str] = list(DEFAULT_WATCHLIST_CODES)
         self.catalog_cache: AsyncTtlCache[Any] = AsyncTtlCache()
 
     def clear_caches(self) -> None:
@@ -90,6 +108,153 @@ class Runtime:
 
 
 runtime = Runtime()
+
+
+_SPOT_METALS_MARKET_SCHEDULE: dict[str, Any] = {
+    "time_zone": "America/New_York",
+    "reference": "OTC 贵金属常规交易时段",
+    "sessions": [
+        {
+            "weekday": weekday,
+            "open": "18:05",
+            "close": "16:59",
+            "close_day_offset": 1,
+        }
+        for weekday in range(5)
+    ],
+}
+
+_FOREX_MARKET_SCHEDULE: dict[str, Any] = {
+    "time_zone": "America/New_York",
+    "reference": "OTC 外汇常规交易时段",
+    "sessions": [
+        {
+            "weekday": weekday,
+            "open": "17:05",
+            "close": "16:59",
+            "close_day_offset": 1,
+        }
+        for weekday in range(5)
+    ],
+}
+
+_SHFE_METALS_MARKET_SCHEDULE: dict[str, Any] = {
+    "time_zone": "Asia/Shanghai",
+    "reference": "上海期货交易所贵金属期货常规交易时段",
+    "sessions": [
+        session
+        for weekday in range(1, 6)
+        for session in (
+            {
+                "weekday": weekday,
+                "open": "09:00",
+                "close": "10:15",
+                "close_day_offset": 0,
+            },
+            {
+                "weekday": weekday,
+                "open": "10:30",
+                "close": "11:30",
+                "close_day_offset": 0,
+            },
+            {
+                "weekday": weekday,
+                "open": "13:30",
+                "close": "15:00",
+                "close_day_offset": 0,
+            },
+            {
+                "weekday": weekday,
+                "open": "21:00",
+                "close": "02:30",
+                "close_day_offset": 1,
+            },
+        )
+    ],
+}
+
+_SSE_MARKET_SCHEDULE: dict[str, Any] = {
+    "time_zone": "Asia/Shanghai",
+    "reference": "上海证券交易所指数常规行情时段",
+    "sessions": [
+        session
+        for weekday in range(1, 6)
+        for session in (
+            {
+                "weekday": weekday,
+                "open": "09:30",
+                "close": "11:30",
+                "close_day_offset": 0,
+            },
+            {
+                "weekday": weekday,
+                "open": "13:00",
+                "close": "15:00",
+                "close_day_offset": 0,
+            },
+        )
+    ],
+}
+
+_NASDAQ_MARKET_SCHEDULE: dict[str, Any] = {
+    "time_zone": "America/New_York",
+    "reference": "纳斯达克常规交易时段",
+    "sessions": [
+        {
+            "weekday": weekday,
+            "open": "09:30",
+            "close": "16:00",
+            "close_day_offset": 0,
+        }
+        for weekday in range(1, 6)
+    ],
+}
+
+_USD_INDEX_MARKET_SCHEDULE: dict[str, Any] = {
+    "time_zone": "UTC",
+    "reference": "同花顺美元指数公开行情常规时段",
+    "sessions": [
+        {
+            "weekday": weekday,
+            "open": "00:00",
+            "close": "00:00",
+            "close_day_offset": 1,
+        }
+        for weekday in range(1, 6)
+    ],
+}
+
+_ICE_BRENT_MARKET_SCHEDULE: dict[str, Any] = {
+    "time_zone": "Europe/London",
+    "reference": "ICE Futures Europe 布伦特原油常规电子交易时段",
+    "sessions": [
+        {
+            "weekday": 0,
+            "open": "23:00",
+            "close": "23:00",
+            "close_day_offset": 1,
+        },
+        *[
+            {
+                "weekday": weekday,
+                "open": "01:00",
+                "close": "23:00",
+                "close_day_offset": 0,
+            }
+            for weekday in range(2, 6)
+        ],
+    ],
+}
+
+_MARKET_SCHEDULES: dict[str, dict[str, Any]] = {
+    "spot_metals": _SPOT_METALS_MARKET_SCHEDULE,
+    "forex": _FOREX_MARKET_SCHEDULE,
+    "shfe_metals": _SHFE_METALS_MARKET_SCHEDULE,
+    "sse": _SSE_MARKET_SCHEDULE,
+    "nasdaq": _NASDAQ_MARKET_SCHEDULE,
+    "usd_index": _USD_INDEX_MARKET_SCHEDULE,
+    "ice_brent": _ICE_BRENT_MARKET_SCHEDULE,
+}
 
 
 class InstrumentSourceUpdate(BaseModel):
@@ -127,6 +292,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             await web_provider.close()
         web_provider = None
 
+    tonghuashun_futures_settings = TonghuashunFuturesSettings.from_env()
+    tonghuashun_futures_provider = TonghuashunFuturesProvider(tonghuashun_futures_settings)
+
     async def probe_local_provider() -> ProviderProbe:
         if local_provider is None:
             return ProviderProbe(
@@ -163,6 +331,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         web_probe = await probe_web_provider()
         local_probe = await probe_local_provider()
         if not web_probe.available:
+            if web_probe.state == "waiting_quote":
+                return ProviderProbe(
+                    available=True,
+                    state="connected_waiting_quote",
+                    detail=("高速行情连接已建立, 当前没有新的报价帧; 休市或行情静止时属于正常状态"),
+                    checked_at=datetime.now(UTC),
+                    health=SourceHealth.DEGRADED,
+                )
             return ProviderProbe(
                 available=False,
                 state="unavailable",
@@ -186,12 +362,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             health=SourceHealth.HEALTHY,
         )
 
+    client_composition = RealtimeSourceComposition(
+        quote_channel_ids=(JIN10_WEB_CHANNEL, JIN10_LOCAL_CHANNEL),
+        kline_channel_id=JIN10_LOCAL_CHANNEL,
+        kline_derived_from_quotes=False,
+    )
     registrations = (
         SourceRegistration(
             source_id=JIN10_CLIENT_SOURCE,
             display_name="金十客户端行情",
-            description=("统一提供实时价格、涨跌和日内统计。页面与合约路由只面对这一份聚合结果。"),
-            capabilities=frozenset({SourceCapability.QUOTE}),
+            description=(
+                "完整实时数据源: 统一提供报价事件、当前/过去 K 线、涨跌和日内统计。"
+                "页面与合约路由只面对这一份结果。"
+            ),
+            capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
             default_enabled=True,
             default_priority=5,
             delayed=False,
@@ -200,17 +384,42 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             quote_poll_interval_seconds=0,
             quote_streaming=True,
             quote_service_tier=QuoteServiceTier.ENHANCED,
-            routing_role=SourceRoutingRole.LOGICAL,
+            routing_role=SourceRoutingRole.REALTIME_SOURCE,
+            composition=client_composition,
             access_model=SourceAccessModel.UNMETERED,
             access_note="事件驱动的结构化行情, 不使用限额接口。",
             probe=probe_client_source,
         ),
         SourceRegistration(
+            source_id=TONGHUASHUN_FUTURES_SOURCE,
+            display_name="同花顺公开行情",
+            description=(
+                "覆盖沪金/沪银、美元指数、布伦特原油和中美股票指数的结构化实时源, "
+                "直接提供报价、日内统计和同源公开一分钟 K 线。"
+            ),
+            capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
+            default_enabled=True,
+            default_priority=20,
+            delayed=False,
+            requires_running_app=False,
+            structured=True,
+            quote_poll_interval_seconds=(tonghuashun_futures_settings.quote_poll_interval_seconds),
+            quote_streaming=False,
+            quote_service_tier=QuoteServiceTier.STANDARD,
+            routing_role=SourceRoutingRole.REALTIME_SOURCE,
+            access_model=SourceAccessModel.UNMETERED,
+            access_note=(
+                "同花顺公开网页结构化接口; 应用按观察品种节流轮询, 不依赖本地期货软件常驻。"
+            ),
+            quote_provider=tonghuashun_futures_provider,
+            candle_provider=tonghuashun_futures_provider,
+        ),
+        SourceRegistration(
             source_id="jin10_local",
             display_name="金十桌面会话原始通道",
             description=(
-                "独立原始通道: 使用本机金十客户端登录会话, 直连并解码鉴权结构化行情。"
-                "在组合产品中只拥有日内补充字段; 建立会话后无需保持软件窗口运行。"
+                "内部同源通道: 使用本机金十客户端登录会话, 提供日内补充字段和"
+                "可分页的过去 K 线; 建立会话后无需保持软件窗口运行。"
             ),
             capabilities=frozenset(
                 {
@@ -222,7 +431,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             default_priority=10,
             delayed=False,
             requires_running_app=False,
-            history_priority=20,
             structured=True,
             quote_poll_interval_seconds=0,
             quote_streaming=True,
@@ -245,7 +453,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             default_priority=15,
             delayed=False,
             requires_running_app=False,
-            history_priority=15,
             structured=True,
             quote_poll_interval_seconds=0,
             quote_streaming=True,
@@ -260,13 +467,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     runtime.local_provider = local_provider
     runtime.web_provider = web_provider
+    runtime.tonghuashun_futures_provider = tonghuashun_futures_provider
     runtime.manager = MarketSourceManager(
         registrations,
         store=JsonSourceConfigurationStore(_source_store_path()),
     )
     runtime.persistence = None
     runtime.database_store = None
-    runtime.candle_history = None
+    runtime.realtime_klines = None
+    runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
     runtime.persistence_setup_error = None
     try:
         database_settings = PostgresSettings.from_env()
@@ -282,49 +491,41 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         runtime.persistence = BufferedMarketDataWriter(runtime.database_store)
         with suppress(Exception):
             await runtime.database_store.open()
-        if runtime.database_store.is_open:
-            await runtime.database_store.remove_source_from_standard_history("jin10_mcp")
         await runtime.persistence.start()
-
-    if local_provider is not None and runtime.database_store is not None:
-        for instrument in (SPOT_GOLD, SPOT_SILVER):
-            with suppress(Exception):
-                local_provider.seed_candles(
-                    await runtime.database_store.load_quote_candles(
-                        instrument,
-                        source_id=local_provider.name,
-                        count=2_000,
-                    )
-                )
-
-    if runtime.database_store is not None:
-
-        async def fetch_backfill_candles(instrument, source, start, count):
-            return await _manager().get_candles(
-                instrument,
-                source=source,
-                start=start,
-                count=count,
+        if runtime.database_store.is_open:
+            default_instruments = tuple(
+                instrument_definition(code).instrument for code in DEFAULT_WATCHLIST_CODES
             )
+            await runtime.database_store.initialize_watchlist(default_instruments)
+            stored_symbols = await runtime.database_store.load_watchlist_symbols()
+            stored_codes: list[str] = []
+            for symbol in stored_symbols:
+                with suppress(InstrumentNotSupportedError):
+                    stored_codes.append(definition_for_symbol(symbol).code)
+            runtime.watchlist_codes = stored_codes
 
-        runtime.candle_history = LocalCandleHistoryService(
-            runtime.database_store,
-            fetch_candles=fetch_backfill_candles,
-            source_priority=_manager().history_source_priority,
-            quote_derived_sources=_manager().history_quote_derived_sources,
-            backfill_sources=_manager().history_backfill_sources,
-        )
-        validation_end = datetime.now(UTC).replace(second=0, microsecond=0)
-        validation_start = validation_end - timedelta(hours=24)
-        for instrument in (SPOT_GOLD, SPOT_SILVER):
-            with suppress(Exception):
-                await runtime.database_store.standardize_candles(
-                    instrument,
-                    source_priority=_manager().history_source_priority(),
-                    quote_derived_sources=_manager().history_quote_derived_sources(),
-                    start=validation_start,
-                    end=validation_end,
-                )
+    kline_store = (
+        runtime.database_store
+        if runtime.database_store and runtime.database_store.is_open
+        else None
+    )
+    runtime.realtime_klines = RealtimeKlineService(
+        kline_store,
+        bindings=(
+            RealtimeKlineBinding(
+                realtime_source_id=JIN10_CLIENT_SOURCE,
+                history_channel_id=client_composition.kline_channel_id,
+                live_quote_channel_id=JIN10_WEB_CHANNEL,
+                history_provider=local_provider,
+            ),
+            RealtimeKlineBinding(
+                realtime_source_id=TONGHUASHUN_FUTURES_SOURCE,
+                history_channel_id=TONGHUASHUN_FUTURES_SOURCE,
+                live_quote_channel_id=TONGHUASHUN_FUTURES_SOURCE,
+                history_provider=tonghuashun_futures_provider,
+            ),
+        ),
+    )
 
     async def load_latest_quote(instrument, source_id):
         store = runtime.database_store
@@ -335,6 +536,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     stale_after_seconds = {
         JIN10_WEB_CHANNEL: web_settings.stale_after_seconds if web_settings else 12.0,
         JIN10_LOCAL_CHANNEL: local_settings.stale_after_seconds if local_settings else 12.0,
+        TONGHUASHUN_FUTURES_SOURCE: (tonghuashun_futures_settings.stale_after_seconds),
     }
     quote_cache = LatestQuoteCache(load_latest_quote)
     runtime.quote_views = QuoteViewService(
@@ -345,6 +547,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     def accept_raw_quote(value):
         quote_views = runtime.quote_views
+        if runtime.realtime_klines is not None:
+            runtime.realtime_klines.accept_quote(value)
         # Persist every raw channel frame, including late or duplicate deliveries.
         # Only the latest presentation view applies the monotonic timestamp guard;
         # raw evidence must never be filtered by UI-cache semantics.
@@ -364,6 +568,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ):
             with suppress(ProviderError):
                 stream.publish(quote_views.build_cached(value.instrument, JIN10_CLIENT_SOURCE))
+        if (
+            "XAUCNHG" in runtime.watchlist_codes
+            and value.source.provider == JIN10_WEB_CHANNEL
+            and value.instrument in {SPOT_GOLD, USD_CNH}
+        ):
+            with suppress(ProviderError):
+                derived = quote_views.build_cached(
+                    SPOT_GOLD_CNH_PER_GRAM,
+                    JIN10_CLIENT_SOURCE,
+                )
+                if runtime.realtime_klines is not None:
+                    runtime.realtime_klines.accept_view(derived)
+                stream.publish(derived)
 
     def report_acquisition_error(instrument, source_id, error):
         if runtime.quote_stream is not None:
@@ -378,9 +595,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             for provider in (web_provider, local_provider)
             if provider is not None
         },
-        poll_channels={},
+        poll_channels={
+            tonghuashun_futures_provider.name: tonghuashun_futures_provider,
+        },
         source_channels={
-            JIN10_CLIENT_SOURCE: (JIN10_WEB_CHANNEL, JIN10_LOCAL_CHANNEL),
+            JIN10_CLIENT_SOURCE: client_composition.quote_channel_ids,
+            TONGHUASHUN_FUTURES_SOURCE: (TONGHUASHUN_FUTURES_SOURCE,),
         },
         source_enabled=_manager().is_enabled,
         prepare_source=prepare_source,
@@ -397,19 +617,29 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         web_quote_listener = accept_raw_quote
         web_provider.add_quote_listener(web_quote_listener)
 
-    initial_routes = {}
-    for instrument in (SPOT_GOLD, SPOT_SILVER):
-        source_id = JIN10_CLIENT_SOURCE
+    initial_routes: dict[Instrument, str] = {}
+    runtime.instrument_sources.clear()
+    for code in runtime.watchlist_codes:
+        definition = instrument_definition(code)
+        instrument = definition.instrument
+        source_id = definition.source_ids[0]
         if runtime.database_store is not None and runtime.database_store.is_open:
             stored_source = await runtime.database_store.get_instrument_source(instrument)
-            if stored_source is not None and not _manager().is_logical_source(stored_source):
-                source_id = JIN10_CLIENT_SOURCE
+            if stored_source is not None and (
+                not _manager().is_realtime_source(stored_source)
+                or stored_source not in definition.source_ids
+            ):
                 await runtime.database_store.set_instrument_source(instrument, source_id)
             elif stored_source is not None:
                 source_id = stored_source
             else:
                 await runtime.database_store.set_instrument_source(instrument, source_id)
-        initial_routes[instrument] = source_id
+        runtime.instrument_sources[instrument.symbol] = source_id
+        for requirement in direct_requirements(definition):
+            initial_routes[requirement] = source_id
+            runtime.instrument_sources[requirement.symbol] = source_id
+            if runtime.database_store is not None and runtime.database_store.is_open:
+                await runtime.database_store.set_instrument_source(requirement, source_id)
     await runtime.acquisition.start(initial_routes)
     runtime.clear_caches()
     yield
@@ -421,16 +651,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         web_provider.remove_quote_listener(web_quote_listener)
     if runtime.quote_stream is not None:
         await runtime.quote_stream.close()
-    if runtime.candle_history is not None:
-        await runtime.candle_history.close()
+    if runtime.realtime_klines is not None:
+        await runtime.realtime_klines.close()
     if runtime.persistence is not None:
         await runtime.persistence.stop()
     if runtime.local_provider is not None:
         await runtime.local_provider.close()
     if runtime.web_provider is not None:
         await runtime.web_provider.close()
+    if runtime.tonghuashun_futures_provider is not None:
+        await runtime.tonghuashun_futures_provider.close()
     runtime.local_provider = None
     runtime.web_provider = None
+    runtime.tonghuashun_futures_provider = None
     runtime.manager = None
     runtime.persistence = None
     runtime.database_store = None
@@ -438,7 +671,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     runtime.quote_stream = None
     runtime.quote_views = None
     runtime.acquisition = None
-    runtime.candle_history = None
+    runtime.realtime_klines = None
+    runtime.instrument_sources.clear()
+    runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
     runtime.clear_caches()
 
 
@@ -447,7 +682,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=False,
-    allow_methods=["GET", "PATCH", "POST", "PUT"],
+    allow_methods=["DELETE", "GET", "PATCH", "POST", "PUT"],
     allow_headers=["*"],
 )
 
@@ -476,22 +711,14 @@ def _acquisition() -> QuoteAcquisitionRouter:
     return runtime.acquisition
 
 
-def _database_store() -> PostgresMarketDataStore:
-    store = runtime.database_store
-    if store is None or not store.is_open:
-        raise HTTPException(status_code=503, detail="PostgreSQL source routing is unavailable")
-    return store
-
-
-def _candle_history() -> LocalCandleHistoryService:
-    _database_store()
-    if runtime.candle_history is None:
-        raise HTTPException(status_code=503, detail="Local candle history is unavailable")
-    return runtime.candle_history
+def _realtime_klines() -> RealtimeKlineService:
+    if runtime.realtime_klines is None:
+        raise HTTPException(status_code=503, detail="Realtime Kline runtime is unavailable")
+    return runtime.realtime_klines
 
 
 def _public_source(value: Any) -> dict[str, Any]:
-    """Expose logical-source outcomes, never their internal channel topology."""
+    """Expose realtime-source outcomes, never their internal channel topology."""
 
     return {
         "source_id": value.source_id,
@@ -519,7 +746,7 @@ def _public_source(value: Any) -> dict[str, Any]:
 
 
 def _public_acquisition_status(value: dict[str, object] | None) -> dict[str, object] | None:
-    """Expose logical routes without leaking their physical channel topology."""
+    """Expose realtime routes without leaking their internal channel topology."""
 
     if value is None:
         return None
@@ -573,11 +800,17 @@ async def health() -> dict[str, Any]:
             runtime.acquisition.status() if runtime.acquisition is not None else None
         ),
         "history": {
-            "mode": "postgres_validated_standard",
-            "query_table": "standard_candles",
-            "validation_table": "candle_validation_results",
+            "mode": "realtime_source_bound_cache",
+            "governance": "frozen",
+            "cross_source_fallback": False,
+            "upstream_calls_on_read": False,
+            "live_kline_count": (
+                runtime.realtime_klines.live_count() if runtime.realtime_klines is not None else 0
+            ),
             "backfill_pending": (
-                runtime.candle_history.pending_count() if runtime.candle_history is not None else 0
+                runtime.realtime_klines.pending_backfill_count()
+                if runtime.realtime_klines is not None
+                else 0
             ),
         },
     }
@@ -590,62 +823,168 @@ async def sources(refresh: bool = Query(default=True)) -> list[dict[str, Any]]:
 
 
 @app.post("/api/sources/{source_id}/test")
-async def test_source(source_id: str) -> dict[str, Any]:
+async def test_source(
+    source_id: str,
+    code: str = Query(default="XAUUSD"),
+) -> dict[str, Any]:
     started = perf_counter()
     try:
+        definition = instrument_definition(code)
+        instrument = definition.instrument
         manager = _manager()
-        manager.validate_logical_source(
-            SourceCapability.QUOTE,
+        manager.validate_realtime_source(
             source_id,
             require_connection=False,
         )
+        if source_id not in definition.source_ids:
+            raise ProviderUnavailableError(f"{definition.code} 不支持实时数据源 {source_id}")
         await manager.connect_source(source_id)
-        await _acquisition().sample_source(source_id, SPOT_GOLD)
-        value = await _quote_views().get(SPOT_GOLD, source_id)
+        if source_id == TONGHUASHUN_FUTURES_SOURCE:
+            await _acquisition().sample_source(source_id, instrument)
+        else:
+            await _acquisition().reconcile()
+        descriptors = await manager.list_sources(refresh=True)
+        descriptor = next(item for item in descriptors if item.source_id == source_id)
+        if descriptor.health in {
+            SourceHealth.UNAVAILABLE,
+            SourceHealth.UNCONFIGURED,
+            SourceHealth.FROZEN,
+        }:
+            raise ProviderUnavailableError(descriptor.error or f"{source_id} 连接不可用")
+        try:
+            value = await _quote_views().get(instrument, source_id)
+        except ProviderUnavailableError:
+            if descriptor.state != "connected_waiting_quote":
+                raise
+            value = None
+        kline_rows = await _realtime_klines().get_candles(
+            instrument,
+            source_id=source_id,
+            count=1,
+        )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ProviderUnavailableError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {
         "source_id": source_id,
-        "code": "XAUUSD",
-        "last": value.quote.last,
-        "observed_at": value.quote.source.observed_at,
+        "code": definition.code,
+        "state": descriptor.state,
+        "detail": descriptor.error,
+        "data_fresh": value is not None,
+        "last": value.quote.last if value is not None else None,
+        "observed_at": value.quote.source.observed_at if value is not None else None,
         "latency_ms": max(1, round((perf_counter() - started) * 1000)),
-        "quality": value.quality,
-        "unavailable_fields": value.unavailable_fields,
-        "stale_fields": value.stale_fields,
+        "quality": value.quality if value is not None else "unavailable",
+        "unavailable_fields": value.unavailable_fields if value is not None else (),
+        "stale_fields": value.stale_fields if value is not None else (),
+        "kline_points": len(kline_rows),
+        "kline_open_time": kline_rows[-1].open_time if kline_rows else None,
     }
 
 
 @app.get("/api/instruments")
 async def instruments() -> list[dict[str, Any]]:
-    supported = [
-        InstrumentCatalogEntry(
-            provider="canonical",
-            provider_code="XAUUSD",
-            name="现货黄金",
-            instrument=SPOT_GOLD,
-        ),
-        InstrumentCatalogEntry(
-            provider="canonical",
-            provider_code="XAGUSD",
-            name="现货白银",
-            instrument=SPOT_SILVER,
-        ),
-    ]
-    return [asdict(entry) for entry in supported]
+    return [_public_instrument(item) for item in INSTRUMENT_CATALOG]
 
 
-async def _instrument_source(code: str) -> tuple[str, Any, str]:
-    normalized_code = code.upper()
-    instrument = runtime.mapper.from_provider_code(normalized_code)
-    store = _database_store()
-    source_id = await store.get_instrument_source(instrument)
-    if source_id is None or not _manager().is_logical_source(source_id):
-        source_id = JIN10_CLIENT_SOURCE
-        await store.set_instrument_source(instrument, source_id)
-    return normalized_code, instrument, source_id
+def _public_instrument(definition: InstrumentDefinition) -> dict[str, Any]:
+    schedule = _MARKET_SCHEDULES[definition.market_schedule_id]
+    return {
+        "provider": "canonical",
+        "provider_code": definition.code,
+        "name": definition.name,
+        "instrument": asdict(definition.instrument),
+        "price_unit": definition.price_unit,
+        "price_digits": definition.price_digits,
+        "quote_kind": definition.quote_kind,
+        "history_available": definition.history_available,
+        "source_ids": list(definition.source_ids),
+        "dependencies": [
+            definition_for_symbol(item.symbol).code for item in definition.dependencies
+        ],
+        "market_schedule": schedule,
+    }
+
+
+def _public_watchlist() -> list[dict[str, Any]]:
+    return [_public_instrument(instrument_definition(code)) for code in runtime.watchlist_codes]
+
+
+async def _source_for_instrument(instrument: Instrument) -> str:
+    definition = definition_for_instrument(instrument)
+    default_source_id = definition.source_ids[0]
+    source_id = runtime.instrument_sources.get(instrument.symbol)
+    store = runtime.database_store
+    if source_id is None and store is not None and store.is_open:
+        source_id = await store.get_instrument_source(instrument)
+    if (
+        source_id is None
+        or not _manager().is_realtime_source(source_id)
+        or source_id not in definition.source_ids
+    ):
+        source_id = default_source_id
+        if store is not None and store.is_open:
+            with suppress(Exception):
+                await store.set_instrument_source(instrument, source_id)
+    runtime.instrument_sources[instrument.symbol] = source_id
+    return source_id
+
+
+async def _refresh_watchlist_routes() -> None:
+    routes: dict[Instrument, str] = {}
+    store = runtime.database_store
+    for code in runtime.watchlist_codes:
+        definition = instrument_definition(code)
+        source_id = await _source_for_instrument(definition.instrument)
+        for requirement in direct_requirements(definition):
+            routes[requirement] = source_id
+            runtime.instrument_sources[requirement.symbol] = source_id
+            if store is not None and store.is_open:
+                await store.set_instrument_source(requirement, source_id)
+    await _acquisition().replace_routes(routes)
+
+
+async def _instrument_source(code: str) -> tuple[str, Instrument, str]:
+    definition = instrument_definition(code)
+    source_id = await _source_for_instrument(definition.instrument)
+    return definition.code, definition.instrument, source_id
+
+
+@app.get("/api/watchlist")
+async def watchlist() -> list[dict[str, Any]]:
+    return _public_watchlist()
+
+
+@app.post("/api/watchlist/{code}")
+async def add_watchlist_instrument(code: str) -> list[dict[str, Any]]:
+    definition = instrument_definition(code)
+    if definition.code in runtime.watchlist_codes:
+        return _public_watchlist()
+    store = runtime.database_store
+    if store is not None and store.is_open:
+        await store.add_watchlist_instrument(definition.instrument)
+    runtime.watchlist_codes.append(definition.code)
+    await _source_for_instrument(definition.instrument)
+    await _refresh_watchlist_routes()
+    runtime.clear_caches()
+    return _public_watchlist()
+
+
+@app.delete("/api/watchlist/{code}")
+async def remove_watchlist_instrument(code: str) -> list[dict[str, Any]]:
+    definition = instrument_definition(code)
+    if definition.code not in runtime.watchlist_codes:
+        return _public_watchlist()
+    if len(runtime.watchlist_codes) == 1:
+        raise HTTPException(status_code=409, detail="观察列表至少保留一个品种")
+    store = runtime.database_store
+    if store is not None and store.is_open:
+        await store.remove_watchlist_instrument(definition.instrument)
+    runtime.watchlist_codes.remove(definition.code)
+    await _refresh_watchlist_routes()
+    runtime.clear_caches()
+    return _public_watchlist()
 
 
 @app.get("/api/instruments/{code}/source")
@@ -662,16 +1001,31 @@ async def update_instrument_source(
     code: str,
     update: InstrumentSourceUpdate,
 ) -> dict[str, Any]:
-    normalized_code = code.upper()
-    instrument = runtime.mapper.from_provider_code(normalized_code)
+    definition = instrument_definition(code)
+    normalized_code = definition.code
+    instrument = definition.instrument
     try:
-        _manager().validate_logical_source(SourceCapability.QUOTE, update.source_id)
+        _manager().validate_realtime_source(update.source_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ProviderUnavailableError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    await _database_store().set_instrument_source(instrument, update.source_id)
-    await _acquisition().set_route(instrument, update.source_id)
+    if update.source_id not in definition.source_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{normalized_code} 不支持实时数据源 {update.source_id}",
+        )
+    runtime.instrument_sources[instrument.symbol] = update.source_id
+    store = runtime.database_store
+    if store is not None and store.is_open:
+        with suppress(Exception):
+            await store.set_instrument_source(instrument, update.source_id)
+    for requirement in direct_requirements(definition):
+        runtime.instrument_sources[requirement.symbol] = update.source_id
+        if store is not None and store.is_open:
+            with suppress(Exception):
+                await store.set_instrument_source(requirement, update.source_id)
+    await _refresh_watchlist_routes()
     runtime.clear_caches()
     return {"code": normalized_code, "source_id": update.source_id}
 
@@ -683,25 +1037,55 @@ async def quote(code: str) -> dict[str, Any]:
     return asdict(value)
 
 
+@app.get("/api/quotes/{code}/last")
+async def last_quote(code: str) -> dict[str, Any]:
+    """Read one explicitly stale-capable snapshot from same-source local storage."""
+
+    _, instrument, source_id = await _instrument_source(code)
+    value = await _quote_views().get_last(instrument, source_id)
+    return asdict(value)
+
+
 @app.get("/api/candles/{code}")
 async def candles(
     code: str,
-    source: str | None = Query(default=None, deprecated=True),
-    count: int = Query(default=100, ge=1, le=100),
+    count: int = Query(default=100, ge=1, le=2_000),
     time: int | None = Query(default=None, description="Unix seconds"),
 ) -> list[dict[str, Any]]:
-    # `source` is accepted temporarily for older clients but intentionally ignored:
-    # all users and contracts read the same canonical history from PostgreSQL.
-    del source
-    normalized_code = code.upper()
-    instrument = runtime.mapper.from_provider_code(normalized_code)
+    _, instrument, source_id = await _instrument_source(code)
     start = datetime.fromtimestamp(time, tz=UTC) if time else None
-    values = await _candle_history().get_candles(
+    values = await _realtime_klines().get_candles(
         instrument,
+        source_id=source_id,
         start=start,
         count=count,
     )
     return [asdict(value) for value in values]
+
+
+@app.post("/api/candles/{code}/backfill")
+async def backfill_candles(
+    code: str,
+    count: int = Query(default=1_000, ge=1, le=10_000),
+    time: int = Query(description="Inclusive range start as Unix seconds"),
+) -> dict[str, Any]:
+    """Explicitly fills one missing range from the contract's bound realtime source."""
+
+    definition = instrument_definition(code)
+    if not definition.history_available:
+        raise HTTPException(
+            status_code=409,
+            detail="该换算品种目前只提供实时分钟线, 不提供历史回补",
+        )
+    _, instrument, source_id = await _instrument_source(code)
+    start = datetime.fromtimestamp(time, tz=UTC)
+    result = await _realtime_klines().backfill(
+        instrument,
+        source_id=source_id,
+        start=start,
+        count=count,
+    )
+    return asdict(result)
 
 
 @app.websocket("/api/stream/quotes/{code}")
@@ -740,8 +1124,9 @@ if _web_dist.exists():
     async def web_app(path: str) -> FileResponse:
         requested = (_web_dist / path).resolve()
         if requested.is_file() and _web_dist.resolve() in requested.parents:
-            return FileResponse(requested)
-        return FileResponse(_web_dist / "index.html")
+            headers = {"Cache-Control": "no-store"} if requested.name == "index.html" else None
+            return FileResponse(requested, headers=headers)
+        return FileResponse(_web_dist / "index.html", headers={"Cache-Control": "no-store"})
 
 
 def run() -> None:

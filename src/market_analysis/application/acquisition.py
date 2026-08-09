@@ -71,6 +71,13 @@ class QuoteAcquisitionRouter:
             self._routes[instrument] = source_id
             await self._reconcile_locked()
 
+    async def replace_routes(self, routes: Mapping[Instrument, str]) -> None:
+        for source_id in routes.values():
+            self._require_source(source_id)
+        async with self._lock:
+            self._routes = dict(routes)
+            await self._reconcile_locked()
+
     async def reconcile(self) -> None:
         async with self._lock:
             await self._reconcile_locked()

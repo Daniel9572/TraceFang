@@ -6,9 +6,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from market_analysis.application.quotes import (
-    LogicalQuoteSnapshot,
     QuoteQuality,
     QuoteView,
+    RealtimeQuoteSnapshot,
 )
 from market_analysis.application.realtime import QuoteStreamCoordinator
 from market_analysis.domain.errors import ProviderUnavailableError
@@ -40,7 +40,7 @@ def view(source: str, price: str = "4242.65") -> QuoteView:
     value = quote(source, price)
     return QuoteView(
         source_id=source,
-        quote=LogicalQuoteSnapshot(
+        quote=RealtimeQuoteSnapshot(
             instrument=value.instrument,
             last=value.last,
             open=value.open,

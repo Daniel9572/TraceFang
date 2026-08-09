@@ -6,6 +6,7 @@ from market_analysis.application.sources import (
     MarketSourceManager,
     ProviderProbe,
     QuoteServiceTier,
+    RealtimeSourceComposition,
     SourceAccessModel,
     SourceCapability,
     SourceRegistration,
@@ -81,17 +82,18 @@ def registration(source_id, priority, provider):
         source_id=source_id,
         display_name=source_id,
         description=source_id,
-        capabilities=frozenset({SourceCapability.QUOTE}),
+        capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
         default_enabled=True,
         default_priority=priority,
         delayed=False,
         requires_running_app=False,
         quote_provider=provider,
+        candle_provider=provider,
     )
 
 
 class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_frozen_source_is_excluded_from_runtime_and_history(self) -> None:
+    async def test_frozen_realtime_source_is_excluded_from_runtime(self) -> None:
         store = MemoryStore()
         store.values = {"jin10_mcp": {"enabled": True, "priority": 1}}
         connector = FakeConnector()
@@ -124,10 +126,6 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(descriptor.enabled)
         self.assertEqual(descriptor.health, "frozen")
         self.assertFalse(store.values["jin10_mcp"]["enabled"])
-        self.assertEqual(manager.history_source_priority(), ())
-        self.assertEqual(manager.history_backfill_sources(), ())
-        self.assertEqual(manager.history_verification_sources(), ())
-
         with self.assertRaisesRegex(ProviderUnavailableError, "temporarily frozen"):
             manager.configure("jin10_mcp", enabled=True)
         with self.assertRaisesRegex(ProviderUnavailableError, "temporarily frozen"):
@@ -144,7 +142,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     source_id="fast",
                     display_name="fast",
                     description="change-driven stream",
-                    capabilities=frozenset({SourceCapability.QUOTE}),
+                    capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
                     default_enabled=True,
                     default_priority=10,
                     delayed=False,
@@ -152,6 +150,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     quote_streaming=True,
                     quote_service_tier=QuoteServiceTier.ENHANCED,
                     quote_provider=FakeProvider("fast", "4242"),
+                    candle_provider=FakeProvider("fast-kline", "4242"),
                 ),
             ),
             store=MemoryStore(),
@@ -161,7 +160,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sources[0].quote_service_tier, QuoteServiceTier.ENHANCED)
 
-    async def test_internal_channels_are_not_exposed_as_logical_sources(self) -> None:
+    async def test_internal_channels_are_not_exposed_as_realtime_sources(self) -> None:
         store = MemoryStore()
         store.values = {"jin10_web": {"enabled": False, "priority": 1}}
         manager = MarketSourceManager(
@@ -170,12 +169,18 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     source_id="jin10_client",
                     display_name="client",
                     description="explicit composition",
-                    capabilities=frozenset({SourceCapability.QUOTE}),
+                    capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
                     default_enabled=True,
                     default_priority=5,
                     delayed=False,
                     requires_running_app=False,
                     quote_streaming=True,
+                    routing_role=SourceRoutingRole.REALTIME_SOURCE,
+                    composition=RealtimeSourceComposition(
+                        quote_channel_ids=("jin10_web",),
+                        kline_channel_id="jin10_web",
+                        kline_derived_from_quotes=True,
+                    ),
                 ),
                 SourceRegistration(
                     source_id="jin10_web",
@@ -202,15 +207,14 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
             {item.source_id for item in all_sources},
             {"jin10_client", "jin10_web"},
         )
-        self.assertEqual(manager.logical_source_ids(), ("jin10_client",))
+        self.assertEqual(manager.realtime_source_ids(), ("jin10_client",))
         self.assertNotIn("jin10_web", store.values)
         internal = next(item for item in all_sources if item.source_id == "jin10_web")
         self.assertTrue(internal.enabled)
         with self.assertRaisesRegex(ProviderUnavailableError, "internal channel"):
-            manager.validate_logical_source(SourceCapability.QUOTE, "jin10_web")
+            manager.validate_realtime_source("jin10_web")
         with self.assertRaisesRegex(ValueError, "internal channel"):
             manager.configure("jin10_web", enabled=False)
-        self.assertEqual(manager.history_quote_derived_sources(), ("jin10_web",))
 
     async def test_explicit_candle_source_failure_does_not_call_free_source(self) -> None:
         free = FakeProvider("free", "4242")
@@ -228,6 +232,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     requires_running_app=False,
                     access_model=SourceAccessModel.LIMITED,
                     candle_provider=metered,
+                    routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
                 ),
                 SourceRegistration(
                     source_id="free",
@@ -239,6 +244,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     delayed=False,
                     requires_running_app=False,
                     candle_provider=free,
+                    routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
                 ),
             ),
             store=MemoryStore(),
@@ -298,7 +304,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     source_id="official",
                     display_name="official",
                     description="limited official source",
-                    capabilities=frozenset({SourceCapability.QUOTE}),
+                    capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
                     default_enabled=True,
                     default_priority=20,
                     delayed=False,
@@ -307,6 +313,7 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     manual_connection_required=True,
                     connector=connector,
                     quote_provider=provider,
+                    candle_provider=provider,
                 ),
             ),
             store=MemoryStore(),
@@ -334,13 +341,14 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
                     source_id="official",
                     display_name="official",
                     description="limited official source",
-                    capabilities=frozenset({SourceCapability.QUOTE}),
+                    capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
                     default_enabled=True,
                     default_priority=20,
                     delayed=False,
                     requires_running_app=False,
                     access_model=SourceAccessModel.LIMITED,
                     quote_provider=provider,
+                    candle_provider=provider,
                 ),
             ),
             store=MemoryStore(),
@@ -350,56 +358,24 @@ class MarketSourceManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sources[0].connection_active)
         self.assertEqual(provider.calls, 0)
 
-    async def test_history_policy_is_global_free_first_and_never_auto_connects(self) -> None:
-        connector = FakeConnector()
-        manager = MarketSourceManager(
-            (
-                SourceRegistration(
-                    source_id="official",
-                    display_name="official",
-                    description="limited official history",
-                    capabilities=frozenset({SourceCapability.CANDLES}),
-                    default_enabled=True,
-                    default_priority=5,
-                    delayed=False,
-                    requires_running_app=False,
-                    history_priority=10,
-                    access_model=SourceAccessModel.LIMITED,
-                    routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
-                    manual_connection_required=True,
-                    connector=connector,
-                    candle_provider=FakeProvider("official", "4242"),
+    async def test_rejects_a_user_selectable_source_without_quote_and_kline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "incomplete; missing candles"):
+            MarketSourceManager(
+                (
+                    SourceRegistration(
+                        source_id="quote-only",
+                        display_name="quote-only",
+                        description="incomplete product",
+                        capabilities=frozenset({SourceCapability.QUOTE}),
+                        default_enabled=True,
+                        default_priority=5,
+                        delayed=False,
+                        requires_running_app=False,
+                        quote_provider=FakeProvider("quote-only", "4242"),
+                    ),
                 ),
-                SourceRegistration(
-                    source_id="free",
-                    display_name="free",
-                    description="unmetered history",
-                    capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
-                    default_enabled=True,
-                    default_priority=20,
-                    delayed=False,
-                    requires_running_app=False,
-                    history_priority=20,
-                    access_model=SourceAccessModel.UNMETERED,
-                    quote_streaming=True,
-                    routing_role=SourceRoutingRole.INTERNAL_CHANNEL,
-                    candle_provider=FakeProvider("free", "4242"),
-                ),
-            ),
-            store=MemoryStore(),
-        )
-
-        self.assertEqual(manager.history_source_priority(), ("official", "free"))
-        self.assertEqual(manager.history_quote_derived_sources(), ("free",))
-        self.assertEqual(manager.history_backfill_sources(), ("free",))
-        self.assertEqual(manager.history_verification_sources(), ())
-        self.assertEqual(connector.calls, 0)
-
-        await manager.connect_source("official")
-
-        self.assertEqual(manager.history_backfill_sources(), ("free",))
-        self.assertEqual(manager.history_verification_sources(), ("official",))
-        self.assertEqual(connector.calls, 1)
+                store=MemoryStore(),
+            )
 
 
 if __name__ == "__main__":

@@ -52,7 +52,8 @@ class FakeStore:
         return None
 
 
-class LocalCandleHistoryTests(unittest.IsolatedAsyncioTestCase):
+@unittest.skip("global cross-source history management is frozen and outside runtime")
+class FrozenGlobalCandleHistoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_a_history_series_mixed_from_raw_channels(self) -> None:
         store = FakeStore(
             (

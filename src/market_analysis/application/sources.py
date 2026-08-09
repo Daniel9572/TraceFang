@@ -46,10 +46,27 @@ class QuoteServiceTier(StrEnum):
 
 
 class SourceRoutingRole(StrEnum):
-    """Separates user-selectable logical sources from implementation channels."""
+    """Separates complete user-selectable realtime sources from internal channels."""
 
-    LOGICAL = "logical"
+    REALTIME_SOURCE = "realtime_source"
     INTERNAL_CHANNEL = "internal_channel"
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeSourceComposition:
+    """Private channel topology of one complete realtime source."""
+
+    quote_channel_ids: tuple[str, ...]
+    kline_channel_id: str
+    kline_derived_from_quotes: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.quote_channel_ids:
+            raise ValueError("a composed realtime source requires at least one quote channel")
+        if len(set(self.quote_channel_ids)) != len(self.quote_channel_ids):
+            raise ValueError("realtime source quote channels must be unique")
+        if not self.kline_channel_id.strip():
+            raise ValueError("a composed realtime source requires one kline channel")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,12 +116,12 @@ class SourceRegistration:
     default_priority: int
     delayed: bool
     requires_running_app: bool
-    history_priority: int = 100
     structured: bool = True
     quote_poll_interval_seconds: float = 60.0
     quote_streaming: bool = False
     quote_service_tier: QuoteServiceTier = QuoteServiceTier.REFERENCE
-    routing_role: SourceRoutingRole = SourceRoutingRole.LOGICAL
+    routing_role: SourceRoutingRole = SourceRoutingRole.REALTIME_SOURCE
+    composition: RealtimeSourceComposition | None = None
     access_model: SourceAccessModel = SourceAccessModel.UNMETERED
     access_note: str | None = None
     manual_connection_required: bool = False
@@ -171,11 +188,12 @@ class MarketSourceManager:
         self._registrations = {item.source_id: item for item in registrations}
         if len(self._registrations) != len(registrations):
             raise ValueError("source ids must be unique")
+        self._validate_registrations()
         self._store = store
         self._configuration = self._merged_configuration(store.load())
-        # Physical channels are implementation details, not independently managed
-        # sources. Rewriting the local preference file also removes stale channel
-        # switches left by older releases.
+        # Internal channels are implementation details, not independently managed
+        # realtime sources. Rewriting the local preference file also removes stale
+        # channel switches left by older releases.
         self._store.save(self._persistable_configuration())
         self._runtime = {
             source_id: _RuntimeState(
@@ -241,7 +259,7 @@ class MarketSourceManager:
         return {
             source_id: value.copy()
             for source_id, value in self._configuration.items()
-            if self._registrations[source_id].routing_role is SourceRoutingRole.LOGICAL
+            if self._registrations[source_id].routing_role is SourceRoutingRole.REALTIME_SOURCE
         }
 
     async def list_sources(
@@ -253,7 +271,7 @@ class MarketSourceManager:
         registrations = tuple(
             item
             for item in self._registrations.values()
-            if include_internal or item.routing_role is SourceRoutingRole.LOGICAL
+            if include_internal or item.routing_role is SourceRoutingRole.REALTIME_SOURCE
         )
         if refresh:
             await asyncio.gather(*(self._refresh_probe(item) for item in registrations))
@@ -328,7 +346,7 @@ class MarketSourceManager:
         priority: int | None = None,
     ) -> None:
         registration = self._registration(source_id)
-        if registration.routing_role is not SourceRoutingRole.LOGICAL:
+        if registration.routing_role is not SourceRoutingRole.REALTIME_SOURCE:
             raise ValueError(
                 f"{source_id} is an internal channel and cannot be configured directly"
             )
@@ -350,20 +368,24 @@ class MarketSourceManager:
             value["priority"] = priority
         self._store.save(self._persistable_configuration())
 
-    def logical_source_ids(self) -> tuple[str, ...]:
+    def realtime_source_ids(self) -> tuple[str, ...]:
         return tuple(
             item.source_id
             for item in self._registrations.values()
-            if item.routing_role is SourceRoutingRole.LOGICAL and not item.frozen
+            if item.routing_role is SourceRoutingRole.REALTIME_SOURCE and not item.frozen
         )
 
-    def is_logical_source(self, source_id: str) -> bool:
+    def is_realtime_source(self, source_id: str) -> bool:
         registration = self._registrations.get(source_id)
         return bool(
             registration is not None
-            and registration.routing_role is SourceRoutingRole.LOGICAL
+            and registration.routing_role is SourceRoutingRole.REALTIME_SOURCE
             and not registration.frozen
         )
+
+    def realtime_source_composition(self, source_id: str) -> RealtimeSourceComposition | None:
+        self.validate_realtime_source(source_id, require_connection=False)
+        return self._registration(source_id).composition
 
     async def connect_source(self, source_id: str) -> None:
         registration = self._registration(source_id)
@@ -461,96 +483,6 @@ class MarketSourceManager:
         registration = self._selected(SourceCapability.QUOTE, source)
         return registration.quote_streaming
 
-    def history_source_priority(self) -> tuple[str, ...]:
-        """Returns the global canonical-history precedence, independent of live routes."""
-
-        registrations = (
-            item
-            for item in self._registrations.values()
-            if item.routing_role is SourceRoutingRole.INTERNAL_CHANNEL
-            and SourceCapability.CANDLES in item.capabilities
-            and not item.frozen
-        )
-        return tuple(
-            item.source_id
-            for item in sorted(
-                registrations,
-                key=lambda item: (item.history_priority, item.source_id),
-            )
-        )
-
-    def history_quote_derived_sources(self) -> tuple[str, ...]:
-        """Returns structured push feeds whose quote events can form minute OHLC rows."""
-
-        registrations = (
-            item
-            for item in self._registrations.values()
-            if SourceCapability.QUOTE in item.capabilities
-            and item.quote_streaming
-            and item.structured
-            and item.routing_role is SourceRoutingRole.INTERNAL_CHANNEL
-            and not item.frozen
-        )
-        return tuple(
-            item.source_id
-            for item in sorted(
-                registrations,
-                key=lambda item: (item.history_priority, item.source_id),
-            )
-        )
-
-    def history_backfill_sources(self) -> tuple[str, ...]:
-        """Returns only unmetered providers allowed for automatic history repair."""
-
-        return tuple(
-            item.source_id
-            for item in self._usable_history_registrations()
-            if item.access_model is SourceAccessModel.UNMETERED
-        )
-
-    def history_verification_sources(self) -> tuple[str, ...]:
-        """Returns channels available only to an explicit historical verification."""
-
-        return tuple(
-            item.source_id
-            for item in self._usable_history_registrations()
-            if item.access_model is not SourceAccessModel.UNMETERED
-        )
-
-    def _usable_history_registrations(self) -> tuple[SourceRegistration, ...]:
-        """Orders usable raw history channels without initiating any connection."""
-
-        access_rank = {
-            SourceAccessModel.UNMETERED: 0,
-            SourceAccessModel.LIMITED: 1,
-            SourceAccessModel.METERED: 2,
-        }
-        registrations = []
-        for source_id, registration in self._registrations.items():
-            if registration.routing_role is not SourceRoutingRole.INTERNAL_CHANNEL:
-                continue
-            if SourceCapability.CANDLES not in registration.capabilities:
-                continue
-            if not bool(self._configuration[source_id]["enabled"]):
-                continue
-            if registration.candle_provider is None or registration.setup_error:
-                continue
-            if (
-                registration.manual_connection_required
-                and not self._runtime[source_id].connection_active
-            ):
-                continue
-            registrations.append(registration)
-        registrations.sort(
-            key=lambda item: (
-                access_rank[item.access_model],
-                int(self._configuration[item.source_id]["priority"]),
-                item.history_priority,
-                item.source_id,
-            )
-        )
-        return tuple(registrations)
-
     def validate_source(
         self,
         capability: SourceCapability,
@@ -560,22 +492,74 @@ class MarketSourceManager:
     ) -> None:
         self._selected(capability, source, require_connection=require_connection)
 
-    def validate_logical_source(
+    def validate_realtime_source(
         self,
-        capability: SourceCapability,
         source: str,
         *,
         require_connection: bool = True,
     ) -> None:
         registration = self._selected(
-            capability,
+            SourceCapability.QUOTE,
             source,
             require_connection=require_connection,
         )
-        if registration.routing_role is not SourceRoutingRole.LOGICAL:
+        if registration.routing_role is not SourceRoutingRole.REALTIME_SOURCE:
             raise ProviderUnavailableError(
-                f"{source} is an internal channel, not a selectable logical source"
+                f"{source} is an internal channel, not a selectable realtime source"
             )
+        if SourceCapability.CANDLES not in registration.capabilities:
+            raise ProviderUnavailableError(
+                f"{source} is incomplete: a realtime source requires quote and kline"
+            )
+
+    def _validate_registrations(self) -> None:
+        required = frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES})
+        for registration in self._registrations.values():
+            if registration.routing_role is not SourceRoutingRole.REALTIME_SOURCE:
+                if registration.composition is not None:
+                    raise ValueError("an internal channel cannot define a realtime composition")
+                continue
+            missing = required - registration.capabilities
+            if missing:
+                labels = ", ".join(sorted(item.value for item in missing))
+                raise ValueError(
+                    f"realtime source {registration.source_id!r} is incomplete; missing {labels}"
+                )
+            composition = registration.composition
+            if composition is None:
+                if registration.quote_provider is None or registration.candle_provider is None:
+                    raise ValueError(
+                        f"realtime source {registration.source_id!r} requires both providers "
+                        "or an internal composition"
+                    )
+                continue
+            channel_ids = (*composition.quote_channel_ids, composition.kline_channel_id)
+            for channel_id in channel_ids:
+                channel = self._registrations.get(channel_id)
+                if channel is None:
+                    raise ValueError(
+                        f"realtime source {registration.source_id!r} references unknown "
+                        f"channel {channel_id!r}"
+                    )
+                if channel.routing_role is not SourceRoutingRole.INTERNAL_CHANNEL:
+                    raise ValueError(
+                        f"realtime source {registration.source_id!r} component "
+                        f"{channel_id!r} is not an internal channel"
+                    )
+            for channel_id in composition.quote_channel_ids:
+                if SourceCapability.QUOTE not in self._registrations[channel_id].capabilities:
+                    raise ValueError(f"channel {channel_id!r} does not provide quote data")
+            kline_channel = self._registrations[composition.kline_channel_id]
+            if composition.kline_derived_from_quotes:
+                if SourceCapability.QUOTE not in kline_channel.capabilities:
+                    raise ValueError(
+                        f"quote-derived kline channel {composition.kline_channel_id!r} "
+                        "does not provide quote data"
+                    )
+            elif SourceCapability.CANDLES not in kline_channel.capabilities:
+                raise ValueError(
+                    f"kline channel {composition.kline_channel_id!r} does not provide kline data"
+                )
 
     def _selected(
         self,

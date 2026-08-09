@@ -1,3 +1,9 @@
+"""Frozen cross-source history prototype.
+
+The application runtime deliberately does not import this module. It remains only
+to preserve the former experiment until the user explicitly redesigns history.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -43,7 +49,7 @@ SourceList = Callable[[], Sequence[str]]
 
 
 class LocalCandleHistoryService:
-    """Serves one global local history and fills missing rows off the request path."""
+    """Frozen legacy implementation; never wire this cross-source service into runtime."""
 
     def __init__(
         self,
@@ -221,9 +227,7 @@ class LocalCandleHistoryService:
     ) -> None:
         sources = {row.source.provider for row in rows}
         if len(sources) > 1:
-            raise RuntimeError(
-                "local history query returned multiple raw channels in one series"
-            )
+            raise RuntimeError("local history query returned multiple raw channels in one series")
         if expected_source is not None and sources and sources != {expected_source}:
             raise RuntimeError(
                 f"history provider {expected_source} returned rows owned by {sorted(sources)}"
