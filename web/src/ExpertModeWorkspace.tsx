@@ -31,11 +31,16 @@ import {
   EXPERT_INDICATOR_HISTORY_VERSION,
   EXPERT_STRATEGIES,
 } from "./expertAnalysis";
-import { EXPERT_GOLD_EVENTS_2026 } from "./expertEvents";
+import {
+  EXPERT_GOLD_EVENTS_2026,
+  IMPORTANT_EVENT_DISPLAY_STRATEGY,
+  projectExpertEventStrategies,
+} from "./expertEvents";
 import { ChartLayerManager } from "./ChartLayerManager";
 import {
   candleReplayCutoff,
   nextReplayIndex,
+  replayClockAdvance,
   replayIndexAtOrBefore,
   timelineReplayCount,
 } from "./expertReplay";
@@ -50,6 +55,9 @@ import {
   addDrawingLayer,
   appendDrawingToActiveLayer,
   buildChartLayers,
+  CHART_EVENT_LAYER_ID,
+  CHART_GAP_LAYER_ID,
+  CHART_SESSION_LAYER_ID,
   clearActiveDrawingLayer,
   deleteDrawingLayer,
   moveChartLayer,
@@ -60,7 +68,10 @@ import {
   type ChartLayerWorkspace,
   undoActiveDrawing,
 } from "./chartLayers";
-import { buildExpertSessionBandsForRange } from "./expertSessions";
+import {
+  buildExpertSessionBandsForRange,
+  CAPITAL_DOMINANCE_STRATEGY,
+} from "./expertSessions";
 import type {
   ExpertAiAnalysis,
   ExpertAiStatus,
@@ -118,6 +129,11 @@ const TIME_ZONES = [
 ] as const;
 
 const STRATEGY_STORAGE_KEY = "market-expert-strategies-v1";
+const CAPITAL_DOMINANCE_STORAGE_KEY = "market-expert-capital-dominance-v1";
+const OPENING_GAP_STRATEGY = {
+  shortName: "跳空标注",
+  description: "只在边界行情完整时标记休市后的首个真实价格点",
+} as const;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const OPTION_QUANTITY_FORMATTER = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 
@@ -131,6 +147,14 @@ function readStrategies(): ExpertStrategyId[] {
     return values.length > 0 ? values : DEFAULT_EXPERT_STRATEGIES;
   } catch {
     return DEFAULT_EXPERT_STRATEGIES;
+  }
+}
+
+function readCapitalDominanceStrategy(): boolean {
+  try {
+    return JSON.parse(window.localStorage.getItem(CAPITAL_DOMINANCE_STORAGE_KEY) ?? "false") === true;
+  } catch {
+    return false;
   }
 }
 
@@ -227,7 +251,9 @@ export function ExpertModeWorkspace({
   const period = chartPeriodById(periodId);
   const [displayTimeZone, setDisplayTimeZone] = useState("Asia/Shanghai");
   const [enabledStrategies, setEnabledStrategies] = useState<ExpertStrategyId[]>(readStrategies);
+  const [capitalDominanceEnabled, setCapitalDominanceEnabled] = useState(readCapitalDominanceStrategy);
   const setLayerWorkspace = onLayerWorkspaceChange;
+  const sessionLayerNormalizedRef = useRef(false);
   const [layerManagerOpen, setLayerManagerOpen] = useState(true);
   const [drawingTool, setDrawingTool] = useState<ExpertDrawingTool | null>(null);
   const [drawingSnapMode, setDrawingSnapMode] = useState<ExpertDrawingSnapMode>("weak");
@@ -248,6 +274,16 @@ export function ExpertModeWorkspace({
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const currentDrawingLayer = activeDrawingLayer(layerWorkspace);
+  const importantEventsEnabled = layerWorkspace.layers.some((layer) => (
+    layer.kind === "annotation"
+    && layer.annotationId === "events"
+    && layer.visible
+  ));
+  const openingGapEnabled = layerWorkspace.layers.some((layer) => (
+    layer.kind === "annotation"
+    && layer.annotationId === "gaps"
+    && layer.visible
+  ));
 
   useEffect(() => {
     try {
@@ -256,6 +292,29 @@ export function ExpertModeWorkspace({
       // Strategy selection remains usable when local persistence is unavailable.
     }
   }, [enabledStrategies]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        CAPITAL_DOMINANCE_STORAGE_KEY,
+        JSON.stringify(capitalDominanceEnabled),
+      );
+    } catch {
+      // Visual strategy selection remains usable when local persistence is unavailable.
+    }
+  }, [capitalDominanceEnabled]);
+
+  useEffect(() => {
+    if (sessionLayerNormalizedRef.current) return;
+    sessionLayerNormalizedRef.current = true;
+    if (!capitalDominanceEnabled) {
+      setLayerWorkspace((current) => setChartLayerVisibility(
+        current,
+        CHART_SESSION_LAYER_ID,
+        false,
+      ));
+    }
+  }, [capitalDominanceEnabled, setLayerWorkspace]);
 
   useEffect(() => {
     let disposed = false;
@@ -316,15 +375,21 @@ export function ExpertModeWorkspace({
 
   useEffect(() => {
     if (!replayEnabled || !replayPlaying || candles.length === 0) return;
+    const stepMilliseconds = 1_000 / Math.max(1, replaySpeed);
+    let nextStepAt = window.performance.now() + stepMilliseconds;
     const timer = window.setInterval(() => {
+      const now = window.performance.now();
+      const advance = replayClockAdvance(now, nextStepAt, stepMilliseconds);
+      if (advance.steps === 0) return;
+      nextStepAt = advance.nextStepAt;
       setReplayCutoff((current) => {
         const currentIndex = replayIndexAtOrBefore(candles, current);
         const replayableLastIndex = replayIndexAtOrBefore(candles, null);
-        const next = nextReplayIndex(currentIndex, replayableLastIndex + 1, 1);
+        const next = nextReplayIndex(currentIndex, replayableLastIndex + 1, advance.steps);
         if (next >= replayableLastIndex) setReplayPlaying(false);
         return candleReplayCutoff(candles, next) ?? current;
       });
-    }, Math.max(120, 1_000 / replaySpeed));
+    }, Math.min(100, stepMilliseconds));
     return () => window.clearInterval(timer);
   }, [candles.length, replayEnabled, replayPlaying, replaySpeed]);
 
@@ -366,7 +431,7 @@ export function ExpertModeWorkspace({
     [candles, enabledStrategyKey, indicatorHistoryKey],
   );
   useEffect(() => {
-    if (historyLoading) return;
+    if (historyLoading || replayPlaying) return;
     let disposed = false;
     let lastPublished = window.performance.now();
     const channel = new MessageChannel();
@@ -391,7 +456,7 @@ export function ExpertModeWorkspace({
       channel.port1.close();
       channel.port2.close();
     };
-  }, [backtestRunner, historyLoading]);
+  }, [backtestRunner, historyLoading, replayPlaying]);
   const backtest = useMemo(
     () => backtestRunner.resultAt(backtestLastIndex),
     [backtestLastIndex, backtestRevision, backtestRunner],
@@ -434,11 +499,25 @@ export function ExpertModeWorkspace({
   const sessionEndDay = lastSessionTime === null
     ? null
     : (Math.floor(lastSessionTime / SECONDS_PER_DAY) + 1) * SECONDS_PER_DAY;
+  const eventStrategyProjection = useMemo(
+    () => projectExpertEventStrategies(
+      importantEventsEnabled,
+      replayEnabled ? replayBoundary : null,
+    ),
+    [importantEventsEnabled, replayBoundary, replayEnabled],
+  );
+  const capitalDriverEvents = eventStrategyProjection.capitalDrivers;
   const sessionBands = useMemo(
-    () => sessionStartDay === null || sessionEndDay === null
+    () => !capitalDominanceEnabled || sessionStartDay === null || sessionEndDay === null
       ? []
-      : buildExpertSessionBandsForRange(sessionStartDay, sessionEndDay, marketSchedule),
-    [marketSchedule, sessionEndDay, sessionStartDay],
+      : buildExpertSessionBandsForRange(
+        sessionStartDay,
+        sessionEndDay,
+        marketSchedule,
+        undefined,
+        capitalDriverEvents,
+      ),
+    [capitalDominanceEnabled, capitalDriverEvents, marketSchedule, sessionEndDay, sessionStartDay],
   );
 
   const replayLast = replayEnabled ? candles[replayIndex] ?? null : candles.at(-1) ?? null;
@@ -488,6 +567,32 @@ export function ExpertModeWorkspace({
       : [...current, strategyId]);
   };
 
+  const toggleCapitalDominanceStrategy = () => {
+    const next = !capitalDominanceEnabled;
+    setCapitalDominanceEnabled(next);
+    setLayerWorkspace((current) => setChartLayerVisibility(
+      current,
+      CHART_SESSION_LAYER_ID,
+      next,
+    ));
+  };
+
+  const toggleImportantEventStrategy = () => {
+    setLayerWorkspace((current) => setChartLayerVisibility(
+      current,
+      CHART_EVENT_LAYER_ID,
+      !importantEventsEnabled,
+    ));
+  };
+
+  const toggleOpeningGapStrategy = () => {
+    setLayerWorkspace((current) => setChartLayerVisibility(
+      current,
+      CHART_GAP_LAYER_ID,
+      !openingGapEnabled,
+    ));
+  };
+
   const requestAiAnalysis = useCallback(async () => {
     setAiBusy(true);
     setAiError(null);
@@ -523,14 +628,12 @@ export function ExpertModeWorkspace({
     : replayBoundary;
 
   const eventReferenceTime = replayEnabled ? replayBoundary : Date.now() / 1_000;
-  const latestEvent = eventReferenceTime === null
+  const latestEvent = !importantEventsEnabled || eventReferenceTime === null
     ? undefined
     : replayEnabled
       ? [...EXPERT_GOLD_EVENTS_2026].reverse().find((event) => event.time <= eventReferenceTime)
       : EXPERT_GOLD_EVENTS_2026.find((event) => event.time >= eventReferenceTime);
-  const visibleEvents = replayEnabled && replayBoundary !== null
-    ? EXPERT_GOLD_EVENTS_2026.filter((event) => event.time <= replayBoundary)
-    : EXPERT_GOLD_EVENTS_2026;
+  const visibleEvents = eventStrategyProjection.displayMarkers;
   const chartLayers = useMemo(
     () => buildChartLayers(layerWorkspace, {
       indicatorSeries,
@@ -662,11 +765,6 @@ export function ExpertModeWorkspace({
         <button type="button" disabled={currentDrawingLayer.drawings.length === 0} onClick={() => setLayerWorkspace(clearActiveDrawingLayer)} title={`清空${currentDrawingLayer.name}`}>
           <Trash2 size={17} /><span>清空</span>
         </button>
-        <div className="expert-session-key" aria-label="主导交易时段图例">
-          <span className="is-asia">亚</span>
-          <span className="is-europe">欧</span>
-          <span className="is-us">美</span>
-        </div>
       </aside>
 
       <main className="expert-chart-stage">
@@ -756,8 +854,59 @@ export function ExpertModeWorkspace({
 
       <aside className="expert-intelligence" aria-label="策略与智能分析">
         <section className="expert-strategy-stack">
-          <header><div><Layers3 size={15} /><strong>策略层</strong></div><span>{enabledStrategies.length}/{EXPERT_STRATEGIES.length}</span></header>
+          <header><div><Layers3 size={15} /><strong>策略层</strong></div><span>{enabledStrategies.length + Number(capitalDominanceEnabled) + Number(importantEventsEnabled) + Number(openingGapEnabled)}/{EXPERT_STRATEGIES.length + 3}</span></header>
           <div className="expert-strategy-list">
+            <button
+              type="button"
+              className={capitalDominanceEnabled ? "is-enabled" : ""}
+              aria-pressed={capitalDominanceEnabled}
+              title="视觉策略：只标注资金主导；始终读取事件事实判断 08:30 数据接管，不受数据/事件图层是否显示影响"
+              onClick={toggleCapitalDominanceStrategy}
+            >
+              <span className="strategy-quality is-calendar" />
+              <div>
+                <strong>{CAPITAL_DOMINANCE_STRATEGY.shortName}</strong>
+                <small>{CAPITAL_DOMINANCE_STRATEGY.description}</small>
+              </div>
+              <span className="strategy-provenance">
+                <small>规则 · 时区 + 事件</small>
+                <em>视觉策略</em>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={importantEventsEnabled ? "is-enabled" : ""}
+              aria-pressed={importantEventsEnabled}
+              title="视觉策略：控制图上事件节点和侧栏事件提示；关闭只隐藏显示，不改变资金主导的接管时间判断"
+              onClick={toggleImportantEventStrategy}
+            >
+              <span className="strategy-quality is-event" />
+              <div>
+                <strong>{IMPORTANT_EVENT_DISPLAY_STRATEGY.shortName}</strong>
+                <small>{IMPORTANT_EVENT_DISPLAY_STRATEGY.description}</small>
+              </div>
+              <span className="strategy-provenance">
+                <small>数据 · {IMPORTANT_EVENT_DISPLAY_STRATEGY.dataSource}</small>
+                <em>{capitalDominanceEnabled && importantEventsEnabled ? "联动中" : "视觉策略"}</em>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={openingGapEnabled ? "is-enabled" : ""}
+              aria-pressed={openingGapEnabled}
+              title="视觉策略：不显示休市区间或卡片；仅在收开盘边界完整且存在真实价差时标记复市首点"
+              onClick={toggleOpeningGapStrategy}
+            >
+              <span className="strategy-quality is-gap" />
+              <div>
+                <strong>{OPENING_GAP_STRATEGY.shortName}</strong>
+                <small>{OPENING_GAP_STRATEGY.description}</small>
+              </div>
+              <span className="strategy-provenance">
+                <small>原生 · 收开盘边界</small>
+                <em>视觉策略</em>
+              </span>
+            </button>
             {EXPERT_STRATEGIES.map((strategy) => {
               const enabled = enabledStrategies.includes(strategy.id);
               const evidenceLabel = strategy.evidenceMode === "native"

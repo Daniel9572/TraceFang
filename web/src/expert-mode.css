@@ -171,11 +171,6 @@
 .expert-tool-rail button.is-active { color: var(--expert-gold); background: var(--expert-gold-soft); }
 .expert-tool-rail button:disabled { opacity: .26; cursor: default; }
 .expert-tool-separator { width: 30px; height: 1px; margin: 6px 0; background: var(--expert-line); }
-.expert-session-key { display: flex; margin-top: auto; flex-direction: column; gap: 5px; }
-.expert-session-key span { display: grid; width: 25px; height: 21px; place-items: center; border: 1px solid currentColor; border-radius: 5px; font-size: 8px; }
-.expert-session-key .is-asia { color: var(--expert-asia); background: rgba(63, 169, 183, .08); }
-.expert-session-key .is-europe { color: var(--expert-europe); background: rgba(135, 119, 201, .08); }
-.expert-session-key .is-us { color: var(--expert-us); background: rgba(217, 108, 95, .08); }
 
 .expert-chart-stage { position: relative; grid-area: chart; min-width: 0; min-height: 0; overflow: hidden; background: #081720; }
 .expert-chart-stage::after { position: absolute; z-index: 9; top: 46px; right: 0; left: 0; height: 1px; content: ""; background: var(--expert-line); pointer-events: none; }
@@ -271,15 +266,25 @@
 .expert-layer-manager > footer i { width: 5px; height: 5px; border-radius: 50%; background: var(--expert-gold); box-shadow: 0 0 7px rgba(213, 168, 75, .55); }
 
 .market-chart[data-chart-appearance="expert"] .expert-chart-overlays { position: absolute; z-index: 1; inset: 0 0 0 0; overflow: hidden; pointer-events: none; }
-.market-chart[data-chart-appearance="expert"] .expert-session-band { position: absolute; top: 0; bottom: 0; border-right: 1px solid transparent; pointer-events: none; }
+.market-chart[data-chart-appearance="expert"] .expert-session-band { position: absolute; top: 0; bottom: 0; overflow: hidden; border-right: 1px solid transparent; pointer-events: none; }
 .market-chart[data-chart-appearance="expert"] .expert-session-band.is-asia { border-color: rgba(63, 169, 183, .13); background: rgba(63, 169, 183, .055); }
 .market-chart[data-chart-appearance="expert"] .expert-session-band.is-europe { border-color: rgba(135, 119, 201, .13); background: rgba(135, 119, 201, .045); }
 .market-chart[data-chart-appearance="expert"] .expert-session-band.is-us { border-color: rgba(217, 108, 95, .15); background: rgba(217, 108, 95, .065); }
+.market-chart[data-chart-appearance="expert"] .expert-session-band.is-us[data-driver="us-data-release"] { box-shadow: inset 0 2px rgba(225, 184, 92, .45); background: linear-gradient(180deg, rgba(225, 184, 92, .035), rgba(217, 108, 95, .075)); }
+.market-chart[data-chart-appearance="expert"] .expert-session-band.is-us[data-driver="us-equity-open"] { box-shadow: inset 0 2px rgba(217, 108, 95, .22); }
+.market-chart[data-chart-appearance="expert"] .expert-session-band-label { position: absolute; z-index: 1; top: 8px; left: 7px; max-width: calc(100% - 14px); overflow: hidden; color: rgba(191, 210, 220, .62); font-size: 7px; font-style: normal; font-weight: 500; letter-spacing: .025em; text-overflow: ellipsis; white-space: nowrap; }
+.market-chart[data-chart-appearance="expert"] .expert-session-band.is-us[data-driver="us-data-release"] .expert-session-band-label { color: rgba(225, 196, 125, .8); }
+.market-chart[data-chart-appearance="expert"] .expert-session-band[data-event-relation="linked"] .expert-session-band-label::before { display: inline-block; width: 4px; height: 4px; margin-right: 5px; transform: rotate(45deg); background: var(--expert-gold); box-shadow: 0 0 5px rgba(213, 168, 75, .42); content: ""; vertical-align: 1px; }
+.market-chart[data-chart-appearance="expert"] .expert-session-band-label[data-compact="true"] { right: 3px; left: 3px; font-size: 6px; text-align: center; }
+.market-chart[data-chart-appearance="expert"] .opening-gap-anchor { background: #081720; }
+.market-chart[data-chart-appearance="expert"] .opening-gap-copy { text-shadow: 0 1px 2px #081720, 0 0 5px #081720; }
+.market-chart[data-chart-appearance="expert"] .opening-gap-copy small { color: #69818f; }
 .market-chart[data-chart-appearance="expert"] .expert-value-zone { position: absolute; border: 1px dashed currentColor; border-radius: 2px; pointer-events: none; }
 .market-chart[data-chart-appearance="expert"] .expert-value-zone.is-bullish { color: rgba(63, 169, 183, .62); background: rgba(63, 169, 183, .09); }
 .market-chart[data-chart-appearance="expert"] .expert-value-zone.is-bearish { color: rgba(217, 108, 95, .62); background: rgba(217, 108, 95, .09); }
 .market-chart[data-chart-appearance="expert"] .timeline-trading-day-separator { background: rgba(137, 164, 179, .14); }
 .market-chart[data-chart-appearance="expert"] .timeline-trading-day-label { color: #69818f; }
+.market-chart[data-chart-appearance="expert"] .timeline-window-boundary-label { color: #69818f; background: rgba(8, 21, 31, .92); }
 .market-chart[data-chart-appearance="expert"] .live-price-layer { z-index: 7; }
 .market-chart[data-chart-appearance="expert"] .return-live-button { z-index: 8; border-color: var(--expert-line-strong); color: var(--expert-text); background: rgba(15, 35, 48, .95); box-shadow: 0 8px 22px rgba(0, 0, 0, .24); }
 .market-chart[data-chart-appearance="expert"] .return-live-button:hover { color: var(--expert-gold); border-color: rgba(213, 168, 75, .45); }
@@ -306,6 +311,9 @@
 .strategy-quality.is-native { background: var(--expert-asia); }
 .strategy-quality.is-proxy { background: var(--expert-gold); }
 .strategy-quality.is-conditional { background: var(--expert-us); }
+.strategy-quality.is-calendar { background: linear-gradient(180deg, var(--expert-europe), var(--expert-us)); }
+.strategy-quality.is-event { background: linear-gradient(180deg, var(--expert-gold), #e97768); }
+.strategy-quality.is-gap { background: linear-gradient(180deg, var(--expert-gold), var(--expert-asia)); }
 .expert-strategy-list button > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .expert-strategy-list strong { color: #bacbd4; font-size: 9px; }
 .expert-strategy-list small { overflow: hidden; color: var(--expert-faint); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }

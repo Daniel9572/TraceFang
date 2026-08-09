@@ -44,8 +44,9 @@ function layerDetail(layer: ChartLayerDefinition): string {
   if (layer.kind === "price") return "固定 · 不可隐藏";
   if (layer.kind === "drawing") return `${layer.drawings.length} 条画线`;
   if (layer.kind === "indicator") return `${layer.height}px · 共享时间轴`;
-  if (layer.annotationId === "sessions") return "亚盘 / 欧盘 / 美盘";
-  if (layer.annotationId === "events") return "议息 / 非农 / 央行购金";
+  if (layer.annotationId === "sessions") return "由资金主导策略输出，可单独隐藏";
+  if (layer.annotationId === "gaps") return "由跳空视觉策略输出，仅标记复市首点";
+  if (layer.annotationId === "events") return "由数据/事件策略输出：FOMC / 非农 / CPI / 央行购金";
   return "支撑压力 / POC / FVG";
 }
 

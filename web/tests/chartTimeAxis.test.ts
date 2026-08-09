@@ -8,6 +8,7 @@ import {
   actualTimeForChinaAxis,
   buildOpenSessionDataGaps,
   buildSeriesDataGaps,
+  buildTimelineAxisAnchors,
   buildTimelineLayout,
   buildTimelineLogicalDayRanges,
   buildTimelineSessionGaps,
@@ -16,14 +17,28 @@ import {
   formatCrosshairTime,
   formatDateTimeInTimeZone,
   formatSessionGapDuration,
+  formatTimelineTick,
   projectTimeForChinaAxis,
   projectTimelineSeries,
   timelineDayWindowAtLogicalRange,
   timelineGapSeparatorTime,
+  timelineLogicalSpanAtRange,
   timelineLogicalViewport,
+  timelineLogicalViewportForSpan,
+  timelineZoomSpanAfterWheel,
   tradingDayAt,
 } from "../src/chartTimeAxis.ts";
 import { SPOT_METALS_MARKET_SCHEDULE } from "../src/marketSession.ts";
+import {
+  buildTimelineClockDomain,
+  changedTimelineClockDataIndexes,
+  isTimelineClockBucket,
+  materializeTimelineClockData,
+  recentTimelineWindowStart,
+  timelineClockBucketTimesAreAdjacent,
+  timelineClockDataItemAt,
+  timelineClockVisibleDataLength,
+} from "../src/timelineClockSeries.ts";
 
 const SHFE_SCHEDULE = {
   time_zone: "Asia/Shanghai",
@@ -49,13 +64,14 @@ test("renders the same market instant in selectable desk time zones", () => {
   assert.equal(formatDateTimeInTimeZone(instant, "Europe/London"), "2026/08/07 21:56");
 });
 
-test("compresses the weekend into adjacent fixed-width trading days", () => {
+test("compresses daily and weekend closures into adjacent open-session days", () => {
   const friday = Date.parse("2026-08-07T20:58:00Z") / 1_000;
   const monday = Date.parse("2026-08-10T20:58:00Z") / 1_000;
   const layout = buildTimelineLayout([friday, monday], SPOT_METALS_MARKET_SCHEDULE);
 
   assert.deepEqual(layout.days.map((day) => day.key), ["2026-08-07", "2026-08-10"]);
-  assert.equal(layout.days[1].chartStart - layout.days[0].chartStart, 24 * 60 * 60);
+  assert.equal(layout.days[1].chartStart - layout.days[0].chartStart, 23 * 60 * 60);
+  assert.equal(layout.days[0].chartEnd, layout.days[1].chartStart);
 });
 
 test("uses the session close date as the trading-day label", () => {
@@ -102,6 +118,38 @@ test("builds exact one-day, two-day, and three-day timeline viewports", () => {
   );
 });
 
+test("progressively compresses the current trading day before reaching two days", () => {
+  const starts = [
+    Date.parse("2026-08-06T22:00:00Z") / 1_000,
+    Date.parse("2026-08-09T22:00:00Z") / 1_000,
+    Date.parse("2026-08-10T22:00:00Z") / 1_000,
+  ];
+  const actualTimes = starts.flatMap((start) => [start, start + 60]);
+  const layout = buildTimelineLayout(actualTimes, SPOT_METALS_MARKET_SCHEDULE);
+  const projected = projectTimelineSeries(
+    actualTimes.map((time, index) => ({ time, value: 2_000 + index })),
+    layout,
+  );
+  const ranges = buildTimelineLogicalDayRanges(projected, [], layout);
+  const firstWheelSpan = timelineZoomSpanAfterWheel(1, 100);
+  const partialViewport = timelineLogicalViewportForSpan(ranges, firstWheelSpan);
+
+  assert.ok(firstWheelSpan > 1 && firstWheelSpan < 2);
+  assert.ok(partialViewport);
+  assert.equal(partialViewport.to, ranges[2].to);
+  assert.ok(partialViewport.from > ranges[1].from);
+  assert.ok(partialViewport.from < ranges[2].from);
+  assert.equal(partialViewport.dayCount, 2);
+  assert.ok(Math.abs(
+    (timelineLogicalSpanAtRange(ranges, partialViewport) ?? 0) - firstWheelSpan,
+  ) < 1e-9);
+  assert.deepEqual(
+    timelineLogicalViewportForSpan(ranges, 2),
+    timelineLogicalViewport(ranges, 2),
+  );
+  assert.equal(timelineZoomSpanAfterWheel(1, -100), 1);
+});
+
 test("timeline viewport counts gap separators without dropping native points", () => {
   const start = Date.parse("2026-08-09T22:00:00Z") / 1_000;
   const layout = buildTimelineLayout([start, start + 600], SPOT_METALS_MARKET_SCHEDULE);
@@ -116,8 +164,148 @@ test("timeline viewport counts gap separators without dropping native points", (
     key: "2026-08-10",
     label: "08/10",
     from: -0.5,
-    to: 2.5,
+    to: 1379.5,
+    chartFrom: layout.days[0].chartStart,
+    chartTo: layout.days[0].chartEnd - 0.001,
+    actualFrom: layout.days[0].actualStart,
+    actualTo: layout.days[0].actualStart + 23 * 60 * 60,
+    bucketCount: 1380,
   }]);
+});
+
+test("anchors a partial feed to the complete 06:00-05:00 open session", () => {
+  const sessionOpen = Date.parse("2026-08-09T22:00:00Z") / 1_000;
+  const actualTimes = [sessionOpen + 8 * 60 * 60, sessionOpen + 22 * 60 * 60];
+  const layout = buildTimelineLayout(actualTimes, SPOT_METALS_MARKET_SCHEDULE);
+  const projected = projectTimelineSeries(
+    actualTimes.map((time, index) => ({ time, value: 2_000 + index })),
+    layout,
+  );
+  const anchors = buildTimelineAxisAnchors(projected, layout);
+  const ranges = buildTimelineLogicalDayRanges(projected, [], layout);
+
+  assert.equal(projected.length, 2);
+  assert.deepEqual(anchors.map((anchor) => ({ edge: anchor.edge, actualTime: anchor.actualTime })), [
+    { edge: "open", actualTime: sessionOpen },
+    { edge: "close", actualTime: sessionOpen + 23 * 60 * 60 },
+  ]);
+  assert.equal(ranges[0].actualFrom, sessionOpen);
+  assert.equal(ranges[0].actualTo, sessionOpen + 23 * 60 * 60);
+  assert.equal(
+    formatTimelineTick(ranges[0].chartFrom, TickMarkType.Time, layout, true),
+    "06:00",
+  );
+  assert.equal(
+    formatTimelineTick(ranges[0].chartTo, TickMarkType.Time, layout, true),
+    "05:00",
+  );
+  assert.equal(timelineLogicalViewport(ranges, 1)?.dayCount, 1);
+});
+
+test("uses equal-width open-session days while retaining every raw observation", () => {
+  const firstOpen = Date.parse("2026-08-09T22:00:00Z") / 1_000;
+  const secondOpen = Date.parse("2026-08-10T22:00:00Z") / 1_000;
+  const actualTimes = [
+    ...Array.from({ length: 90 }, (_, index) => firstOpen + index / 2),
+    firstOpen + 12 * 60 * 60,
+    secondOpen + 3,
+    secondOpen + 18 * 60 * 60,
+  ];
+  const layout = buildTimelineLayout(actualTimes, SPOT_METALS_MARKET_SCHEDULE);
+  const projected = projectTimelineSeries(
+    actualTimes.map((time, index) => ({ time, value: 2_000 + index / 10 })),
+    layout,
+  );
+  const domain = buildTimelineClockDomain(
+    projected,
+    [{ nextIndex: 90 }, { nextIndex: 91 }, { nextIndex: 92 }],
+    layout,
+  );
+  const renderedSamples = domain.data.flatMap((item) => (
+    isTimelineClockBucket(item) ? item.samples : []
+  ));
+
+  assert.equal(domain.ranges.length, 2);
+  assert.equal(domain.data.length, 2 * 1380);
+  assert.equal(domain.ranges[0].to - domain.ranges[0].from, 1380);
+  assert.equal(domain.ranges[1].to - domain.ranges[1].from, 1380);
+  assert.equal(domain.ranges[0].to, domain.ranges[1].from);
+  assert.equal(renderedSamples.length, projected.length);
+  assert.deepEqual(renderedSamples.map((sample) => sample.sourceIndex), projected.map((_, index) => index));
+  assert.equal(projected[90].time - domain.ranges[0].chartFrom, 12 * 60 * 60);
+  assert.ok(!isTimelineClockBucket(domain.data[60]));
+  assert.notEqual(renderedSamples[89].segment, renderedSamples[90].segment);
+  assert.ok(
+    domain.data
+      .slice(1, 12 * 60)
+      .some((item) => !isTimelineClockBucket(item)),
+  );
+  assert.notEqual(renderedSamples[90].segment, renderedSamples[91].segment);
+
+  const firstDayOnly = materializeTimelineClockData(domain, 91);
+  assert.equal(timelineClockVisibleDataLength(domain, 91), 1380);
+  assert.equal(firstDayOnly.length, 1380);
+  assert.equal(timelineClockVisibleDataLength(domain, 92), 2 * 1380);
+  const firstBucketIndex = domain.pointDataIndexes[0];
+  const partialBucket = timelineClockDataItemAt(domain, firstBucketIndex, 10);
+  assert.ok(isTimelineClockBucket(partialBucket));
+  assert.equal(partialBucket.samples.length, 10);
+  assert.deepEqual(
+    changedTimelineClockDataIndexes(domain, 10, 11),
+    [firstBucketIndex],
+  );
+});
+
+test("connects adjacent minute buckets without bridging an empty minute", () => {
+  const minute = 60;
+  assert.equal(timelineClockBucketTimesAreAdjacent(1_000, 1_000), true);
+  assert.equal(timelineClockBucketTimesAreAdjacent(1_000, 1_000 + minute), true);
+  assert.equal(timelineClockBucketTimesAreAdjacent(1_000, 1_000 + 2 * minute), false);
+  assert.equal(timelineClockBucketTimesAreAdjacent(1_000, 999), false);
+});
+
+test("does not split sparse raw ticks until a complete timeline minute is missing", () => {
+  const start = Date.parse("2026-08-09T22:00:00Z") / 1_000;
+  const points = [
+    { actualTime: start, time: start, value: 2_000, resolutionSeconds: 1 },
+    { actualTime: start + 5, time: start + 5, value: 2_001, resolutionSeconds: 1 },
+    { actualTime: start + 60, time: start + 60, value: 2_002, resolutionSeconds: 1 },
+    { actualTime: start + 121, time: start + 121, value: 2_003, resolutionSeconds: 1 },
+  ];
+  const layout = buildTimelineLayout(
+    points.map((point) => point.actualTime),
+    SPOT_METALS_MARKET_SCHEDULE,
+  );
+
+  assert.deepEqual(
+    buildSeriesDataGaps(points, 1, layout, 60).map((gap) => gap.nextIndex),
+    [3],
+  );
+});
+
+test("materializes recent trading days without discarding older loaded points", () => {
+  const fridayOpen = Date.parse("2026-08-06T22:00:00Z") / 1_000;
+  const mondayOpen = Date.parse("2026-08-09T22:00:00Z") / 1_000;
+  const tuesdayOpen = Date.parse("2026-08-10T22:00:00Z") / 1_000;
+  const points = [
+    { actualTime: fridayOpen + 60 },
+    { actualTime: mondayOpen + 60 },
+    { actualTime: tuesdayOpen + 60 },
+  ];
+
+  assert.equal(
+    recentTimelineWindowStart(points, 1, SPOT_METALS_MARKET_SCHEDULE),
+    tuesdayOpen,
+  );
+  assert.equal(
+    recentTimelineWindowStart(points, 2, SPOT_METALS_MARKET_SCHEDULE),
+    mondayOpen,
+  );
+  assert.equal(
+    recentTimelineWindowStart(points, 3, SPOT_METALS_MARKET_SCHEDULE),
+    fridayOpen,
+  );
+  assert.equal(points.length, 3);
 });
 
 test("groups SHFE night and day sessions under the exchange trading date", () => {

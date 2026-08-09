@@ -15,6 +15,7 @@ const SUNDAY_1970_DAY_SERIAL = 3;
 
 const TIMELINE_TIME_EPSILON_SECONDS = 0.000_001;
 const TIMELINE_CLOSE_POINT_PADDING_SECONDS = 0.001;
+export const TIMELINE_CLOCK_BUCKET_SECONDS = SECONDS_PER_MINUTE;
 
 /**
  * lightweight-charts classifies tick boundaries from UTC calendar fields.
@@ -77,6 +78,19 @@ export interface TimelineLogicalDayRange {
   label: string;
   from: number;
   to: number;
+  chartFrom: number;
+  chartTo: number;
+  actualFrom: number;
+  actualTo: number;
+  bucketCount: number;
+}
+
+export interface TimelineAxisAnchor {
+  key: string;
+  label: string;
+  edge: "open" | "close";
+  time: number;
+  actualTime: number;
 }
 
 export interface TimelineLogicalViewport {
@@ -284,6 +298,14 @@ export function tradingDayAt(
     const weekStartSerial = localDaySerial(startParts) - session.weekday;
     const weekIndex = Math.floor((weekStartSerial - SUNDAY_1970_DAY_SERIAL) / 7);
     const ordinal = weekIndex * sessions.length + session.position;
+    const compressedWeekSeconds = sessions.reduce(
+      (total, candidate) => total + candidate.durationSeconds,
+      0,
+    );
+    const compressedSessionOffset = sessions
+      .slice(0, session.position)
+      .reduce((total, candidate) => total + candidate.durationSeconds, 0);
+    const chartStart = weekIndex * compressedWeekSeconds + compressedSessionOffset;
 
     return {
       key: dateKey(tradingDateParts),
@@ -291,8 +313,8 @@ export function tradingDayAt(
       ordinal,
       actualStart,
       actualEnd: actualStart + session.durationSeconds,
-      chartStart: ordinal * SECONDS_PER_DAY,
-      chartEnd: (ordinal + 1) * SECONDS_PER_DAY,
+      chartStart,
+      chartEnd: chartStart + session.durationSeconds,
       logicalStart: 0,
       logicalEnd: 0,
     };
@@ -369,47 +391,112 @@ export function buildTimelineLayout(
   return { days };
 }
 
-/** Maps complete trading days to logical indexes without changing any sample. */
-export function buildTimelineLogicalDayRanges(
+function visibleTimelineAxisAnchors(
   points: readonly { time: number }[],
-  gaps: readonly { nextIndex: number }[],
   layout: TimelineLayout,
-  requestedPointCount = points.length,
-): TimelineLogicalDayRange[] {
+  requestedPointCount: number,
+): TimelineAxisAnchor[] {
   const pointCount = Math.min(
     points.length,
     Math.max(0, Math.floor(Number.isFinite(requestedPointCount) ? requestedPointCount : 0)),
   );
   if (pointCount === 0 || layout.days.length === 0) return [];
-  const ranges = new Map<string, TimelineLogicalDayRange>();
+
+  const visibleKeys = new Set<string>();
   let dayIndex = 0;
-  let gapIndex = 0;
-  let insertedGapCount = 0;
   for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-    while (gapIndex < gaps.length && gaps[gapIndex].nextIndex <= pointIndex) {
-      insertedGapCount += 1;
-      gapIndex += 1;
-    }
     const time = points[pointIndex].time;
     if (!Number.isFinite(time)) continue;
     while (dayIndex < layout.days.length && time >= layout.days[dayIndex].chartEnd) dayIndex += 1;
     const day = layout.days[dayIndex];
-    if (!day || time < day.chartStart) continue;
-    const logicalIndex = pointIndex + insertedGapCount;
-    const current = ranges.get(day.key);
-    if (current) {
-      current.from = Math.min(current.from, logicalIndex - 0.5);
-      current.to = Math.max(current.to, logicalIndex + 0.5);
-    } else {
-      ranges.set(day.key, {
-        key: day.key,
-        label: day.label,
-        from: logicalIndex - 0.5,
-        to: logicalIndex + 0.5,
-      });
-    }
+    if (day && time >= day.chartStart) visibleKeys.add(day.key);
   }
-  return [...ranges.values()];
+
+  const grouped = new Map<string, TimelineTradingDay>();
+  for (const day of layout.days) {
+    if (!visibleKeys.has(day.key)) continue;
+    const current = grouped.get(day.key);
+    grouped.set(day.key, current
+      ? {
+        ...current,
+        actualStart: Math.min(current.actualStart, day.actualStart),
+        actualEnd: Math.max(current.actualEnd, day.actualEnd),
+        chartStart: Math.min(current.chartStart, day.chartStart),
+        chartEnd: Math.max(current.chartEnd, day.chartEnd),
+      }
+      : day);
+  }
+
+  return [...grouped.values()].flatMap((day) => [
+    {
+      key: day.key,
+      label: day.label,
+      edge: "open" as const,
+      time: day.chartStart,
+      actualTime: day.actualStart,
+    },
+    {
+      key: day.key,
+      label: day.label,
+      edge: "close" as const,
+      time: day.chartEnd - TIMELINE_CLOSE_POINT_PADDING_SECONDS,
+      actualTime: day.actualEnd,
+    },
+  ]);
+}
+
+/**
+ * Returns render-only trading-day edge points. They establish the time domain
+ * but carry no price and therefore cannot bridge or fill a market-data gap.
+ */
+export function buildTimelineAxisAnchors(
+  points: readonly { time: number }[],
+  layout: TimelineLayout,
+  requestedPointCount = points.length,
+): TimelineAxisAnchor[] {
+  return visibleTimelineAxisAnchors(points, layout, requestedPointCount);
+}
+
+/**
+ * Maps complete business-clock days to fixed logical indexes.
+ *
+ * Each day owns exactly its scheduled open-session minute slots. Raw quote
+ * density cannot widen or shrink the clock, while daily and weekend closures
+ * consume zero horizontal width.
+ */
+export function buildTimelineLogicalDayRanges(
+  points: readonly { time: number }[],
+  _gaps: readonly { nextIndex: number; time?: unknown }[],
+  layout: TimelineLayout,
+  requestedPointCount = points.length,
+): TimelineLogicalDayRange[] {
+  const anchors = visibleTimelineAxisAnchors(points, layout, requestedPointCount);
+  if (anchors.length === 0) return [];
+
+  const ranges: TimelineLogicalDayRange[] = [];
+  let logicalOpen = 0;
+  for (let index = 0; index < anchors.length; index += 2) {
+    const open = anchors[index];
+    const close = anchors[index + 1];
+    if (!close) continue;
+    const bucketCount = Math.max(
+      1,
+      Math.ceil((close.time - open.time) / TIMELINE_CLOCK_BUCKET_SECONDS),
+    );
+    ranges.push({
+      key: open.key,
+      label: open.label,
+      from: logicalOpen - 0.5,
+      to: logicalOpen + bucketCount - 0.5,
+      chartFrom: open.time,
+      chartTo: close.time,
+      actualFrom: open.actualTime,
+      actualTo: close.actualTime,
+      bucketCount,
+    });
+    logicalOpen += bucketCount;
+  }
+  return ranges;
 }
 
 export function timelineLogicalViewport(
@@ -432,6 +519,72 @@ export function timelineLogicalViewport(
     firstKey: ranges[startIndex].key,
     lastKey: ranges[endIndex].key,
   };
+}
+
+/**
+ * Builds a right-anchored timeline viewport whose width may be a fractional
+ * number of business-clock days. This is used while zooming so the previous
+ * day enters progressively instead of jumping directly from one full day to
+ * two fully compressed days.
+ */
+export function timelineLogicalViewportForSpan(
+  ranges: readonly TimelineLogicalDayRange[],
+  requestedDaySpan: number,
+  endKey?: string | null,
+): TimelineLogicalViewport | null {
+  if (ranges.length === 0) return null;
+  const normalizedDaySpan = Math.max(
+    1,
+    Number.isFinite(requestedDaySpan) ? requestedDaySpan : 1,
+  );
+  const requestedEndIndex = endKey ? ranges.findIndex((range) => range.key === endKey) : -1;
+  const endIndex = requestedEndIndex >= 0 ? requestedEndIndex : ranges.length - 1;
+  const endRange = ranges[endIndex];
+  const dayWidth = Math.max(Number.EPSILON, endRange.to - endRange.from);
+  const to = endRange.to;
+  const from = Math.max(ranges[0].from, to - normalizedDaySpan * dayWidth);
+  const boundaryEpsilon = dayWidth * 1e-9;
+  let startIndex = 0;
+  while (
+    startIndex < endIndex
+    && ranges[startIndex].to <= from + boundaryEpsilon
+  ) {
+    startIndex += 1;
+  }
+  return {
+    from,
+    to,
+    dayCount: endIndex - startIndex + 1,
+    firstKey: ranges[startIndex].key,
+    lastKey: endRange.key,
+  };
+}
+
+export function timelineLogicalSpanAtRange(
+  ranges: readonly TimelineLogicalDayRange[],
+  visibleRange: { from: number; to: number } | null,
+): number | null {
+  const window = timelineDayWindowAtLogicalRange(ranges, visibleRange);
+  if (!window || !visibleRange) return null;
+  const endRange = ranges.find((range) => range.key === window.endKey);
+  if (!endRange) return null;
+  const dayWidth = Math.max(Number.EPSILON, endRange.to - endRange.from);
+  return Math.max(1, (visibleRange.to - visibleRange.from) / dayWidth);
+}
+
+export function timelineZoomSpanAfterWheel(
+  currentDaySpan: number,
+  deltaY: number,
+  deltaMode = 0,
+): number {
+  const normalizedCurrentSpan = Math.max(
+    1,
+    Number.isFinite(currentDaySpan) ? currentDaySpan : 1,
+  );
+  if (!Number.isFinite(deltaY) || deltaY === 0) return normalizedCurrentSpan;
+  const modeScale = deltaMode === 1 ? 16 : deltaMode === 2 ? 800 : 1;
+  const normalizedDelta = Math.max(-160, Math.min(160, deltaY * modeScale));
+  return Math.max(1, normalizedCurrentSpan * Math.exp(normalizedDelta * 0.0018));
 }
 
 export function timelineDayWindowAtLogicalRange(
@@ -472,14 +625,41 @@ function dayForSeriesPoint(layout: TimelineLayout, actualTime: number): Timeline
 export function projectTimelineTime(layout: TimelineLayout, actualTime: number): number | null {
   const day = dayForSeriesPoint(layout, actualTime);
   if (!day) return null;
-  if (Math.abs(day.actualEnd - actualTime) <= TIMELINE_TIME_EPSILON_SECONDS * 2) {
-    return day.chartEnd - TIMELINE_CLOSE_POINT_PADDING_SECONDS;
-  }
-  const progress = Math.max(
-    0,
-    Math.min(1 - Number.EPSILON, (actualTime - day.actualStart) / (day.actualEnd - day.actualStart)),
+  const elapsed = actualTime - day.actualStart;
+  const closeAdjustment = Math.abs(day.actualEnd - actualTime) <= TIMELINE_TIME_EPSILON_SECONDS * 2
+    ? TIMELINE_TIME_EPSILON_SECONDS
+    : 0;
+  const chartDuration = Math.max(
+    TIMELINE_TIME_EPSILON_SECONDS,
+    day.chartEnd - day.chartStart,
   );
-  return day.chartStart + progress * SECONDS_PER_DAY;
+  const clockOffset = Math.max(
+    0,
+    Math.min(
+      chartDuration - TIMELINE_TIME_EPSILON_SECONDS,
+      elapsed - closeAdjustment,
+    ),
+  );
+  return day.chartStart + clockOffset;
+}
+
+/** Snaps an overlay or indicator to the shared minute-clock domain. */
+export function timelineClockBucketTime(
+  layout: TimelineLayout,
+  chartTime: number,
+): number | null {
+  const day = dayForChartTime(layout, chartTime);
+  if (!day) return null;
+  const offset = Math.max(0, chartTime - day.chartStart);
+  const bucketCount = Math.max(
+    1,
+    Math.ceil((day.chartEnd - day.chartStart) / TIMELINE_CLOCK_BUCKET_SECONDS),
+  );
+  const bucket = Math.min(
+    bucketCount - 1,
+    Math.floor(offset / TIMELINE_CLOCK_BUCKET_SECONDS),
+  );
+  return day.chartStart + bucket * TIMELINE_CLOCK_BUCKET_SECONDS;
 }
 
 export function projectTimelineSeries(
@@ -607,6 +787,7 @@ export function buildSeriesDataGaps(
   points: readonly DataGapPoint[],
   fallbackResolutionSeconds: number,
   layout: TimelineLayout | null,
+  minimumResolutionSeconds = 0,
 ): SeriesDataGap[] {
   if (
     layout === null
@@ -615,15 +796,19 @@ export function buildSeriesDataGaps(
   ) return [];
 
   const gaps: SeriesDataGap[] = [];
+  const normalizedMinimumResolution = Number.isFinite(minimumResolutionSeconds)
+    ? Math.max(0, minimumResolutionSeconds)
+    : 0;
   for (let nextIndex = 1; nextIndex < points.length; nextIndex += 1) {
     const previous = points[nextIndex - 1];
     const next = points[nextIndex];
     if (!Number.isFinite(previous.actualTime) || !Number.isFinite(next.actualTime)) continue;
 
-    const resolution = Number.isFinite(previous.resolutionSeconds)
+    const sourceResolution = Number.isFinite(previous.resolutionSeconds)
       && Number(previous.resolutionSeconds) > 0
       ? Number(previous.resolutionSeconds)
       : fallbackResolutionSeconds;
+    const resolution = Math.max(sourceResolution, normalizedMinimumResolution);
     const elapsed = next.actualTime - previous.actualTime;
     const tolerance = Math.max(TIMELINE_TIME_EPSILON_SECONDS, resolution * 1e-9);
     if (elapsed <= tolerance) continue;
@@ -793,8 +978,10 @@ export function actualTimeForTimelineChartTime(
 ): number | null {
   const day = dayForChartTime(layout, chartTime);
   if (!day) return null;
-  const progress = (chartTime - day.chartStart) / SECONDS_PER_DAY;
-  return day.actualStart + progress * (day.actualEnd - day.actualStart);
+  if (day.chartEnd - chartTime <= TIMELINE_CLOSE_POINT_PADDING_SECONDS * 2) {
+    return day.actualEnd;
+  }
+  return day.actualStart + (chartTime - day.chartStart);
 }
 
 function pad2(value: number): string {

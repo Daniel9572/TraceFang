@@ -1,5 +1,11 @@
 import { marketSessionAt } from "./marketSession.ts";
-import type { ExpertSessionBand, ExpertSessionKind } from "./expertTypes";
+import { EXPERT_GOLD_EVENTS_2026 } from "./expertEvents.ts";
+import type {
+  ExpertMarketEvent,
+  ExpertSessionBand,
+  ExpertSessionDriver,
+  ExpertSessionKind,
+} from "./expertTypes";
 import type { MarketSchedule } from "./types";
 
 interface ZonedClock {
@@ -30,9 +36,9 @@ const WEEKDAY: Record<string, number> = {
 const SESSION_CLOCK_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
 
 const SESSION_LABELS: Record<ExpertSessionKind, string> = {
-  asia: "亚盘主导",
-  europe: "欧盘主导",
-  us: "美盘主导",
+  asia: "亚洲资金主导",
+  europe: "欧洲/伦敦资金主导",
+  us: "美国资金主导",
 };
 
 const SESSION_TIME_ZONES: Record<ExpertSessionKind, string> = {
@@ -40,6 +46,14 @@ const SESSION_TIME_ZONES: Record<ExpertSessionKind, string> = {
   europe: "Europe/London",
   us: "America/New_York",
 };
+
+export const CAPITAL_DOMINANCE_STRATEGY = {
+  id: "capital-dominance",
+  name: "黄金资金主导时段",
+  shortName: "资金主导",
+  description: "只标注亚洲、欧洲/伦敦与美国资金主导；08:30 数据日提前进入美盘",
+  dataSource: "IANA 时区 + 重要事件日历",
+} as const;
 
 export const EXPERT_HOLIDAY_CLOSURES_2026: ExpertHolidayClosure[] = [
   {
@@ -99,35 +113,6 @@ function zonedClock(epochSeconds: number, timeZone: string): ZonedClock | null {
   }
 }
 
-function insideWeekdayWindow(
-  epochSeconds: number,
-  timeZone: string,
-  startMinute: number,
-  endMinute: number,
-): boolean {
-  const value = zonedClock(epochSeconds, timeZone);
-  return Boolean(
-    value
-    && value.weekday >= 1
-    && value.weekday <= 5
-    && value.minuteOfDay >= startMinute
-    && value.minuteOfDay < endMinute,
-  );
-}
-
-export function dominantGoldSessionAt(epochSeconds: number): ExpertSessionKind | null {
-  if (insideWeekdayWindow(epochSeconds, "America/New_York", 8 * 60 + 20, 17 * 60)) {
-    return "us";
-  }
-  if (insideWeekdayWindow(epochSeconds, "Europe/London", 8 * 60, 16 * 60 + 30)) {
-    return "europe";
-  }
-  if (insideWeekdayWindow(epochSeconds, "Asia/Shanghai", 8 * 60, 15 * 60 + 30)) {
-    return "asia";
-  }
-  return null;
-}
-
 function isHolidayClosed(epochSeconds: number, closures: ExpertHolidayClosure[]): boolean {
   return closures.some((closure) => epochSeconds >= closure.start && epochSeconds < closure.end);
 }
@@ -137,19 +122,17 @@ interface SessionInterval {
   start: number;
   end: number;
   priority: number;
+  driver: ExpertSessionDriver;
+  label: string;
+  detail: string;
+  eventId: string | null;
 }
 
 const SECONDS_PER_DAY = 24 * 60 * 60;
-const SESSION_DEFINITIONS: ReadonlyArray<{
-  kind: ExpertSessionKind;
-  startMinute: number;
-  endMinute: number;
-  priority: number;
-}> = [
-  { kind: "asia", startMinute: 8 * 60, endMinute: 15 * 60 + 30, priority: 1 },
-  { kind: "europe", startMinute: 8 * 60, endMinute: 16 * 60 + 30, priority: 2 },
-  { kind: "us", startMinute: 8 * 60 + 20, endMinute: 17 * 60, priority: 3 },
-];
+const NEW_YORK_DESK_MINUTE = 8 * 60;
+const US_DATA_MINUTE = 8 * 60 + 30;
+const US_EQUITY_OPEN_MINUTE = 9 * 60 + 30;
+const US_DOMINANCE_END_MINUTE = 17 * 60;
 
 function epochForZonedClock(
   year: number,
@@ -179,10 +162,38 @@ function epochForZonedClock(
   return guess;
 }
 
-function sessionIntervalsForRange(start: number, end: number): SessionInterval[] {
+function majorUSDataEventForDate(
+  year: number,
+  month: number,
+  day: number,
+  marketEvents: readonly ExpertMarketEvent[],
+): ExpertMarketEvent | null {
+  return marketEvents.find((event) => {
+    if (event.importance !== "high" || event.timePrecision !== "instant") return false;
+    const clock = zonedClock(event.time, "America/New_York");
+    return Boolean(
+      clock
+      && clock.year === year
+      && clock.month === month
+      && clock.day === day
+      && clock.minuteOfDay === US_DATA_MINUTE,
+    );
+  }) ?? null;
+}
+
+function sessionIntervalsForRange(
+  start: number,
+  end: number,
+  marketEvents: readonly ExpertMarketEvent[],
+): SessionInterval[] {
   const intervals: SessionInterval[] = [];
   const firstDay = Math.floor(start / SECONDS_PER_DAY) - 2;
   const lastDay = Math.floor(end / SECONDS_PER_DAY) + 2;
+  const append = (interval: SessionInterval) => {
+    if (interval.end > interval.start && interval.end > start && interval.start < end) {
+      intervals.push(interval);
+    }
+  };
   for (let serial = firstDay; serial <= lastDay; serial += 1) {
     const date = new Date(serial * SECONDS_PER_DAY * 1_000);
     const year = date.getUTCFullYear();
@@ -190,37 +201,87 @@ function sessionIntervalsForRange(start: number, end: number): SessionInterval[]
     const day = date.getUTCDate();
     const weekday = date.getUTCDay();
     if (weekday === 0 || weekday === 6) continue;
-    for (const definition of SESSION_DEFINITIONS) {
-      const timeZone = SESSION_TIME_ZONES[definition.kind];
-      const intervalStart = epochForZonedClock(
-        year,
-        month,
-        day,
-        definition.startMinute,
-        timeZone,
-      );
-      const intervalEnd = epochForZonedClock(
-        year,
-        month,
-        day,
-        definition.endMinute,
-        timeZone,
-      );
-      if (
-        intervalStart === null
-        || intervalEnd === null
-        || intervalEnd <= start
-        || intervalStart >= end
-      ) continue;
-      intervals.push({
-        kind: definition.kind,
-        start: intervalStart,
-        end: intervalEnd,
-        priority: definition.priority,
-      });
-    }
+    const asiaStart = epochForZonedClock(year, month, day, 9 * 60, "Asia/Shanghai");
+    const asiaEnd = epochForZonedClock(year, month, day, 15 * 60, "Asia/Shanghai");
+    const londonStart = epochForZonedClock(year, month, day, 8 * 60, "Europe/London");
+    const usDeskStart = epochForZonedClock(
+      year,
+      month,
+      day,
+      NEW_YORK_DESK_MINUTE,
+      "America/New_York",
+    );
+    const dataEvent = majorUSDataEventForDate(year, month, day, marketEvents);
+    const coreStartMinute = dataEvent ? US_DATA_MINUTE : US_EQUITY_OPEN_MINUTE;
+    const usCoreStart = epochForZonedClock(
+      year,
+      month,
+      day,
+      coreStartMinute,
+      "America/New_York",
+    );
+    const usEnd = epochForZonedClock(
+      year,
+      month,
+      day,
+      US_DOMINANCE_END_MINUTE,
+      "America/New_York",
+    );
+    if (
+      asiaStart === null
+      || asiaEnd === null
+      || londonStart === null
+      || usDeskStart === null
+      || usCoreStart === null
+      || usEnd === null
+    ) continue;
+
+    append({
+      kind: "asia",
+      start: asiaStart,
+      end: asiaEnd,
+      priority: 1,
+      driver: "regional-dominance",
+      label: SESSION_LABELS.asia,
+      detail: "北京时间 09:00–15:00",
+      eventId: null,
+    });
+    append({
+      kind: "europe",
+      start: londonStart,
+      end: usDeskStart,
+      priority: 2,
+      driver: "regional-dominance",
+      label: SESSION_LABELS.europe,
+      detail: "伦敦 08:00 开始，至纽约 08:00 资金进入前；交接阶段不标注主导方",
+      eventId: null,
+    });
+    append({
+      kind: "us",
+      start: usCoreStart,
+      end: usEnd,
+      priority: 3,
+      driver: dataEvent ? "us-data-release" : "us-equity-open",
+      label: dataEvent
+        ? `美国资金主导 · ${dataEvent.title}`
+        : "美国资金主导 · 美股开盘",
+      detail: dataEvent
+        ? `${dataEvent.title}于纽约 08:30 发布，美国资金从数据时点开始主导`
+        : "当日无已标记的 08:30 ET 高重要性数据，美国资金从 NYSE 09:30 开盘开始主导",
+      eventId: dataEvent?.id ?? null,
+    });
   }
   return intervals;
+}
+
+export function dominantGoldSessionAt(
+  epochSeconds: number,
+  marketEvents: readonly ExpertMarketEvent[] = EXPERT_GOLD_EVENTS_2026,
+): ExpertSessionKind | null {
+  if (!Number.isFinite(epochSeconds)) return null;
+  return sessionIntervalsForRange(epochSeconds - 1, epochSeconds + 1, marketEvents)
+    .filter((interval) => epochSeconds >= interval.start && epochSeconds < interval.end)
+    .sort((left, right) => right.priority - left.priority)[0]?.kind ?? null;
 }
 
 /**
@@ -233,9 +294,10 @@ export function buildExpertSessionBandsForRange(
   end: number,
   marketSchedule?: MarketSchedule | null,
   closures: ExpertHolidayClosure[] = EXPERT_HOLIDAY_CLOSURES_2026,
+  marketEvents: readonly ExpertMarketEvent[] = EXPERT_GOLD_EVENTS_2026,
 ): ExpertSessionBand[] {
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
-  const intervals = sessionIntervalsForRange(start, end);
+  const intervals = sessionIntervalsForRange(start, end, marketEvents);
   const boundaries = new Set<number>([start, end]);
   for (const interval of intervals) {
     boundaries.add(Math.max(start, interval.start));
@@ -262,17 +324,25 @@ export function buildExpertSessionBandsForRange(
       .sort((left, right) => right.priority - left.priority)[0];
     if (!active) continue;
     const previous = bands.at(-1);
-    if (previous?.kind === active.kind && Math.abs(previous.end - segmentStart) < 1) {
+    if (
+      previous?.kind === active.kind
+      && previous.driver === active.driver
+      && previous.eventId === active.eventId
+      && Math.abs(previous.end - segmentStart) < 1
+    ) {
       previous.end = segmentEnd;
       continue;
     }
     bands.push({
-      id: `${active.kind}:${Math.floor(segmentStart)}`,
+      id: `${active.kind}:${active.driver}:${Math.floor(segmentStart)}`,
       kind: active.kind,
-      label: SESSION_LABELS[active.kind],
+      label: active.label,
+      detail: active.detail,
       start: segmentStart,
       end: segmentEnd,
       timeZone: SESSION_TIME_ZONES[active.kind],
+      driver: active.driver,
+      eventId: active.eventId,
     });
   }
   return bands;
@@ -282,6 +352,7 @@ export function buildExpertSessionBands(
   epochSeconds: readonly number[],
   marketSchedule?: MarketSchedule | null,
   closures: ExpertHolidayClosure[] = EXPERT_HOLIDAY_CLOSURES_2026,
+  marketEvents: readonly ExpertMarketEvent[] = EXPERT_GOLD_EVENTS_2026,
 ): ExpertSessionBand[] {
   let start = Number.POSITIVE_INFINITY;
   let end = Number.NEGATIVE_INFINITY;
@@ -291,6 +362,6 @@ export function buildExpertSessionBands(
     end = Math.max(end, value);
   }
   return Number.isFinite(start) && Number.isFinite(end)
-    ? buildExpertSessionBandsForRange(start, end + 60, marketSchedule, closures)
+    ? buildExpertSessionBandsForRange(start, end + 60, marketSchedule, closures, marketEvents)
     : [];
 }

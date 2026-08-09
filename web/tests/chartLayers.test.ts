@@ -56,6 +56,18 @@ test("creates an immutable price base with managed drawing and read-only indicat
     workspace.layers.filter((layer) => layer.kind === "indicator").map((layer) => layer.indicatorId),
     ["kdj", "macd"],
   );
+  assert.equal(
+    workspace.layers.find((layer) => layer.kind === "annotation" && layer.annotationId === "sessions")?.visible,
+    false,
+  );
+  assert.equal(
+    workspace.layers.find((layer) => layer.kind === "annotation" && layer.annotationId === "gaps")?.visible,
+    false,
+  );
+  assert.equal(
+    workspace.layers.find((layer) => layer.kind === "annotation" && layer.annotationId === "events")?.visible,
+    false,
+  );
 });
 
 test("migrates legacy drawings into the first drawing layer", () => {

@@ -1,19 +1,27 @@
 export type ExpertSessionKind = "asia" | "europe" | "us";
 
+export type ExpertSessionDriver =
+  | "regional-dominance"
+  | "us-data-release"
+  | "us-equity-open";
+
 export interface ExpertSessionBand {
   id: string;
   kind: ExpertSessionKind;
   label: string;
+  detail: string;
   start: number;
   end: number;
   timeZone: string;
+  driver: ExpertSessionDriver;
+  eventId: string | null;
 }
 
 export interface ExpertMarketEvent {
   id: string;
   time: number;
   title: string;
-  category: "fomc" | "employment" | "central-bank-gold" | "custom";
+  category: "fomc" | "employment" | "inflation" | "central-bank-gold" | "custom";
   importance: "high" | "medium";
   source: string;
   sourceUrl: string | null;

@@ -8,7 +8,6 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
-  AreaSeries,
   CandlestickSeries,
   ColorType,
   CrosshairMode,
@@ -18,7 +17,6 @@ import {
   TickMarkType,
   createChart,
   createSeriesMarkers,
-  type AreaData,
   type CandlestickData,
   type Coordinate,
   type HistogramData,
@@ -38,11 +36,11 @@ import { barsFromCandles, buildTimelineSeries, formatBarCountdown } from "./char
 import { secondsUntilPeriodClose, type ChartPeriod } from "./chartPeriods";
 import {
   DATE_ONLY_AXIS_THRESHOLD_SECONDS,
+  TIMELINE_CLOCK_BUCKET_SECONDS,
   actualTimeForChinaAxis,
   actualTimeForTimelineChartTime,
   buildSeriesDataGaps,
   buildTimelineLayout,
-  buildTimelineLogicalDayRanges,
   buildTimelineSessionGaps,
   formatBeijingDateTime,
   formatChartTick,
@@ -52,9 +50,12 @@ import {
   projectTimeForChinaAxis,
   projectTimelineTime,
   projectTimelineSeries,
+  timelineClockBucketTime,
   timelineDayWindowAtLogicalRange,
   timelineGapSeparatorTime,
-  timelineLogicalViewport,
+  timelineLogicalSpanAtRange,
+  timelineLogicalViewportForSpan,
+  timelineZoomSpanAfterWheel,
   type SeriesDataGapKind,
   type TimelineLayout,
   type TimelineLogicalDayRange,
@@ -71,6 +72,21 @@ import type {
   ExpertIndicatorSeriesView,
 } from "./expertTypes";
 import type { Candle, HoverCandle, MarketPhase, MarketSchedule, TimelineSample } from "./types";
+import {
+  TimelineClockSeries,
+  buildTimelineClockDomain,
+  changedTimelineClockDataIndexes,
+  isTimelineClockBucket,
+  materializeTimelineClockData,
+  nearestTimelineClockSample,
+  timelineClockDataItemAt,
+  timelineClockDomainsSharePrefix,
+  timelineClockVisibleDataLength,
+  timelineClockVisibleRanges,
+  recentTimelineWindowStart,
+  type TimelineClockDomain,
+  type TimelineClockSeriesApi,
+} from "./timelineClockSeries";
 
 interface MarketChartProps {
   candles: Candle[];
@@ -102,6 +118,7 @@ const UP_COLOR = "#e94357";
 const DOWN_COLOR = "#35aa75";
 const EMPTY_CHART_LAYERS: readonly ChartLayer[] = [];
 const MAX_INCREMENTAL_REPLAY_POINTS = 2_000;
+const INITIAL_TIMELINE_MATERIALIZED_DAYS = 1;
 
 interface RenderableSeriesGap {
   kind: SeriesDataGapKind;
@@ -192,6 +209,30 @@ type IndicatorRuntime = KdjIndicatorRuntime | MacdIndicatorRuntime;
 interface DrawingLayerRuntime {
   series: Array<ISeriesApi<"Line">>;
   priceLines: IPriceLine[];
+  priceLineOwner: MainSeriesApi;
+}
+
+type MainSeriesApi = ISeriesApi<"Candlestick"> | TimelineClockSeriesApi;
+
+interface TimelineSeriesRenderState {
+  domain: TimelineClockDomain;
+  pointCount: number;
+  dataLength: number;
+  periodId: string;
+}
+
+interface TimelineSeriesCache {
+  sourceCandles: Candle[];
+  sourceSamples: TimelineSample[];
+  windowStart: number | null;
+  livePrice: number | null;
+  observedAt: string | null;
+  data: TimelineSample[];
+}
+
+interface CandleSeriesRenderState {
+  data: Array<CandlestickData<Time> | WhitespaceData<Time>>;
+  dataLength: number;
 }
 
 function secondsUntilBackendBarClose(candles: Candle[], period: ChartPeriod): number {
@@ -248,6 +289,34 @@ function timelinePrefixCount(
   while (low < high) {
     const middle = Math.floor((low + high) / 2);
     if (values[middle].actualTime < cutoff) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function lowerBoundCandleTime(candles: readonly Candle[], targetTime: number): number {
+  let low = 0;
+  let high = candles.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const candleTime = Date.parse(candles[middle].open_time) / 1_000;
+    if (!Number.isFinite(candleTime) || candleTime < targetTime) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function lowerBoundTimelineSampleTime(
+  samples: readonly TimelineSample[],
+  targetTime: number,
+): number {
+  let low = 0;
+  let high = samples.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const sample = samples[middle];
+    const sampleTime = sample.observedTime ?? sample.time;
+    if (sampleTime < targetTime) low = middle + 1;
     else high = middle;
   }
   return low;
@@ -436,6 +505,10 @@ export function MarketChart({
     () => layers.filter((layer): layer is Extract<ChartLayer, { kind: "annotation" }> => layer.kind === "annotation"),
     [layers],
   );
+  const openingGapVisible = annotationLayers.some((layer) => (
+    layer.definition.annotationId === "gaps"
+    && layer.definition.visible
+  ));
   const sessionBands = useMemo(
     () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.sessionBands),
     [annotationLayers],
@@ -443,6 +516,10 @@ export function MarketChart({
   const eventMarkers = useMemo(
     () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.eventMarkers),
     [annotationLayers],
+  );
+  const eventMarkersById = useMemo(
+    () => new Map(eventMarkers.map((event) => [event.id, event] as const)),
+    [eventMarkers],
   );
   const strategyLevels = useMemo(
     () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.priceLevels),
@@ -458,12 +535,16 @@ export function MarketChart({
   const countdownRef = useRef<HTMLSpanElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const areaSeriesRef = useRef<ISeriesApi<"Area"> | null>(null);
+  const timelineSeriesRef = useRef<TimelineClockSeriesApi | null>(null);
+  const timelineSeriesRenderStateRef = useRef<TimelineSeriesRenderState | null>(null);
+  const timelineSeriesCacheRef = useRef<TimelineSeriesCache | null>(null);
+  const candleSeriesRenderStateRef = useRef<CandleSeriesRenderState | null>(null);
   const referenceLineRef = useRef<IPriceLine | null>(null);
   const eventMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const drawingLayerRuntimeRef = useRef<Map<string, DrawingLayerRuntime>>(new Map());
   const indicatorRuntimeRef = useRef<Map<string, IndicatorRuntime>>(new Map());
   const strategyPriceLinesRef = useRef<IPriceLine[]>([]);
+  const strategyPriceLineOwnerRef = useRef<MainSeriesApi | null>(null);
   const markerFrameRef = useRef<number | null>(null);
   const hoverFrameRef = useRef<number | null>(null);
   const timelineDecorationFrameRef = useRef<number | null>(null);
@@ -475,12 +556,10 @@ export function MarketChart({
   const dataLengthRef = useRef(0);
   const latestLogicalIndexRef = useRef(-1);
   const previousDataLengthRef = useRef(0);
-  const previousSeriesDataLengthRef = useRef(0);
   const previousPeriodRef = useRef<string | null>(null);
   const previousLastTimeRef = useRef<number | null>(null);
   const previousFirstTimeRef = useRef<number | null>(null);
   const previousChartDataRef = useRef<Array<CandlestickData<Time> | WhitespaceData<Time>> | null>(null);
-  const previousTimelineDataRef = useRef<Array<AreaData<Time> | WhitespaceData<Time>> | null>(null);
   const followingRef = useRef(true);
   const returningRef = useRef(false);
   const returnTimerRef = useRef<number | null>(null);
@@ -493,11 +572,14 @@ export function MarketChart({
   const timelineLogicalDayRangesRef = useRef<readonly TimelineLogicalDayRange[]>([]);
   const timelineTradingDaysRef = useRef<TimelineLayout["days"]>([]);
   const timelineSessionGapsRef = useRef<TimelineSessionGap[]>([]);
-  const timelineViewportDayCountRef = useRef(1);
+  const timelineViewportSpanRef = useRef(1);
   const timelineViewportEndKeyRef = useRef<string | null>(null);
   const timelineViewportManagedRef = useRef(true);
   const timelineViewportApplyingRef = useRef(false);
-  const timelineWheelHandledAtRef = useRef(0);
+  const timelineMaterializationKeyRef = useRef("");
+  const timelineMaterializedDayCountRef = useRef(INITIAL_TIMELINE_MATERIALIZED_DAYS);
+  const timelineMaterializationPendingRef = useRef(false);
+  const timelineHasUnmaterializedHistoryRef = useRef(false);
   const timelineIntradayAxisRef = useRef(false);
   const visibleCandleSpanRef = useRef(0);
   const candleDateOnlyAxisRef = useRef(false);
@@ -505,6 +587,8 @@ export function MarketChart({
   const timelineResolutionSecondsRef = useRef(timelineResolutionSeconds);
   const displayTimeZoneRef = useRef(displayTimeZone);
   const sessionBandsRef = useRef(sessionBands);
+  const eventMarkersByIdRef = useRef(eventMarkersById);
+  const openingGapVisibleRef = useRef(openingGapVisible);
   const valueZonesRef = useRef(valueZones);
   const projectedTimesRef = useRef<ReadonlyArray<{ actualTime: number; time: number }>>([]);
   const candleTimesRef = useRef<ReadonlyArray<{ actualTime: number; time: number }>>([]);
@@ -524,6 +608,8 @@ export function MarketChart({
   timelineResolutionSecondsRef.current = timelineResolutionSeconds;
   displayTimeZoneRef.current = displayTimeZone;
   sessionBandsRef.current = sessionBands;
+  eventMarkersByIdRef.current = eventMarkersById;
+  openingGapVisibleRef.current = openingGapVisible;
   valueZonesRef.current = valueZones;
   drawingToolRef.current = drawingTool;
   drawingSnapModeRef.current = drawingSnapMode;
@@ -533,6 +619,44 @@ export function MarketChart({
   const [isFollowing, setIsFollowing] = useState(true);
   const [drawingDraft, setDrawingDraft] = useState<DrawingDraft | null>(null);
   const [mainPaneHeight, setMainPaneHeight] = useState<number | null>(null);
+  const [, setTimelineMaterializationRevision] = useState(0);
+
+  const latestCandleIdentity = candles.at(-1);
+  const timelineMaterializationKey = [
+    period.mode,
+    latestCandleIdentity?.instrument.symbol ?? "",
+    latestCandleIdentity?.source.provider ?? "",
+  ].join(":");
+  if (timelineMaterializationKeyRef.current !== timelineMaterializationKey) {
+    timelineMaterializationKeyRef.current = timelineMaterializationKey;
+    timelineMaterializedDayCountRef.current = INITIAL_TIMELINE_MATERIALIZED_DAYS;
+    timelineMaterializationPendingRef.current = false;
+  }
+  const timelineMaterializedDayCount = timelineMaterializedDayCountRef.current;
+  const ensureTimelineMaterializedDays = useCallback((requestedDayCount: number): boolean => {
+    const normalizedDayCount = Math.max(
+      INITIAL_TIMELINE_MATERIALIZED_DAYS,
+      Math.ceil(Number.isFinite(requestedDayCount) ? requestedDayCount : 0),
+    );
+    if (
+      normalizedDayCount <= timelineMaterializedDayCountRef.current
+      || timelineMaterializationPendingRef.current
+    ) return false;
+    timelineMaterializedDayCountRef.current = normalizedDayCount;
+    timelineMaterializationPendingRef.current = true;
+    setTimelineMaterializationRevision((current) => current + 1);
+    return true;
+  }, []);
+
+  useEffect(() => {
+    timelineMaterializationPendingRef.current = false;
+  }, [timelineMaterializationKey, timelineMaterializedDayCount]);
+
+  const activeMainSeries = useCallback((): MainSeriesApi | null => (
+    periodRef.current.mode === "timeline"
+      ? timelineSeriesRef.current
+      : candlestickSeriesRef.current
+  ), []);
 
   const bars = useMemo(
     () => barsFromCandles(candles),
@@ -577,30 +701,105 @@ export function MarketChart({
       })),
     [candleGapLayout, candleResolutionSeconds, candleTimes],
   );
+  const candleWhitespaceGaps = useMemo(
+    () => candleSeriesGaps.filter((gap) => gap.kind === "missing-trade"),
+    [candleSeriesGaps],
+  );
   const chartData = useMemo(
-    () => insertGapWhitespace(baseChartData, candleSeriesGaps),
-    [baseChartData, candleSeriesGaps],
+    () => insertGapWhitespace(baseChartData, candleWhitespaceGaps),
+    [baseChartData, candleWhitespaceGaps],
   );
   candleTimesRef.current = candleTimes;
   const visibleCandleCount = replayMode
     ? Math.min(bars.length, Math.max(0, (replayIndex ?? -1) + 1))
     : bars.length;
-  const visibleChartDataCount = gapAwarePrefixLength(visibleCandleCount, candleSeriesGaps);
+  const visibleChartDataCount = gapAwarePrefixLength(visibleCandleCount, candleWhitespaceGaps);
   visibleCandleLengthRef.current = visibleCandleCount;
   const latestBar = visibleCandleCount > 0 ? bars[visibleCandleCount - 1] : null;
   const timelineSnapshotPrice = replayMode ? null : livePrice;
   const timelineSnapshotObservedAt = replayMode ? null : observedAt;
-  const rawTimelineData = useMemo(
-    () => period.mode === "timeline"
-      ? buildTimelineSeries(
-        candles,
-        timelineSamples,
-        timelineSnapshotPrice,
-        timelineSnapshotObservedAt,
-      )
-      : [],
-    [candles, period.mode, timelineSamples, timelineSnapshotObservedAt, timelineSnapshotPrice],
+  const timelineWindowStart = useMemo(() => {
+    if (period.mode !== "timeline") return null;
+    if (candleTimes.length > 0) {
+      return recentTimelineWindowStart(
+        candleTimes,
+        timelineMaterializedDayCount,
+        marketSchedule,
+      );
+    }
+    const sampleTimes = timelineSamples.map((sample) => ({
+      actualTime: sample.observedTime ?? sample.time,
+    }));
+    return recentTimelineWindowStart(
+      sampleTimes,
+      timelineMaterializedDayCount,
+      marketSchedule,
+    );
+  }, [
+    candleTimes,
+    marketSchedule,
+    period.mode,
+    timelineMaterializedDayCount,
+    timelineSamples,
+  ]);
+  const timelineWindowCandles = useMemo(() => {
+    if (period.mode !== "timeline" || timelineWindowStart === null) return candles;
+    const firstIndex = lowerBoundCandleTime(candles, timelineWindowStart);
+    return firstIndex === 0 ? candles : candles.slice(firstIndex);
+  }, [candles, period.mode, timelineWindowStart]);
+  const timelineWindowSamples = useMemo(() => {
+    if (period.mode !== "timeline" || timelineWindowStart === null) return timelineSamples;
+    const firstIndex = lowerBoundTimelineSampleTime(timelineSamples, timelineWindowStart);
+    return firstIndex === 0 ? timelineSamples : timelineSamples.slice(firstIndex);
+  }, [period.mode, timelineSamples, timelineWindowStart]);
+  const earliestLoadedTimelineTime = Math.min(
+    candleTimes[0]?.actualTime ?? Number.POSITIVE_INFINITY,
+    timelineSamples[0]?.observedTime
+      ?? timelineSamples[0]?.time
+      ?? Number.POSITIVE_INFINITY,
   );
+  const timelineHasUnmaterializedHistory = timelineWindowStart !== null
+    && earliestLoadedTimelineTime < timelineWindowStart;
+  timelineHasUnmaterializedHistoryRef.current = timelineHasUnmaterializedHistory;
+  const rawTimelineData = useMemo(() => {
+    const cache = timelineSeriesCacheRef.current;
+    if (period.mode !== "timeline") {
+      return cache?.sourceCandles === candles && cache.sourceSamples === timelineSamples
+        ? cache.data
+        : [];
+    }
+    if (
+      cache?.sourceCandles === candles
+      && cache.sourceSamples === timelineSamples
+      && cache.windowStart === timelineWindowStart
+      && cache.livePrice === timelineSnapshotPrice
+      && cache.observedAt === timelineSnapshotObservedAt
+    ) return cache.data;
+    const data = buildTimelineSeries(
+      timelineWindowCandles,
+      timelineWindowSamples,
+      timelineSnapshotPrice,
+      timelineSnapshotObservedAt,
+    );
+    timelineSeriesCacheRef.current = {
+      sourceCandles: candles,
+      sourceSamples: timelineSamples,
+      windowStart: timelineWindowStart,
+      livePrice: timelineSnapshotPrice,
+      observedAt: timelineSnapshotObservedAt,
+      data,
+    };
+    return data;
+  }, [
+    candles,
+    period.mode,
+    timelineSamples,
+    timelineSnapshotObservedAt,
+    timelineSnapshotPrice,
+    timelineWindowCandles,
+    timelineWindowSamples,
+    timelineWindowStart,
+  ]);
   const observedEpoch = timelineSnapshotObservedAt
     ? Date.parse(timelineSnapshotObservedAt) / 1_000
     : null;
@@ -616,7 +815,13 @@ export function MarketChart({
     () => [...timelineLayout.days.reduce((groups, day) => {
       const current = groups.get(day.key);
       groups.set(day.key, current
-        ? { ...current, chartEnd: Math.max(current.chartEnd, day.chartEnd) }
+        ? {
+          ...current,
+          actualStart: Math.min(current.actualStart, day.actualStart),
+          actualEnd: Math.max(current.actualEnd, day.actualEnd),
+          chartStart: Math.min(current.chartStart, day.chartStart),
+          chartEnd: Math.max(current.chartEnd, day.chartEnd),
+        }
         : day);
       return groups;
     }, new Map<string, TimelineLayout["days"][number]>()).values()],
@@ -633,7 +838,10 @@ export function MarketChart({
     : projectedTimelineData.length;
   visibleProjectedLengthRef.current = visibleTimelineCount;
   const timelineSessionGaps = useMemo(
-    () => buildTimelineSessionGaps(timelineLayout, projectedTimelineData, priceDigits),
+    () => buildTimelineSessionGaps(timelineLayout, projectedTimelineData, priceDigits).map((gap) => ({
+      ...gap,
+      chartTime: timelineClockBucketTime(timelineLayout, gap.chartTime) ?? gap.chartTime,
+    })),
     [priceDigits, projectedTimelineData, timelineLayout],
   );
   timelineSessionGapsRef.current = timelineSessionGaps;
@@ -642,6 +850,7 @@ export function MarketChart({
       projectedTimelineData,
       timelineResolutionSeconds,
       marketSchedule?.sessions.length ? timelineLayout : null,
+      TIMELINE_CLOCK_BUCKET_SECONDS,
     ).flatMap((gap) => {
       const projectedTime = timelineGapSeparatorTime(gap, projectedTimelineData, timelineLayout);
       return projectedTime === null
@@ -655,30 +864,29 @@ export function MarketChart({
     }),
     [marketSchedule, projectedTimelineData, timelineLayout, timelineResolutionSeconds],
   );
-  const timelineData = useMemo(
-    () => insertGapWhitespace(
-      projectedTimelineData.map((point) => ({ time: point.time as Time, value: point.value })),
-      timelineSeriesGaps,
-    ),
-    [projectedTimelineData, timelineSeriesGaps],
-  );
-  const timelineLogicalDayRanges = useMemo(
-    () => buildTimelineLogicalDayRanges(
+  const timelineClockDomain = useMemo(
+    () => buildTimelineClockDomain(
       projectedTimelineData,
       timelineSeriesGaps,
       timelineLayout,
-      visibleTimelineCount,
     ),
-    [projectedTimelineData, timelineLayout, timelineSeriesGaps, visibleTimelineCount],
+    [projectedTimelineData, timelineLayout, timelineSeriesGaps],
+  );
+  const timelineLogicalDayRanges = useMemo(
+    () => timelineClockVisibleRanges(timelineClockDomain, visibleTimelineCount),
+    [timelineClockDomain, visibleTimelineCount],
   );
   timelineLogicalDayRangesRef.current = timelineLogicalDayRanges;
-  const visibleTimelineSeriesCount = gapAwarePrefixLength(
+  const visibleTimelineSeriesCount = timelineClockVisibleDataLength(
+    timelineClockDomain,
     visibleTimelineCount,
-    timelineSeriesGaps,
   );
-  const latestTimelineLogicalIndex = visibleTimelineSeriesCount > 0
-    ? visibleTimelineSeriesCount - 1
+  const latestTimelineLogicalIndex = timelineLogicalDayRanges.length > 0
+    ? timelineLogicalDayRanges[timelineLogicalDayRanges.length - 1].to - 0.5
     : null;
+  const visibleTimelineLogicalCount = latestTimelineLogicalIndex === null
+    ? 0
+    : latestTimelineLogicalIndex + 1;
   const drawingDataRangeKey = period.mode === "timeline"
     ? `timeline:${projectedTimelineData[0]?.actualTime ?? ""}:${replayMode ? projectedTimelineData[visibleTimelineCount - 1]?.actualTime ?? "" : "live"}`
     : `candles:${candleTimes[0]?.actualTime ?? ""}:${replayMode ? candleTimes[visibleCandleCount - 1]?.actualTime ?? "" : "live"}`;
@@ -697,7 +905,7 @@ export function MarketChart({
     const layer = liveLayerRef.current;
     if (!layer) return;
 
-    const series = candlestickSeriesRef.current ?? areaSeriesRef.current;
+    const series = activeMainSeries();
     const price = latestPriceRef.current;
     if (!series || price === null) {
       layer.style.visibility = "hidden";
@@ -714,7 +922,7 @@ export function MarketChart({
     layer.style.setProperty("--live-y", `${coordinate.toFixed(2)}px`);
     layer.style.setProperty("--live-tag-y", `${tagY.toFixed(2)}px`);
     layer.style.visibility = "visible";
-  }, []);
+  }, [activeMainSeries]);
 
   const scheduleLiveMarker = useCallback(() => {
     if (markerFrameRef.current !== null) return;
@@ -770,13 +978,17 @@ export function MarketChart({
 
   const applyTimelineDayViewport = useCallback((
     chart: IChartApi,
-    requestedDayCount: number,
+    requestedDaySpan: number,
     endKey?: string | null,
   ) => {
     const ranges = timelineLogicalDayRangesRef.current;
-    const viewport = timelineLogicalViewport(ranges, requestedDayCount, endKey);
+    const normalizedDaySpan = Math.max(
+      1,
+      Number.isFinite(requestedDaySpan) ? requestedDaySpan : 1,
+    );
+    const viewport = timelineLogicalViewportForSpan(ranges, normalizedDaySpan, endKey);
     if (!viewport) return null;
-    timelineViewportDayCountRef.current = Math.max(1, Math.floor(requestedDayCount));
+    timelineViewportSpanRef.current = normalizedDaySpan;
     timelineViewportEndKeyRef.current = viewport.lastKey;
     timelineViewportManagedRef.current = true;
     timelineViewportApplyingRef.current = true;
@@ -784,7 +996,20 @@ export function MarketChart({
       window.cancelAnimationFrame(timelineViewportReleaseFrameRef.current);
     }
     chart.timeScale().setVisibleLogicalRange({ from: viewport.from, to: viewport.to });
-    rendererRef.current?.setAttribute("data-timeline-visible-days", String(viewport.dayCount));
+    const renderer = rendererRef.current;
+    renderer?.setAttribute("data-timeline-visible-days", String(viewport.dayCount));
+    const firstRange = ranges.find((range) => range.key === viewport.firstKey);
+    const lastRange = ranges.find((range) => range.key === viewport.lastKey);
+    if (firstRange && lastRange) {
+      renderer?.setAttribute(
+        "data-timeline-window-start",
+        new Date(firstRange.actualFrom * 1_000).toISOString(),
+      );
+      renderer?.setAttribute(
+        "data-timeline-window-end",
+        new Date(lastRange.actualTo * 1_000).toISOString(),
+      );
+    }
     updateFollowing(viewport.lastKey === ranges[ranges.length - 1]?.key);
     timelineViewportReleaseFrameRef.current = window.requestAnimationFrame(() => {
       timelineViewportReleaseFrameRef.current = null;
@@ -873,9 +1098,12 @@ export function MarketChart({
     }
     const right = values[low];
     const left = values[Math.max(0, low - 1)];
-    return Math.abs(right.actualTime - actualTime) < Math.abs(actualTime - left.actualTime)
+    const nearestTime = Math.abs(right.actualTime - actualTime) < Math.abs(actualTime - left.actualTime)
       ? right.time
       : left.time;
+    return timelineMode
+      ? timelineClockBucketTime(timelineLayoutRef.current, nearestTime)
+      : nearestTime;
   }, []);
 
   const actualTimeForChartCoordinate = useCallback((chartTime: number): number | null => {
@@ -890,7 +1118,7 @@ export function MarketChart({
       expertDecorationFrameRef.current = null;
       const chart = chartRef.current;
       const layer = expertOverlayLayerRef.current;
-      const series = candlestickSeriesRef.current ?? areaSeriesRef.current;
+      const series = activeMainSeries();
       if (!chart || !layer || !series) {
         layer?.replaceChildren();
         return;
@@ -942,12 +1170,85 @@ export function MarketChart({
         const right = Math.min(plotWidth, Math.max(Number(start), Number(end)));
         if (right <= 0 || left >= plotWidth || right - left < 1) continue;
         const element = document.createElement("span");
+        const linkedEvent = band.eventId === null
+          ? undefined
+          : eventMarkersByIdRef.current.get(band.eventId);
+        const eventShownSeparately = Boolean(
+          linkedEvent
+          && visibleActualStart !== null
+          && visibleActualEnd !== null
+          && linkedEvent.time >= visibleActualStart
+          && linkedEvent.time <= visibleActualEnd,
+        );
         element.className = `expert-session-band is-${band.kind}`;
+        element.dataset.driver = band.driver;
+        element.dataset.eventRelation = eventShownSeparately ? "linked" : "embedded";
         element.style.left = `${left.toFixed(2)}px`;
         element.style.width = `${Math.max(1, right - left).toFixed(2)}px`;
-        element.title = `${band.label} · ${band.timeZone}`;
+        element.title = `${band.label} · ${band.detail} · ${band.timeZone}${eventShownSeparately
+          ? " · 具体事件由数据/事件策略标记"
+          : ""}`;
+        if (right - left >= 28) {
+          const label = document.createElement("small");
+          label.className = "expert-session-band-label";
+          label.textContent = eventShownSeparately
+            ? "美国资金主导 · 数据接管"
+            : band.label;
+          if (right - left < 110) label.dataset.compact = "true";
+          element.append(label);
+        }
         element.setAttribute("aria-hidden", "true");
         fragment.append(element);
+      }
+
+      if (timelineMode && openingGapVisibleRef.current) {
+        for (const gap of timelineSessionGapsRef.current) {
+          if (
+            gap.boundaryState !== "complete"
+            || gap.direction === "flat"
+            || gap.direction === "unknown"
+            || gap.nextOpen === null
+            || gap.priceDifference === null
+            || gap.pricePercent === null
+            || visibleActualStart === null
+            || visibleActualEnd === null
+            || gap.openedAt < visibleActualStart
+            || gap.openedAt > visibleActualEnd
+          ) continue;
+          const xCoordinate = chart.timeScale().timeToCoordinate(gap.chartTime as Time);
+          const yCoordinate = series.priceToCoordinate(gap.nextOpen);
+          if (xCoordinate === null || yCoordinate === null) continue;
+          const x = Number(xCoordinate);
+          const y = Number(yCoordinate);
+          if (x < 0 || x > plotWidth || y < 0 || y > paneHeight) continue;
+
+          const marker = document.createElement("span");
+          marker.className = `opening-gap-annotation is-${gap.direction}`;
+          if (x > plotWidth - 180) marker.classList.add("is-align-left");
+          if (y < 70) marker.classList.add("is-below");
+          marker.style.left = `${x.toFixed(2)}px`;
+          marker.style.top = `${y.toFixed(2)}px`;
+          marker.title = sessionGapDescription(gap, priceDigits);
+          marker.setAttribute("role", "note");
+          marker.setAttribute("aria-label", marker.title);
+
+          const anchor = document.createElement("i");
+          anchor.className = "opening-gap-anchor";
+          marker.append(anchor);
+          const stem = document.createElement("i");
+          stem.className = "opening-gap-stem";
+          marker.append(stem);
+          const copy = document.createElement("span");
+          copy.className = "opening-gap-copy";
+          const value = document.createElement("strong");
+          value.textContent = sessionGapDetail(gap, priceDigits);
+          copy.append(value);
+          const context = document.createElement("small");
+          context.textContent = `${gap.kind === "weekend" ? "周末后" : "休市后"}首价 ${gap.nextOpen.toFixed(priceDigits)}`;
+          copy.append(context);
+          marker.append(copy);
+          fragment.append(marker);
+        }
       }
 
       for (const zone of valueZonesRef.current) {
@@ -993,10 +1294,15 @@ export function MarketChart({
       const visibleRange = chart.timeScale().getVisibleRange();
       const visibleFrom = visibleRange ? Number(visibleRange.from) : Number.NEGATIVE_INFINITY;
       const visibleTo = visibleRange ? Number(visibleRange.to) : Number.POSITIVE_INFINITY;
+      const logicalVisibleRange = chart.timeScale().getVisibleLogicalRange();
+      const visibleLogicalDays = logicalVisibleRange
+        ? timelineLogicalDayRangesRef.current.filter((range) => (
+          range.to > logicalVisibleRange.from && range.from < logicalVisibleRange.to
+        ))
+        : timelineLogicalDayRangesRef.current;
+      const visibleDayKeys = new Set(visibleLogicalDays.map((range) => range.key));
       const tradingDays = timelineTradingDaysRef.current;
-      const visibleDays = tradingDays.filter((day) => (
-        day.chartEnd >= visibleFrom && day.chartStart <= visibleTo
-      ));
+      const visibleDays = tradingDays.filter((day) => visibleDayKeys.has(day.key));
       const visibleSpan = visibleRange
         ? Math.max(0, visibleTo - visibleFrom)
         : Number.POSITIVE_INFINITY;
@@ -1014,10 +1320,16 @@ export function MarketChart({
       const plotWidth = Math.max(0, chartWidth - priceScaleWidth);
       layer.style.right = `${priceScaleWidth}px`;
       for (const day of visibleDays) {
-        const startX = chart.timeScale().timeToCoordinate(day.chartStart as Time);
-        const centerX = chart.timeScale().timeToCoordinate(
-          (day.chartStart + (day.chartEnd - day.chartStart) / 2) as Time,
+        const dayRange = timelineLogicalDayRangesRef.current.find(
+          (range) => range.key === day.key,
         );
+        const startX = chart.timeScale().timeToCoordinate(day.chartStart as Time);
+        const endX = dayRange
+          ? chart.timeScale().timeToCoordinate(dayRange.chartTo as Time)
+          : null;
+        const centerX = startX === null || endX === null
+          ? null
+          : (Number(startX) + Number(endX)) / 2;
         if (startX !== null && startX > 0 && startX < plotWidth) {
           const separator = document.createElement("span");
           separator.className = "timeline-trading-day-separator";
@@ -1025,102 +1337,60 @@ export function MarketChart({
           separator.dataset.tradingDay = day.key;
           fragment.append(separator);
         }
-        if (showTradingDays && centerX !== null && centerX > 22 && centerX < plotWidth - 22) {
+        if (showTradingDays && centerX !== null) {
+          const labelX = Math.min(
+            Math.max(22, centerX),
+            Math.max(22, plotWidth - 22),
+          );
           const label = document.createElement("span");
           label.className = "timeline-trading-day-label";
-          label.style.transform = `translate3d(${centerX.toFixed(2)}px, 0, 0) translateX(-50%)`;
+          label.style.transform = `translate3d(${labelX.toFixed(2)}px, 0, 0) translateX(-50%)`;
           label.dataset.tradingDay = day.key;
           label.textContent = day.label;
           fragment.append(label);
         }
       }
 
-      const visibleGaps: Array<{ gap: TimelineSessionGap; x: number }> = [];
-      for (const gap of timelineSessionGapsRef.current) {
-        if (gap.chartTime < visibleFrom || gap.chartTime > visibleTo) continue;
-        const coordinate = chart.timeScale().timeToCoordinate(gap.chartTime as Time);
-        if (coordinate === null) continue;
-        const x = Number(coordinate);
-        if (x >= 0 && x <= plotWidth) visibleGaps.push({ gap, x });
-      }
-      const sortedGapCoordinates = visibleGaps
-        .map((item) => item.x)
-        .sort((left, right) => left - right);
-      let minimumGapSpacing = Number.POSITIVE_INFINITY;
-      for (let index = 1; index < sortedGapCoordinates.length; index += 1) {
-        minimumGapSpacing = Math.min(
-          minimumGapSpacing,
-          sortedGapCoordinates[index] - sortedGapCoordinates[index - 1],
+      const logicalWindow = timelineDayWindowAtLogicalRange(
+        timelineLogicalDayRangesRef.current,
+        logicalVisibleRange,
+      );
+      if (logicalWindow?.dayCount === 1) {
+        const dayRange = timelineLogicalDayRangesRef.current.find(
+          (range) => range.key === logicalWindow.endKey,
         );
+        if (dayRange) {
+          for (const boundary of [
+            { edge: "open", time: dayRange.chartFrom },
+            { edge: "close", time: dayRange.chartTo },
+          ] as const) {
+            const coordinate = chart.timeScale().timeToCoordinate(boundary.time as Time);
+            if (coordinate === null) continue;
+            const x = boundary.edge === "open"
+              ? Math.max(4, Number(coordinate))
+              : Math.min(plotWidth - 4, Number(coordinate));
+            const label = document.createElement("span");
+            label.className = `timeline-window-boundary-label is-${boundary.edge}`;
+            label.style.transform = boundary.edge === "open"
+              ? `translate3d(${x.toFixed(2)}px, 0, 0)`
+              : `translate3d(${x.toFixed(2)}px, 0, 0) translateX(-100%)`;
+            label.dataset.tradingDay = dayRange.key;
+            label.dataset.edge = boundary.edge;
+            label.textContent = formatTimelineTick(
+              boundary.time,
+              TickMarkType.Time,
+              layout,
+              true,
+              displayTimeZoneRef.current,
+            );
+            fragment.append(label);
+          }
+        }
       }
-      const markerDensity = chartWidth < 540 || minimumGapSpacing < 92
-        ? "seam"
-        : minimumGapSpacing < 180
-          ? "compact"
-          : "full";
 
-      for (const { gap, x } of visibleGaps) {
-        const tone = gap.boundaryState === "complete" ? gap.direction : "missing";
-        const description = sessionGapDescription(gap, priceDigits);
-        const seam = document.createElement("span");
-        seam.className = `timeline-session-gap-seam is-${gap.kind}`;
-        seam.style.transform = `translate3d(${x.toFixed(2)}px, 0, 0) translateX(-50%)`;
-        seam.dataset.sessionGap = gap.id;
-        seam.dataset.tone = tone;
-        seam.title = description;
-        if (markerDensity === "seam") {
-          seam.setAttribute("aria-label", description);
-          seam.setAttribute("role", "note");
-        } else {
-          seam.setAttribute("aria-hidden", "true");
-        }
-        fragment.append(seam);
-
-        if (markerDensity === "seam") continue;
-        const markerHalfWidth = markerDensity === "compact" ? 54 : 84;
-        const clampedX = Math.min(
-          Math.max(markerHalfWidth, x),
-          Math.max(markerHalfWidth, plotWidth - markerHalfWidth),
-        );
-        const marker = document.createElement("span");
-        marker.className = `timeline-session-gap-marker is-${markerDensity}`;
-        marker.style.transform = `translate3d(${clampedX.toFixed(2)}px, 0, 0) translateX(-50%)`;
-        marker.dataset.sessionGap = gap.id;
-        marker.dataset.tone = tone;
-        marker.dataset.boundaryState = gap.boundaryState;
-        marker.title = description;
-        marker.setAttribute("aria-label", description);
-        marker.setAttribute("role", "note");
-        marker.tabIndex = 0;
-
-        const flow = document.createElement("span");
-        flow.className = "session-gap-flow";
-        if (markerDensity === "full") {
-          const closeLabel = document.createElement("small");
-          closeLabel.textContent = "收市";
-          flow.append(closeLabel);
-        }
-        const durationLabel = document.createElement("strong");
-        durationLabel.textContent = `${gap.kind === "weekend" ? "周末" : "休市"} ${formatSessionGapDuration(gap.durationSeconds, true)}`;
-        flow.append(durationLabel);
-        if (markerDensity === "full") {
-          const openLabel = document.createElement("small");
-          openLabel.textContent = "开盘";
-          flow.append(openLabel);
-        }
-        marker.append(flow);
-
-        if (markerDensity === "full") {
-          const detail = document.createElement("em");
-          detail.className = "session-gap-detail";
-          detail.textContent = sessionGapDetail(gap, priceDigits);
-          marker.append(detail);
-        }
-        fragment.append(marker);
-      }
       layer.replaceChildren(fragment);
     });
-  }, [axisTickFormatter, priceDigits]);
+  }, [activeMainSeries, axisTickFormatter, priceDigits]);
 
   useEffect(() => {
     const container = rendererRef.current;
@@ -1129,7 +1399,8 @@ export function MarketChart({
     const backgroundColor = expertAppearance ? "#08151f" : "#ffffff";
     const textColor = expertAppearance ? "#718796" : "#8f98a6";
     const horizontalGridColor = expertAppearance ? "rgba(145, 171, 187, .10)" : "#eef1f5";
-    const verticalGridColor = period.mode === "timeline"
+    const initialTimelineMode = periodRef.current.mode === "timeline";
+    const verticalGridColor = initialTimelineMode
       ? "rgba(0, 0, 0, 0)"
       : expertAppearance ? "rgba(145, 171, 187, .075)" : "#f1f3f7";
     const crosshairColor = expertAppearance ? "#6d8492" : "#a8b2c2";
@@ -1168,49 +1439,46 @@ export function MarketChart({
       },
       timeScale: {
         borderVisible: false,
-        timeVisible: period.aggregation.kind === "fixed",
-        secondsVisible: period.mode === "timeline" && timelineResolutionSeconds < 60,
+        timeVisible: periodRef.current.aggregation.kind === "fixed",
+        secondsVisible: initialTimelineMode && timelineResolutionSecondsRef.current < 60,
         rightOffset: 0,
         rightOffsetPixels: 56,
-        barSpacing: period.mode === "timeline" ? 5 : 10,
-        minBarSpacing: period.mode === "timeline" ? 0.001 : 3,
+        barSpacing: initialTimelineMode ? 5 : 10,
+        minBarSpacing: initialTimelineMode ? 0.001 : 3,
         lockVisibleTimeRangeOnResize: true,
         minimumHeight: 28,
         allowBoldLabels: false,
         tickMarkMaxCharacterLength: 8,
         tickMarkFormatter: axisTickFormatter,
         enableConflation: false,
-        uniformDistribution: true,
+        uniformDistribution: false,
       },
       handleScroll: {
-        mouseWheel: period.mode !== "timeline",
+        mouseWheel: !initialTimelineMode,
         pressedMouseMove: true,
         horzTouchDrag: true,
         vertTouchDrag: false,
       },
       handleScale: {
-        axisPressedMouseMove: true,
-        mouseWheel: period.mode !== "timeline",
-        pinch: true,
+        axisPressedMouseMove: !initialTimelineMode,
+        mouseWheel: !initialTimelineMode,
+        pinch: !initialTimelineMode,
       },
       localization: { locale: "zh-CN", timeFormatter: axisTimeFormatter },
     });
     let candlestickSeries: ISeriesApi<"Candlestick"> | null = null;
-    let areaSeries: ISeriesApi<"Area"> | null = null;
-    if (period.mode === "timeline") {
-      areaSeries = chart.addSeries(AreaSeries, {
+    let timelineSeries: TimelineClockSeriesApi | null = null;
+    if (initialTimelineMode) {
+      timelineSeries = chart.addCustomSeries(new TimelineClockSeries(), {
+        color: expertAppearance ? "#ddb45c" : "#4e7deb",
         lineColor: expertAppearance ? "#ddb45c" : "#4e7deb",
-        lineWidth: 2,
         topColor: expertAppearance ? "rgba(221, 180, 92, .20)" : "rgba(78, 125, 235, .20)",
         bottomColor: expertAppearance ? "rgba(221, 180, 92, .015)" : "rgba(78, 125, 235, .015)",
-        crosshairMarkerVisible: true,
-        crosshairMarkerRadius: 4,
-        crosshairMarkerBorderColor: backgroundColor,
-        crosshairMarkerBackgroundColor: expertAppearance ? "#ddb45c" : "#4e7deb",
+        lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: false,
       });
-      areaSeriesRef.current = areaSeries;
+      timelineSeriesRef.current = timelineSeries;
     } else {
       candlestickSeries = chart.addSeries(CandlestickSeries, {
         upColor: UP_COLOR,
@@ -1225,7 +1493,7 @@ export function MarketChart({
       candlestickSeriesRef.current = candlestickSeries;
     }
     chartRef.current = chart;
-    const mainSeries = areaSeries ?? candlestickSeries;
+    const mainSeries = timelineSeries ?? candlestickSeries;
     if (mainSeries) eventMarkersRef.current = createSeriesMarkers(mainSeries, []);
     scheduleLiveMarker();
     schedulePaneMeasurement();
@@ -1236,22 +1504,28 @@ export function MarketChart({
         scheduleHoverChange(null);
         return;
       }
-      if (areaSeries) {
-        const item = parameter.seriesData.get(areaSeries);
-        if (!item || !("value" in item)) {
+      if (timelineSeries) {
+        const item = parameter.seriesData.get(timelineSeries);
+        if (!item || !isTimelineClockBucket(item)) {
           scheduleHoverChange(null);
           return;
         }
-        const chartTime = Number(parameter.time);
-        const actualTime = actualTimeAtProjectedPoint(chartTime)
-          ?? actualTimeForTimelineChartTime(timelineLayoutRef.current, chartTime)
-          ?? chartTime;
+        const bucketX = chart.timeScale().timeToCoordinate(item.time);
+        const pointerX = parameter.point?.x;
+        const barSpacing = Math.max(0.000_001, chart.timeScale().options().barSpacing);
+        const fraction = bucketX === null || pointerX === undefined
+          ? 0
+          : Math.max(0, Math.min(1, (Number(pointerX) - Number(bucketX)) / barSpacing));
+        const sample = nearestTimelineClockSample(
+          item,
+          Number(item.time) + fraction * TIMELINE_CLOCK_BUCKET_SECONDS,
+        );
         scheduleHoverChange({
-          time: actualTime,
-          open: item.value,
-          high: item.value,
-          low: item.value,
-          close: item.value,
+          time: sample.actualTime,
+          open: sample.value,
+          high: sample.value,
+          low: sample.value,
+          close: sample.value,
         });
       } else if (candlestickSeries) {
         const item = parameter.seriesData.get(candlestickSeries);
@@ -1297,7 +1571,10 @@ export function MarketChart({
           range,
         );
         if (windowState) {
-          timelineViewportDayCountRef.current = windowState.dayCount;
+          timelineViewportSpanRef.current = timelineLogicalSpanAtRange(
+            timelineLogicalDayRangesRef.current,
+            range,
+          ) ?? timelineViewportSpanRef.current;
           timelineViewportEndKeyRef.current = windowState.endKey;
           rendererRef.current?.setAttribute(
             "data-timeline-visible-days",
@@ -1313,7 +1590,14 @@ export function MarketChart({
         historyLoadingRef.current,
         window.performance.now() <= historyInteractionUntilRef.current,
       )) {
-        requestOlderHistoryRef.current();
+        if (
+          activePeriod.mode === "timeline"
+          && timelineHasUnmaterializedHistoryRef.current
+        ) {
+          ensureTimelineMaterializedDays(timelineMaterializedDayCountRef.current + 1);
+        } else {
+          requestOlderHistoryRef.current();
+        }
       }
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleLogicalRange);
@@ -1341,33 +1625,44 @@ export function MarketChart({
       ) {
         event.preventDefault();
         event.stopPropagation();
-        const now = window.performance.now();
-        if (now - timelineWheelHandledAtRef.current < 140) return;
         const ranges = timelineLogicalDayRangesRef.current;
         if (ranges.length === 0) return;
         const visibleRange = chart.timeScale().getVisibleLogicalRange();
         const currentWindow = timelineViewportManagedRef.current
           ? {
-            dayCount: timelineViewportDayCountRef.current,
             endKey: timelineViewportEndKeyRef.current ?? ranges[ranges.length - 1].key,
           }
           : timelineDayWindowAtLogicalRange(ranges, visibleRange);
-        const currentDayCount = Math.max(1, currentWindow?.dayCount ?? 1);
-        const nextDayCount = event.deltaY > 0
-          ? currentDayCount + 1
-          : Math.max(1, currentDayCount - 1);
-        if (nextDayCount === currentDayCount) return;
+        const currentDaySpan = timelineViewportManagedRef.current
+          ? timelineViewportSpanRef.current
+          : timelineLogicalSpanAtRange(ranges, visibleRange) ?? 1;
+        const requestedDaySpan = timelineZoomSpanAfterWheel(
+          currentDaySpan,
+          event.deltaY,
+          event.deltaMode,
+        );
         const endKey = followingRef.current
           ? ranges[ranges.length - 1].key
           : currentWindow?.endKey;
-        timelineWheelHandledAtRef.current = now;
-        applyTimelineDayViewport(chart, nextDayCount, endKey);
+        const requestedEndIndex = endKey
+          ? ranges.findIndex((range) => range.key === endKey)
+          : -1;
+        const endIndex = requestedEndIndex >= 0 ? requestedEndIndex : ranges.length - 1;
+        const availableDaySpan = endIndex + 1;
+        const nextDaySpan = Math.min(requestedDaySpan, availableDaySpan + 1);
+        if (Math.abs(nextDaySpan - currentDaySpan) > 1e-4) {
+          applyTimelineDayViewport(chart, nextDaySpan, endKey);
+        }
         if (
           event.deltaY > 0
-          && nextDayCount > ranges.length
+          && nextDaySpan > availableDaySpan
           && !historyLoadingRef.current
         ) {
-          requestOlderHistoryRef.current();
+          if (timelineHasUnmaterializedHistoryRef.current) {
+            ensureTimelineMaterializedDays(Math.ceil(nextDaySpan));
+          } else {
+            requestOlderHistoryRef.current();
+          }
         }
         scheduleLiveMarker();
         refreshTimelineDecorations();
@@ -1428,28 +1723,31 @@ export function MarketChart({
       chart.remove();
       chartRef.current = null;
       candlestickSeriesRef.current = null;
-      areaSeriesRef.current = null;
+      timelineSeriesRef.current = null;
       referenceLineRef.current = null;
       eventMarkersRef.current = null;
       drawingLayerRuntimeRef.current.clear();
       indicatorRuntimeRef.current.clear();
       strategyPriceLinesRef.current = [];
+      strategyPriceLineOwnerRef.current = null;
       pendingHoverRef.current = null;
       lastHoverRef.current = null;
       dataLengthRef.current = 0;
       latestLogicalIndexRef.current = -1;
       previousDataLengthRef.current = 0;
-      previousSeriesDataLengthRef.current = 0;
       previousPeriodRef.current = null;
       previousFirstTimeRef.current = null;
       previousLastTimeRef.current = null;
       previousChartDataRef.current = null;
-      previousTimelineDataRef.current = null;
+      timelineSeriesRenderStateRef.current = null;
+      candleSeriesRenderStateRef.current = null;
       timelineLogicalDayRangesRef.current = [];
-      timelineViewportDayCountRef.current = 1;
+      timelineViewportSpanRef.current = 1;
       timelineViewportEndKeyRef.current = null;
       timelineViewportManagedRef.current = true;
       rendererRef.current?.removeAttribute("data-timeline-visible-days");
+      rendererRef.current?.removeAttribute("data-timeline-window-start");
+      rendererRef.current?.removeAttribute("data-timeline-window-end");
     };
   }, [
     applyTimelineDayViewport,
@@ -1457,6 +1755,7 @@ export function MarketChart({
     appearance,
     axisTickFormatter,
     axisTimeFormatter,
+    ensureTimelineMaterializedDays,
     period.mode,
     refreshExpertDecorations,
     refreshTimelineDecorations,
@@ -1486,14 +1785,31 @@ export function MarketChart({
         minBarSpacing: period.mode === "timeline" ? 0.001 : 3,
         tickMarkFormatter: axisTickFormatter,
         enableConflation: false,
-        uniformDistribution: true,
+        uniformDistribution: false,
+      },
+      handleScroll: {
+        mouseWheel: period.mode !== "timeline",
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        axisPressedMouseMove: period.mode !== "timeline",
+        mouseWheel: period.mode !== "timeline",
+        pinch: period.mode !== "timeline",
       },
       localization: { locale: "zh-CN", timeFormatter: axisTimeFormatter },
     });
+    candlestickSeriesRef.current?.applyOptions({ visible: period.mode !== "timeline" });
+    timelineSeriesRef.current?.applyOptions({ visible: period.mode === "timeline" });
+    eventMarkersRef.current?.detach();
+    const series = activeMainSeries();
+    eventMarkersRef.current = series ? createSeriesMarkers(series, []) : null;
     refreshTimelineDecorations();
     refreshExpertDecorations();
   }, [
     appearance,
+    activeMainSeries,
     axisTickFormatter,
     axisTimeFormatter,
     period.id,
@@ -1522,23 +1838,26 @@ export function MarketChart({
   useEffect(() => {
     const chart = chartRef.current;
     const candlestickSeries = candlestickSeriesRef.current;
-    const areaSeries = areaSeriesRef.current;
-    if (!chart || (!candlestickSeries && !areaSeries)) return;
+    const timelineSeries = timelineSeriesRef.current;
+    if (!chart || (!candlestickSeries && !timelineSeries)) return;
 
     const previousPeriod = previousPeriodRef.current;
     const previousLastTime = previousLastTimeRef.current;
     const previousFirstTime = previousFirstTimeRef.current;
     const visibleRangeBeforeUpdate = chart.timeScale().getVisibleLogicalRange();
     const previousDataLength = previousDataLengthRef.current;
-    const previousSeriesDataLength = previousSeriesDataLengthRef.current;
-    const activeSeries = period.mode === "timeline" ? timelineData : chartData;
+    const activeSeries = chartData;
     const activeDataLength = period.mode === "timeline"
       ? visibleTimelineSeriesCount
       : visibleChartDataCount;
-    const logicalDataLength = activeDataLength;
-    const nextFirstTime = activeDataLength > 0 ? Number(activeSeries[0]?.time) : Number.NaN;
-    const timelineLastTime = activeDataLength > 0
-      ? timelineData[activeDataLength - 1]?.time
+    const logicalDataLength = period.mode === "timeline"
+      ? visibleTimelineLogicalCount
+      : activeDataLength;
+    const nextFirstTime = period.mode === "timeline"
+      ? timelineLogicalDayRanges[0]?.chartFrom ?? Number.NaN
+      : activeDataLength > 0 ? Number(activeSeries[0]?.time) : Number.NaN;
+    const timelineLastTime = visibleTimelineCount > 0
+      ? projectedTimelineData[visibleTimelineCount - 1]?.time
       : null;
     const nextLastTime = period.mode === "timeline"
       ? typeof timelineLastTime === "number" ? timelineLastTime : null
@@ -1548,46 +1867,95 @@ export function MarketChart({
       : activeDataLength - 1;
     dataLengthRef.current = logicalDataLength;
     latestLogicalIndexRef.current = nextLatestLogicalIndex;
-    const sameSeriesData = period.mode === "timeline"
-      ? previousTimelineDataRef.current === timelineData
-      : previousChartDataRef.current === chartData;
-    const canAppendIncrementally = previousPeriod === period.id
-      && sameSeriesData
-      && previousSeriesDataLength > 0
-      && activeDataLength >= previousSeriesDataLength
-      && activeDataLength <= previousSeriesDataLength + MAX_INCREMENTAL_REPLAY_POINTS
+    const previousCandleState = candleSeriesRenderStateRef.current;
+    const previousCandleDataLength = previousCandleState?.dataLength ?? 0;
+    const sameCandleSeriesData = previousCandleState?.data === chartData;
+    const canAppendCandleIncrementally = period.mode !== "timeline"
+      && sameCandleSeriesData
+      && previousCandleDataLength > 0
+      && activeDataLength >= previousCandleDataLength
+      && activeDataLength <= previousCandleDataLength + MAX_INCREMENTAL_REPLAY_POINTS
       && previousLastTime !== null
       && nextLastTime !== null
       && nextLastTime >= previousLastTime;
-    const timelineLastPoint = activeDataLength > 0 ? timelineData[activeDataLength - 1] : null;
     const candleLastPoint = activeDataLength > 0 ? chartData[activeDataLength - 1] : null;
-    if (areaSeries) {
-      if (canAppendIncrementally && timelineLastPoint) {
-        const firstUpdate = activeDataLength === previousSeriesDataLength
-          ? activeDataLength - 1
-          : previousSeriesDataLength;
-        for (let index = firstUpdate; index < activeDataLength; index += 1) {
-          areaSeries.update(timelineData[index]);
+    if (period.mode === "timeline" && timelineSeries) {
+      const nextTimelineState: TimelineSeriesRenderState = {
+        domain: timelineClockDomain,
+        pointCount: visibleTimelineCount,
+        dataLength: visibleTimelineSeriesCount,
+        periodId: period.id,
+      };
+      const previousTimelineState = timelineSeriesRenderStateRef.current;
+      const sharedPrefix = previousTimelineState !== null
+        && previousTimelineState.periodId === period.id
+        && (
+          previousTimelineState.domain === timelineClockDomain
+          || timelineClockDomainsSharePrefix(
+            previousTimelineState.domain,
+            timelineClockDomain,
+            Math.min(previousTimelineState.pointCount, visibleTimelineCount),
+          )
+        );
+      const pointDelta = previousTimelineState === null
+        ? Number.POSITIVE_INFINITY
+        : Math.abs(visibleTimelineCount - previousTimelineState.pointCount);
+      if (!previousTimelineState || !sharedPrefix || pointDelta > MAX_INCREMENTAL_REPLAY_POINTS) {
+        timelineSeries.setData(materializeTimelineClockData(
+          timelineClockDomain,
+          visibleTimelineCount,
+        ));
+      } else {
+        if (visibleTimelineSeriesCount < previousTimelineState.dataLength) {
+          timelineSeries.pop(previousTimelineState.dataLength - visibleTimelineSeriesCount);
         }
-      } else areaSeries.setData(
-        activeDataLength === timelineData.length
-          ? timelineData
-          : timelineData.slice(0, activeDataLength),
-      );
+        if (visibleTimelineSeriesCount > previousTimelineState.dataLength) {
+          for (
+            let dataIndex = previousTimelineState.dataLength;
+            dataIndex < visibleTimelineSeriesCount;
+            dataIndex += 1
+          ) {
+            timelineSeries.update(timelineClockDataItemAt(
+              timelineClockDomain,
+              dataIndex,
+              visibleTimelineCount,
+            ));
+          }
+        }
+        const changedIndexes = changedTimelineClockDataIndexes(
+          timelineClockDomain,
+          previousTimelineState.pointCount,
+          visibleTimelineCount,
+        );
+        for (const dataIndex of changedIndexes) {
+          if (dataIndex >= visibleTimelineSeriesCount) continue;
+          timelineSeries.update(timelineClockDataItemAt(
+            timelineClockDomain,
+            dataIndex,
+            visibleTimelineCount,
+          ), true);
+        }
+      }
+      timelineSeriesRenderStateRef.current = nextTimelineState;
     }
-    if (candlestickSeries) {
-      if (canAppendIncrementally && candleLastPoint) {
-        const firstUpdate = activeDataLength === previousSeriesDataLength
+    if (period.mode !== "timeline" && candlestickSeries) {
+      const candleDataAlreadyCurrent = sameCandleSeriesData
+        && previousCandleDataLength === activeDataLength;
+      if (!candleDataAlreadyCurrent && canAppendCandleIncrementally && candleLastPoint) {
+        const firstUpdate = activeDataLength === previousCandleDataLength
           ? activeDataLength - 1
-          : previousSeriesDataLength;
+          : previousCandleDataLength;
         for (let index = firstUpdate; index < activeDataLength; index += 1) {
           candlestickSeries.update(chartData[index]);
         }
-      } else candlestickSeries.setData(
-        activeDataLength === chartData.length
-          ? chartData
-          : chartData.slice(0, activeDataLength),
-      );
+      } else if (!candleDataAlreadyCurrent) {
+        candlestickSeries.setData(
+          activeDataLength === chartData.length
+            ? chartData
+            : chartData.slice(0, activeDataLength),
+        );
+      }
+      candleSeriesRenderStateRef.current = { data: chartData, dataLength: activeDataLength };
     }
 
     const firstDataArrival = previousDataLength === 0 && logicalDataLength > 0;
@@ -1596,7 +1964,13 @@ export function MarketChart({
       && Number.isFinite(nextFirstTime)
       && nextFirstTime < previousFirstTime
     )
-      ? activeSeries.findIndex((point) => Number(point.time) === previousFirstTime)
+      ? period.mode === "timeline"
+        ? Math.max(
+          0,
+          (timelineLogicalDayRanges.find((range) => range.chartFrom === previousFirstTime)?.from ?? -0.5)
+            + 0.5,
+        )
+        : activeSeries.findIndex((point) => Number(point.time) === previousFirstTime)
       : 0;
     const prependedCount = prependedPointCount(
       previousFirstTime,
@@ -1612,7 +1986,7 @@ export function MarketChart({
       && logicalDataLength > 0
       && (firstDataArrival || previousPeriod === null || previousPeriod !== period.id);
     if (resetTimelineViewport) {
-      timelineViewportDayCountRef.current = 1;
+      timelineViewportSpanRef.current = 1;
       timelineViewportEndKeyRef.current = null;
       timelineViewportManagedRef.current = true;
     }
@@ -1622,13 +1996,12 @@ export function MarketChart({
       && (
         resetTimelineViewport
         || historyWasPrepended
-        || tailMovedBackward
         || logicalDataLength !== previousDataLength
       );
     const timelineViewportHandled = refreshManagedTimelineViewport
       ? applyTimelineDayViewport(
         chart,
-        timelineViewportDayCountRef.current,
+        timelineViewportSpanRef.current,
         followingRef.current || resetTimelineViewport ? null : timelineViewportEndKeyRef.current,
       ) !== null
       : false;
@@ -1646,7 +2019,7 @@ export function MarketChart({
     } else if (historyWasPrepended && followingRef.current) {
       scrollToLatest(chart);
       updateFollowing(true);
-    } else if (tailMovedBackward && logicalDataLength > 0) {
+    } else if (tailMovedBackward && logicalDataLength > 0 && period.mode !== "timeline") {
       scrollToLatest(chart);
       updateFollowing(true);
     } else if (
@@ -1661,7 +2034,8 @@ export function MarketChart({
       followingRef.current &&
       previousLastTime !== null &&
       nextLastTime !== null &&
-      nextLastTime > previousLastTime
+      nextLastTime > previousLastTime &&
+      period.mode !== "timeline"
     ) {
       returningRef.current = true;
       scrollToLatest(chart);
@@ -1675,9 +2049,7 @@ export function MarketChart({
     previousFirstTimeRef.current = Number.isFinite(nextFirstTime) ? nextFirstTime : null;
     previousLastTimeRef.current = nextLastTime;
     previousDataLengthRef.current = logicalDataLength;
-    previousSeriesDataLengthRef.current = activeDataLength;
     previousChartDataRef.current = chartData;
-    previousTimelineDataRef.current = timelineData;
     scheduleLiveMarker();
     refreshTimelineDecorations();
     refreshExpertDecorations();
@@ -1693,14 +2065,18 @@ export function MarketChart({
     refreshTimelineDecorations,
     scheduleLiveMarker,
     scrollToLatest,
-    timelineData,
+    projectedTimelineData,
+    timelineClockDomain,
+    timelineLogicalDayRanges,
     updateFollowing,
     visibleChartDataCount,
+    visibleTimelineLogicalCount,
+    visibleTimelineCount,
     visibleTimelineSeriesCount,
   ]);
 
   useEffect(() => {
-    const series = areaSeriesRef.current;
+    const series = timelineSeriesRef.current;
     if (!series) return;
     if (referencePrice === null || !Number.isFinite(referencePrice)) {
       if (referenceLineRef.current) series.removePriceLine(referenceLineRef.current);
@@ -1744,7 +2120,9 @@ export function MarketChart({
           ? "FOMC"
           : event.category === "employment"
             ? "非农"
-            : event.category === "central-bank-gold" ? "央行金" : "事件";
+            : event.category === "inflation"
+              ? "CPI"
+              : event.category === "central-bank-gold" ? "央行金" : "事件";
         return {
           time: chartTime as Time,
           position: "aboveBar",
@@ -1757,12 +2135,15 @@ export function MarketChart({
       .filter((marker): marker is SeriesMarker<Time> => marker !== null)
       .sort((left, right) => Number(left.time) - Number(right.time));
     plugin.setMarkers(markers);
-  }, [chartData, displayTimeZone, eventMarkers, nearestChartTimeForActual, period.id, timelineData]);
+  }, [chartData, displayTimeZone, eventMarkers, nearestChartTimeForActual, period.id, timelineClockDomain]);
 
   useEffect(() => {
-    const series = candlestickSeriesRef.current ?? areaSeriesRef.current;
+    const series = activeMainSeries();
     if (!series) return;
-    for (const line of strategyPriceLinesRef.current) series.removePriceLine(line);
+    const previousOwner = strategyPriceLineOwnerRef.current;
+    if (previousOwner) {
+      for (const line of strategyPriceLinesRef.current) previousOwner.removePriceLine(line);
+    }
     strategyPriceLinesRef.current = strategyLevels.map((level) => series.createPriceLine({
       price: level.price,
       color: level.tone === "gold"
@@ -1777,8 +2158,9 @@ export function MarketChart({
       axisLabelVisible: true,
       title: level.label,
     }));
+    strategyPriceLineOwnerRef.current = series;
     scheduleLiveMarker();
-  }, [displayTimeZone, period.id, scheduleLiveMarker, strategyLevels]);
+  }, [activeMainSeries, displayTimeZone, period.id, scheduleLiveMarker, strategyLevels]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1827,26 +2209,25 @@ export function MarketChart({
       if (!Number.isFinite(actualTime)) return null;
       if (period.mode !== "timeline") return projectTimeForChinaAxis(actualTime) as Time;
       const projected = projectTimelineTime(timelineLayout, actualTime);
-      return projected === null ? null : projected as Time;
+      const bucketTime = projected === null
+        ? null
+        : timelineClockBucketTime(timelineLayout, projected);
+      return bucketTime === null ? null : bucketTime as Time;
     };
     const gapTimeAt = (
       view: ExpertIndicatorSeriesView,
       sourceNextIndex: number,
     ): Time | null => {
       const gap = candleSeriesGaps.find((candidate) => candidate.nextIndex === sourceNextIndex);
-      if (!gap) return null;
+      // Scheduled closures are compressed to zero width in every chart mode.
+      // Only an unexpected in-session data hole gets a whitespace separator.
+      if (!gap || gap.kind !== "missing-trade") return null;
       if (period.mode !== "timeline") return gap.time;
-      if (gap.kind === "missing-trade") {
-        const projected = projectTimelineTime(timelineLayout, gap.actualTime);
-        return projected === null ? null : projected as Time;
-      }
-      const previousActualTime = view.bars[sourceNextIndex - 1]?.time;
-      const nextActualTime = view.bars[sourceNextIndex]?.time;
-      if (!Number.isFinite(previousActualTime) || !Number.isFinite(nextActualTime)) return null;
-      const previousTime = projectTimelineTime(timelineLayout, previousActualTime);
-      const nextTime = projectTimelineTime(timelineLayout, nextActualTime);
-      if (previousTime === null || nextTime === null || nextTime <= previousTime) return null;
-      return (previousTime + (nextTime - previousTime) / 2) as Time;
+      const projected = projectTimelineTime(timelineLayout, gap.actualTime);
+      const bucketTime = projected === null
+        ? null
+        : timelineClockBucketTime(timelineLayout, projected);
+      return bucketTime === null ? null : bucketTime as Time;
     };
 
     const setFullData = (runtime: IndicatorRuntime, view: ExpertIndicatorSeriesView) => {
@@ -1989,16 +2370,16 @@ export function MarketChart({
 
   useEffect(() => {
     const chart = chartRef.current;
-    const series = candlestickSeriesRef.current ?? areaSeriesRef.current;
+    const series = activeMainSeries();
     if (!chart || !series) return;
     for (const runtime of drawingLayerRuntimeRef.current.values()) {
       for (const value of runtime.series) chart.removeSeries(value);
-      for (const value of runtime.priceLines) series.removePriceLine(value);
+      for (const value of runtime.priceLines) runtime.priceLineOwner.removePriceLine(value);
     }
     drawingLayerRuntimeRef.current.clear();
     for (const layer of drawingLayers) {
       if (!layer.definition.visible) continue;
-      const runtime: DrawingLayerRuntime = { series: [], priceLines: [] };
+      const runtime: DrawingLayerRuntime = { series: [], priceLines: [], priceLineOwner: series };
       for (const drawing of layer.definition.drawings) {
         if (drawing.type === "horizontal") {
           runtime.priceLines.push(series.createPriceLine({
@@ -2034,11 +2415,11 @@ export function MarketChart({
     refreshExpertDecorations();
   // The drawing signature owns content changes; data-range changes cover replay and history prepend.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayTimeZone, drawingDataRangeKey, drawingLayerSignature, nearestChartTimeForActual, period.id, refreshExpertDecorations]);
+  }, [activeMainSeries, displayTimeZone, drawingDataRangeKey, drawingLayerSignature, nearestChartTimeForActual, period.id, refreshExpertDecorations]);
 
   useEffect(() => {
     refreshExpertDecorations();
-  }, [refreshExpertDecorations, sessionBands, valueZones]);
+  }, [eventMarkers, openingGapVisible, refreshExpertDecorations, sessionBands, timelineSessionGaps, valueZones]);
 
   useEffect(() => {
     const refreshCountdown = () => {
@@ -2072,7 +2453,7 @@ export function MarketChart({
 
   const pointerDrawingLocation = useCallback((event: ReactPointerEvent<HTMLDivElement>): PointerDrawingLocation | null => {
     const chart = chartRef.current;
-    const series = candlestickSeriesRef.current ?? areaSeriesRef.current;
+    const series = activeMainSeries();
     if (!chart || !series) return null;
     const bounds = event.currentTarget.getBoundingClientRect();
     const x = event.clientX - bounds.left;
@@ -2121,7 +2502,7 @@ export function MarketChart({
     }
 
     return { point: { time: actualTime, price }, x, y, snapped: false };
-  }, [actualTimeForChartCoordinate, bars, candleTimes, projectedTimelineData, visibleCandleCount, visibleTimelineCount]);
+  }, [activeMainSeries, actualTimeForChartCoordinate, bars, candleTimes, projectedTimelineData, visibleCandleCount, visibleTimelineCount]);
 
   const beginDrawing = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!drawingToolRef.current) return;
@@ -2227,6 +2608,10 @@ export function MarketChart({
       data-indicator-pane-count={visibleIndicatorLayers.length}
       data-timeline-available-days={period.mode === "timeline" ? timelineLogicalDayRanges.length : undefined}
       data-timeline-point-count={period.mode === "timeline" ? visibleTimelineCount : undefined}
+      data-timeline-materialized-day-limit={period.mode === "timeline" ? timelineMaterializedDayCount : undefined}
+      data-timeline-has-unmaterialized-history={period.mode === "timeline"
+        ? String(timelineHasUnmaterializedHistory)
+        : undefined}
     >
       <div className="chart-renderer" ref={rendererRef} />
       <div
@@ -2274,7 +2659,7 @@ export function MarketChart({
           ) : null}
         </div>
       ) : null}
-      {(period.mode === "timeline" ? timelineData.length > 0 : latestBar) && livePrice !== null ? (
+      {(period.mode === "timeline" ? visibleTimelineSeriesCount > 0 : latestBar) && livePrice !== null ? (
         <div
           ref={liveLayerRef}
           className={`live-price-layer ${marketPhase === "closed" || replayMode ? "is-market-closed" : ""}`}

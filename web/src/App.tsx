@@ -34,14 +34,13 @@ import {
   resizeIndicatorLayer,
   type ChartLayerWorkspace,
 } from "./chartLayers";
-import { chartPeriodById, type ChartPeriodId } from "./chartPeriods";
+import { barDataPeriodId, chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import { formatBeijingClock, formatChartTimeLabel, tradingDayIdentity } from "./chartTimeAxis";
 import {
   buildExpertIndicatorSeriesAt,
   EXPERT_INDICATOR_HISTORY_VERSION,
 } from "./expertAnalysis";
 import { EXPERT_GOLD_EVENTS_2026 } from "./expertEvents";
-import { buildExpertSessionBandsForRange } from "./expertSessions";
 import { historyBatchMinutes } from "./historyLoading";
 import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
 import { ExpertModeWorkspace } from "./ExpertModeWorkspace";
@@ -300,6 +299,7 @@ export default function App() {
   const [loadingCandles, setLoadingCandles] = useState(true);
   const [historySyncing, setHistorySyncing] = useState(false);
   const [timelineHistorySyncing, setTimelineHistorySyncing] = useState(false);
+  const [timelineHistoryReady, setTimelineHistoryReady] = useState(false);
   const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "waiting" | "unavailable">("connecting");
   const candleRequestRef = useRef(0);
   const candlesRef = useRef<Candle[]>([]);
@@ -307,6 +307,7 @@ export default function App() {
   const historyLoadInFlightRef = useRef(false);
   const barRefreshInFlightRef = useRef(false);
   const barRefreshRequestedRef = useRef(false);
+  const timelineHistoryLoadedKeyRef = useRef<string | null>(null);
   candlesRef.current = candles;
   const watchlistQuoteStreamsRef = useRef(
     new Map<string, { sourceId: SourceId; stop: () => void }>(),
@@ -349,6 +350,10 @@ export default function App() {
   }, [persistedLayerWorkspace, selectedCode]);
   const selectedSource = instrumentSources[selectedCode] ?? "jin10_client";
   const selectedPeriod = chartPeriodById(periodId);
+  const selectedBarPeriodId = barDataPeriodId(selectedPeriod);
+  const chartHistoryLoading = historySyncing
+    || timelineHistorySyncing
+    || (selectedPeriod.mode === "timeline" && !timelineHistoryReady);
   const sourceById = useMemo(
     () => new Map(sources.map((source) => [source.source_id, source])),
     [sources],
@@ -400,7 +405,7 @@ export default function App() {
       const recent = await marketApi.barPage(
         selectedCode,
         selectedSource,
-        selectedPeriod.id,
+        selectedBarPeriodId,
       );
       if (requestId !== candleRequestRef.current) return;
       setCandles(recent.items);
@@ -426,7 +431,7 @@ export default function App() {
             page = await marketApi.barPage(
               selectedCode,
               selectedSource,
-              selectedPeriod.id,
+              selectedBarPeriodId,
               cursor,
               5_000,
             );
@@ -460,7 +465,7 @@ export default function App() {
     } finally {
       if (requestId === candleRequestRef.current) setLoadingCandles(false);
     }
-  }, [selectedCode, selectedPeriod.id, selectedSource]);
+  }, [selectedBarPeriodId, selectedCode, selectedSource]);
 
   const loadOlderCandles = useCallback(async () => {
     if (!selectedInstrument.history_available || historyLoadInFlightRef.current) return;
@@ -478,7 +483,7 @@ export default function App() {
       const localPage = await marketApi.barPage(
         selectedCode,
         selectedSource,
-        selectedPeriod.id,
+        selectedBarPeriodId,
         before,
       );
       if (requestId !== candleRequestRef.current) return;
@@ -502,7 +507,7 @@ export default function App() {
       const page = await marketApi.barPage(
         selectedCode,
         selectedSource,
-        selectedPeriod.id,
+        selectedBarPeriodId,
         before,
       );
       if (requestId !== candleRequestRef.current) return;
@@ -519,7 +524,7 @@ export default function App() {
         setHistorySyncing(false);
       }
     }
-  }, [selectedCode, selectedInstrument.history_available, selectedPeriod, selectedSource]);
+  }, [selectedBarPeriodId, selectedCode, selectedInstrument.history_available, selectedPeriod, selectedSource]);
 
   const refreshCandles = useCallback(async () => {
     if (barRefreshInFlightRef.current) {
@@ -535,7 +540,7 @@ export default function App() {
           const recent = await marketApi.barPage(
             selectedCode,
             selectedSource,
-            selectedPeriod.id,
+            selectedBarPeriodId,
           );
           if (requestId !== candleRequestRef.current) return;
           setCandles((current) => mergeCandleRows(current, recent.items));
@@ -547,7 +552,7 @@ export default function App() {
     } finally {
       barRefreshInFlightRef.current = false;
     }
-  }, [selectedCode, selectedPeriod.id, selectedSource]);
+  }, [selectedBarPeriodId, selectedCode, selectedSource]);
 
   useEffect(() => {
     void Promise.all([marketApi.instruments(), marketApi.watchlist()])
@@ -786,13 +791,24 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
-    setTimelineSamples([]);
     if (selectedPeriod.mode !== "timeline") {
       setTimelineHistorySyncing(false);
       return () => {
         disposed = true;
       };
     }
+    const historyKey = `${selectedCode}:${selectedSource}`;
+    if (timelineHistoryLoadedKeyRef.current === historyKey) {
+      setTimelineHistoryReady(true);
+      setTimelineHistorySyncing(false);
+      return () => {
+        disposed = true;
+      };
+    }
+    setTimelineSamples([]);
+    // Persisted one-minute Bars are already a complete, source-bound fallback.
+    // Raw quote events enrich that line in the background and must not block it.
+    setTimelineHistoryReady(true);
     setTimelineHistorySyncing(true);
     void (async () => {
       let cursor: number | undefined;
@@ -806,6 +822,7 @@ export default function App() {
         pendingPages = [];
         startTransition(() => {
           setTimelineSamples((current) => mergeTimelineSamples(batch, current));
+          setTimelineHistoryReady(true);
         });
       };
       while (!disposed) {
@@ -828,18 +845,18 @@ export default function App() {
         const oldestDayKey = Number.isFinite(oldestObservedTime)
           ? tradingDayIdentity(oldestObservedTime, selectedInstrument.market_schedule)
           : "";
+        pendingPages.push(samples);
         if (firstPage) {
-          setTimelineSamples((current) => mergeTimelineSamples(samples, current));
           firstPage = false;
           frontierDayKey = oldestDayKey || null;
-        } else {
-          pendingPages.push(samples);
-          if (oldestDayKey && frontierDayKey && oldestDayKey !== frontierDayKey) {
-            publishPendingPages();
-            frontierDayKey = oldestDayKey;
-          } else if (oldestDayKey && !frontierDayKey) {
-            frontierDayKey = oldestDayKey;
-          }
+        } else if (oldestDayKey && frontierDayKey && oldestDayKey !== frontierDayKey) {
+          // A raw-event page is count-based and can contain only the tail of a
+          // busy session. Publish after crossing the trading-day boundary so
+          // the initial one-day viewport never presents a partial day as full.
+          publishPendingPages();
+          frontierDayKey = oldestDayKey;
+        } else if (oldestDayKey && !frontierDayKey) {
+          frontierDayKey = oldestDayKey;
         }
         if (!page.has_more || page.next_cursor === null) break;
         if (seenCursors.has(page.next_cursor)) {
@@ -850,12 +867,16 @@ export default function App() {
       }
       if (disposed || selectedCodeRef.current !== selectedCode) return;
       publishPendingPages();
+      timelineHistoryLoadedKeyRef.current = historyKey;
       startTransition(() => {
         setTimelineHistorySyncing(false);
       });
     })().catch(() => {
       // Persisted samples enrich the timeline; the live raw-event stream remains independent.
-      if (!disposed) setTimelineHistorySyncing(false);
+      if (!disposed) {
+        setTimelineHistoryReady(true);
+        setTimelineHistorySyncing(false);
+      }
     });
     return () => {
       disposed = true;
@@ -1090,43 +1111,6 @@ export default function App() {
     ),
     [candles, sharedIndicatorHistoryKey],
   );
-  const sharedLayerRange = useMemo(() => {
-    const values: number[] = [];
-    const appendIso = (value: string | undefined) => {
-      if (!value) return;
-      const epoch = Date.parse(value) / 1_000;
-      if (Number.isFinite(epoch)) values.push(epoch);
-    };
-    appendIso(candles[0]?.open_time);
-    appendIso(candles.at(-1)?.open_time);
-    if (selectedPeriod.mode === "timeline") {
-      const first = timelineSamples[0];
-      const last = timelineSamples.at(-1);
-      if (first) values.push(first.observedTime ?? first.time);
-      if (last) values.push(last.observedTime ?? last.time);
-    }
-    const finite = values.filter(Number.isFinite);
-    if (finite.length === 0) return null;
-    const secondsPerDay = 24 * 60 * 60;
-    const minimum = Math.min(...finite);
-    const maximum = Math.max(...finite);
-    return {
-      start: Math.floor(minimum / secondsPerDay) * secondsPerDay,
-      end: (Math.floor(maximum / secondsPerDay) + 1) * secondsPerDay,
-    };
-  }, [candles, selectedPeriod.mode, timelineSamples]);
-  const sharedLayerStart = sharedLayerRange?.start ?? null;
-  const sharedLayerEnd = sharedLayerRange?.end ?? null;
-  const sharedSessionBands = useMemo(
-    () => sharedLayerStart === null || sharedLayerEnd === null
-      ? []
-      : buildExpertSessionBandsForRange(
-        sharedLayerStart,
-        sharedLayerEnd,
-        selectedInstrument.market_schedule,
-      ),
-    [selectedInstrument.market_schedule, sharedLayerEnd, sharedLayerStart],
-  );
   const sharedEventMarkers = useMemo(
     () => selectedCode === "XAUUSD" ? EXPERT_GOLD_EVENTS_2026 : [],
     [selectedCode],
@@ -1134,12 +1118,14 @@ export default function App() {
   const normalChartLayers = useMemo(
     () => buildChartLayers(layerWorkspace, {
       indicatorSeries: sharedIndicatorSeries,
-      sessionBands: sharedSessionBands,
+      // Capital-dominance bands are an opt-in expert strategy, never a
+      // permanent market-open decoration in the shared price workspace.
+      sessionBands: [],
       eventMarkers: sharedEventMarkers,
       priceLevels: [],
       valueZones: [],
     }),
-    [layerWorkspace, sharedEventMarkers, sharedIndicatorSeries, sharedSessionBands],
+    [layerWorkspace, sharedEventMarkers, sharedIndicatorSeries],
   );
 
   const quoteTrend = priceQuote
@@ -1178,7 +1164,7 @@ export default function App() {
         liveIndicatorSeries={sharedIndicatorSeries}
         layerWorkspace={layerWorkspace}
         onLayerWorkspaceChange={updateLayerWorkspace}
-        historyLoading={historySyncing || timelineHistorySyncing}
+        historyLoading={chartHistoryLoading}
         loading={loadingQuote || loadingCandles}
         error={quoteError ?? candleError}
         onPeriodChange={setPeriodId}
@@ -1562,7 +1548,7 @@ export default function App() {
             priceDigits={digitsFor(selectedCode, selectedInstrument)}
             marketPhase={marketSession.phase}
             marketSchedule={selectedInstrument.market_schedule}
-            historyLoading={historySyncing || timelineHistorySyncing}
+            historyLoading={chartHistoryLoading}
             onRequestOlderHistory={loadOlderCandles}
             onHover={setHover}
             layers={normalChartLayers}

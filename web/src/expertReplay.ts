@@ -73,6 +73,28 @@ export function nextReplayIndex(current: number, length: number, step = 1): numb
   return Math.min(length - 1, Math.max(0, current + Math.max(1, Math.floor(step))));
 }
 
+export interface ReplayClockAdvance {
+  steps: number;
+  nextStepAt: number;
+}
+
+/** Keeps advertised replay speed stable even when one render is delayed. */
+export function replayClockAdvance(
+  now: number,
+  nextStepAt: number,
+  stepMilliseconds: number,
+): ReplayClockAdvance {
+  if (
+    !Number.isFinite(now)
+    || !Number.isFinite(nextStepAt)
+    || !Number.isFinite(stepMilliseconds)
+    || stepMilliseconds <= 0
+  ) return { steps: 0, nextStepAt };
+  if (now < nextStepAt) return { steps: 0, nextStepAt };
+  const steps = Math.max(1, Math.floor((now - nextStepAt) / stepMilliseconds) + 1);
+  return { steps, nextStepAt: nextStepAt + steps * stepMilliseconds };
+}
+
 /**
  * Timeline samples are stored in observed-time order. Return the prefix that
  * was knowable strictly before the replay boundary without allocating it.

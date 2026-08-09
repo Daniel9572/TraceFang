@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { barDataPeriodId, chartPeriodById } from "../src/chartPeriods.ts";
 import {
   defaultPeriodPreferences,
   movePeriod,
@@ -8,6 +9,12 @@ import {
   reorderPeriodBefore,
   togglePeriodVisibility,
 } from "../src/periodPreferences.ts";
+
+test("reuses one-minute Bar data when switching between 1m and timeline", () => {
+  assert.equal(barDataPeriodId(chartPeriodById("1m")), "1m");
+  assert.equal(barDataPeriodId(chartPeriodById("timeline")), "1m");
+  assert.equal(barDataPeriodId(chartPeriodById("15m")), "15m");
+});
 
 test("keeps 15-minute candles in the default compact toolbar", () => {
   const preferences = defaultPeriodPreferences();

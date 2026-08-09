@@ -64,6 +64,10 @@ export function chartPeriodById(id: ChartPeriodId): ChartPeriod {
   return PERIODS_BY_ID.get(id) ?? CHART_PERIODS[1];
 }
 
+export function barDataPeriodId(period: ChartPeriod): ChartPeriodId {
+  return period.mode === "timeline" ? "1m" : period.id;
+}
+
 export function periodBucketSeconds(period: ChartPeriod, epochSeconds: number): number {
   if (period.aggregation.kind === "fixed") {
     const durationSeconds = period.aggregation.minutes * 60;

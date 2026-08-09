@@ -541,53 +541,20 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
 .market-chart, .chart-renderer { position: absolute; inset: 0; }
 .market-chart { overflow: hidden; }
 .timeline-trading-days { position: absolute; z-index: 2; inset: 0 82px 0 0; overflow: hidden; pointer-events: none; }
+.expert-chart-overlays { position: absolute; z-index: 2; inset: 0; overflow: hidden; pointer-events: none; }
 .timeline-trading-day-separator { position: absolute; top: 0; bottom: 28px; left: 0; width: 1px; background: #e1e6ee; }
 .timeline-trading-day-label { position: absolute; bottom: 2px; left: 0; display: flex; height: 20px; align-items: center; color: #8f98a6; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 400; white-space: nowrap; }
-.timeline-session-gap-seam {
-  position: absolute;
-  top: 74px;
-  bottom: 28px;
-  left: 0;
-  width: 8px;
-  border-right: 1px solid rgba(191, 139, 45, .18);
-  border-left: 1px solid rgba(191, 139, 45, .18);
-  background: repeating-linear-gradient(135deg, rgba(221, 169, 69, .10) 0 3px, rgba(221, 169, 69, .02) 3px 6px);
-  opacity: .72;
-  pointer-events: auto;
-  cursor: help;
-}
-.timeline-session-gap-seam.is-weekend { width: 11px; background-color: rgba(236, 184, 80, .05); }
-.timeline-session-gap-marker {
-  position: absolute;
-  top: 82px;
-  left: 0;
-  display: grid;
-  min-width: 168px;
-  overflow: hidden;
-  border: 1px solid #ead8af;
-  border-radius: 5px;
-  color: #74623f;
-  background: rgba(255, 253, 248, .96);
-  box-shadow: 0 4px 14px rgba(86, 67, 31, .10);
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  pointer-events: auto;
-  cursor: help;
-  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
-}
-.timeline-session-gap-marker:hover,
-.timeline-session-gap-marker:focus-visible { border-color: #d9b66e; box-shadow: 0 6px 18px rgba(86, 67, 31, .16); outline: none; }
-.session-gap-flow { display: grid; grid-template-columns: auto 1fr auto; align-items: center; min-height: 24px; padding: 0 8px; column-gap: 7px; }
-.session-gap-flow small { color: #9c8d70; font-size: 8px; }
-.session-gap-flow strong { color: #725c33; font-size: 9px; font-weight: 650; text-align: center; }
-.session-gap-flow strong::before { display: inline-block; width: 4px; height: 4px; margin-right: 5px; border-radius: 50%; background: #d59b31; content: ""; vertical-align: 1px; }
-.session-gap-detail { display: flex; min-height: 21px; align-items: center; justify-content: center; padding: 0 8px; border-top: 1px solid rgba(207, 174, 111, .28); color: #808793; background: rgba(251, 248, 240, .72); font-size: 9px; font-style: normal; }
-.timeline-session-gap-marker[data-tone="up"] .session-gap-detail { color: var(--up); }
-.timeline-session-gap-marker[data-tone="down"] .session-gap-detail { color: var(--down); }
-.timeline-session-gap-marker[data-tone="missing"] .session-gap-detail { color: #a87824; }
-.timeline-session-gap-marker.is-compact { top: 86px; min-width: 108px; border-radius: 12px; }
-.timeline-session-gap-marker.is-compact .session-gap-flow { display: flex; min-height: 23px; justify-content: center; padding: 0 9px; }
+.timeline-window-boundary-label { position: absolute; z-index: 3; bottom: 2px; left: 0; display: flex; height: 20px; align-items: center; padding: 0 3px; color: #7f8a99; background: rgba(255, 255, 255, .92); font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.opening-gap-annotation { position: absolute; z-index: 5; width: 0; height: 0; color: var(--up); font-variant-numeric: tabular-nums; pointer-events: auto; cursor: help; }
+.opening-gap-annotation.is-down { color: var(--down); }
+.opening-gap-anchor { position: absolute; top: 0; left: 0; width: 8px; height: 8px; transform: translate(-50%, -50%); border: 2px solid currentColor; border-radius: 50%; background: var(--panel); box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent); }
+.opening-gap-stem { position: absolute; bottom: 5px; left: 0; width: 1px; height: 17px; background: currentColor; opacity: .82; }
+.opening-gap-copy { position: absolute; bottom: 20px; left: 7px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; white-space: nowrap; text-shadow: 0 1px 2px var(--panel), 0 0 5px var(--panel); }
+.opening-gap-copy strong { color: currentColor; font-size: 9px; font-weight: 700; letter-spacing: .01em; }
+.opening-gap-copy small { color: var(--muted); font-size: 7px; font-weight: 500; }
+.opening-gap-annotation.is-align-left .opening-gap-copy { right: 7px; left: auto; align-items: flex-end; text-align: right; }
+.opening-gap-annotation.is-below .opening-gap-stem { top: 5px; bottom: auto; }
+.opening-gap-annotation.is-below .opening-gap-copy { top: 20px; bottom: auto; }
 .live-price-layer { --live-y: 0px; --live-tag-y: 16px; position: absolute; z-index: 3; inset: 0; visibility: hidden; pointer-events: none; }
 .live-price-line { position: absolute; top: 0; right: 82px; left: 0; height: 1px; transform: translate3d(0, var(--live-y), 0); backface-visibility: hidden; background: repeating-linear-gradient(90deg, var(--live-color) 0 7px, transparent 7px 13px); opacity: .9; will-change: transform; }
 .live-price-tag-track { position: absolute; top: 0; right: 0; width: 82px; transform: translate3d(0, var(--live-tag-y), 0); backface-visibility: hidden; will-change: transform; }

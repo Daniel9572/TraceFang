@@ -16,10 +16,26 @@ import {
   candleReplayCutoff,
   expertReplayFrame,
   nextReplayIndex,
+  replayClockAdvance,
   replayIndexAtOrBefore,
   timelineReplayCount,
 } from "../src/expertReplay.ts";
 import type { Candle } from "../src/types.ts";
+
+test("replay clock catches up elapsed steps without running early", () => {
+  assert.deepEqual(replayClockAdvance(999, 1_000, 100), {
+    steps: 0,
+    nextStepAt: 1_000,
+  });
+  assert.deepEqual(replayClockAdvance(1_000, 1_000, 100), {
+    steps: 1,
+    nextStepAt: 1_100,
+  });
+  assert.deepEqual(replayClockAdvance(1_350, 1_000, 100), {
+    steps: 4,
+    nextStepAt: 1_400,
+  });
+});
 
 function candle(index: number, close: number, volume: number | null = 100 + index): Candle {
   const open = close - 0.7;

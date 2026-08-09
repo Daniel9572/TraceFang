@@ -11,10 +11,13 @@ import type {
 export const EXPERT_LAYER_STORAGE_KEY = "market-expert-layers-v1";
 export const LEGACY_DRAWING_STORAGE_KEY = "market-expert-drawings-v1";
 export const EXPERT_PRICE_LAYER_ID = "layer:price";
+export const EXPERT_SESSION_LAYER_ID = "layer:annotation:sessions";
+export const EXPERT_GAP_LAYER_ID = "layer:annotation:gaps";
+export const EXPERT_EVENT_LAYER_ID = "layer:annotation:events";
 export const DEFAULT_DRAWING_LAYER_ID = "layer:drawing:1";
 
 export type ExpertLayerKind = "price" | "drawing" | "indicator" | "annotation";
-export type ExpertAnnotationId = "sessions" | "events" | "analysis";
+export type ExpertAnnotationId = "sessions" | "gaps" | "events" | "analysis";
 
 interface ExpertLayerBase {
   id: string;
@@ -95,8 +98,9 @@ const MIN_INDICATOR_HEIGHT = 92;
 const MAX_INDICATOR_HEIGHT = 280;
 
 const ANNOTATION_NAMES: Record<ExpertAnnotationId, string> = {
-  sessions: "交易时段",
-  events: "重要事件",
+  sessions: "资金主导标注",
+  gaps: "跳空标注",
+  events: "数据公布与重要事件",
   analysis: "策略标注",
 };
 
@@ -155,11 +159,15 @@ function canonicalPriceLayer(): ExpertPriceLayer {
 
 function canonicalAnnotationLayer(annotationId: ExpertAnnotationId, order: number): ExpertAnnotationLayer {
   return {
-    id: `layer:annotation:${annotationId}`,
+    id: annotationId === "sessions"
+      ? EXPERT_SESSION_LAYER_ID
+      : annotationId === "gaps"
+        ? EXPERT_GAP_LAYER_ID
+        : annotationId === "events" ? EXPERT_EVENT_LAYER_ID : `layer:annotation:${annotationId}`,
     kind: "annotation",
     annotationId,
     name: ANNOTATION_NAMES[annotationId],
-    visible: true,
+    visible: annotationId === "analysis",
     order,
   };
 }
@@ -199,18 +207,19 @@ export function createDefaultExpertLayerWorkspace(
     layers: normalizeOrders([
       canonicalPriceLayer(),
       canonicalAnnotationLayer("sessions", 10),
-      canonicalAnnotationLayer("analysis", 20),
-      canonicalAnnotationLayer("events", 30),
+      canonicalAnnotationLayer("gaps", 20),
+      canonicalAnnotationLayer("analysis", 30),
+      canonicalAnnotationLayer("events", 40),
       {
         id: DEFAULT_DRAWING_LAYER_ID,
         kind: "drawing",
         name: "画线图层 1",
         visible: true,
-        order: 40,
+        order: 50,
         drawings: [...legacyDrawings],
       },
-      canonicalIndicatorLayer("kdj", 50),
-      canonicalIndicatorLayer("macd", 60),
+      canonicalIndicatorLayer("kdj", 60),
+      canonicalIndicatorLayer("macd", 70),
     ]),
   };
 }
@@ -243,7 +252,12 @@ function parseLayer(value: unknown, fallbackOrder: number): ExpertLayerDefinitio
   }
   if (
     value.kind === "annotation"
-    && (value.annotationId === "sessions" || value.annotationId === "events" || value.annotationId === "analysis")
+    && (
+      value.annotationId === "sessions"
+      || value.annotationId === "gaps"
+      || value.annotationId === "events"
+      || value.annotationId === "analysis"
+    )
   ) {
     return {
       id: value.id,
@@ -303,7 +317,7 @@ export function readExpertLayerWorkspace(
       layers.filter((layer): layer is ExpertAnnotationLayer => layer.kind === "annotation")
         .map((layer) => layer.annotationId),
     );
-    for (const annotationId of ["sessions", "analysis", "events"] as const) {
+    for (const annotationId of ["sessions", "gaps", "analysis", "events"] as const) {
       if (!annotations.has(annotationId)) layers.push(canonicalAnnotationLayer(annotationId, layers.length * 10));
     }
     const indicators = new Set(
