@@ -58,6 +58,8 @@ CREATE INDEX IF NOT EXISTS ix_quote_events_instrument_observed
     ON quote_events (instrument_symbol, observed_at DESC);
 CREATE INDEX IF NOT EXISTS ix_quote_events_source_observed
     ON quote_events (source_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS ix_quote_events_timeline_cursor
+    ON quote_events (instrument_symbol, source_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS latest_quotes (
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
@@ -126,6 +128,37 @@ CREATE TABLE IF NOT EXISTS candles (
 
 CREATE INDEX IF NOT EXISTS ix_candles_instrument_interval_time
     ON candles (instrument_symbol, interval_seconds, open_time DESC);
+
+CREATE TABLE IF NOT EXISTS realtime_bars (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    evidence_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    persisted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    open NUMERIC(38, 18) NOT NULL,
+    high NUMERIC(38, 18) NOT NULL,
+    low NUMERIC(38, 18) NOT NULL,
+    close NUMERIC(38, 18) NOT NULL,
+    volume NUMERIC(38, 18),
+    state TEXT NOT NULL CHECK (
+        state IN ('provisional_quote', 'provisional_authoritative', 'final')
+    ),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    finalized_at TIMESTAMPTZ,
+    raw_payload JSONB NOT NULL,
+    CHECK (
+        (state = 'final' AND finalized_at IS NOT NULL)
+        OR (state <> 'final' AND finalized_at IS NULL)
+    ),
+    PRIMARY KEY (realtime_source_id, instrument_symbol, interval_seconds, open_time)
+);
+
+CREATE INDEX IF NOT EXISTS ix_realtime_bars_source_instrument_time
+    ON realtime_bars (realtime_source_id, instrument_symbol, interval_seconds, open_time DESC);
 
 CREATE TABLE IF NOT EXISTS realtime_candle_cache_ranges (
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,

@@ -23,6 +23,14 @@ class RealtimeSourceApiContractTests(unittest.TestCase):
             ("code", "count", "time"),
         )
         self.assertEqual(
+            tuple(inspect.signature(api.chart_bars).parameters),
+            ("code", "period", "before"),
+        )
+        self.assertEqual(
+            tuple(inspect.signature(api.timeline_samples).parameters),
+            ("code", "cursor"),
+        )
+        self.assertEqual(
             tuple(inspect.signature(api.backfill_candles).parameters),
             ("code", "count", "time"),
         )
@@ -123,6 +131,7 @@ class RealtimeSourceApiContractTests(unittest.TestCase):
         for item in shfe:
             self.assertEqual(item["source_ids"], ["tonghuashun_futures"])
             self.assertEqual(item["market_schedule"]["time_zone"], "Asia/Shanghai")
+            self.assertEqual(item["market_schedule"]["trading_day_rule"], "shfe")
             self.assertEqual(len(item["market_schedule"]["sessions"]), 20)
             self.assertEqual(item["market_schedule"]["sessions"][0]["open"], "09:00")
             self.assertEqual(item["market_schedule"]["sessions"][-1]["close"], "02:30")

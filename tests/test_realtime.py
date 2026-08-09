@@ -12,6 +12,7 @@ from market_analysis.application.quotes import (
 )
 from market_analysis.application.realtime import QuoteStreamCoordinator
 from market_analysis.domain.errors import ProviderUnavailableError
+from market_analysis.domain.market_events import QuoteSample
 from market_analysis.domain.models import QuoteSnapshot, SourceMetadata
 from market_analysis.infrastructure.providers.jin10 import SPOT_GOLD
 
@@ -131,6 +132,42 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(values[0], Decimal("4243.10"))
                 self.assertEqual(values[-1], Decimal("4262.10"))
                 self.assertEqual(len(values), 20)
+        finally:
+            await coordinator.close()
+
+    async def test_raw_sample_is_delivered_separately_from_latest_quote_view(self) -> None:
+        async def load(_instrument, source):
+            return view(source)
+
+        coordinator = QuoteStreamCoordinator(load_quote=load)
+        value = quote("jin10_web", "4244.10")
+        sample = QuoteSample(
+            source_id="jin10_client",
+            channel_id="jin10_web",
+            event_id="sample-1",
+            instrument=value.instrument,
+            provider_symbol=value.source.provider_symbol,
+            observed_at=value.source.observed_at,
+            received_at=value.source.received_at,
+            value=value.last,
+        )
+        try:
+            async with coordinator.subscribe(SPOT_GOLD, source="jin10_client") as queue:
+                await asyncio.wait_for(queue.get(), 1)
+                await asyncio.wait_for(queue.get(), 1)
+                coordinator.publish_sample(sample)
+
+                event = await asyncio.wait_for(queue.get(), 0.05)
+
+                self.assertEqual(event.kind, "sample")
+                self.assertEqual(event.sample, sample)
+                self.assertIsNone(event.quote)
+
+                coordinator.publish_bar_update(SPOT_GOLD, source="jin10_client")
+                bar_event = await asyncio.wait_for(queue.get(), 0.05)
+                self.assertEqual(bar_event.kind, "bar")
+                self.assertIsNone(bar_event.quote)
+                self.assertIsNone(bar_event.sample)
         finally:
             await coordinator.close()
 

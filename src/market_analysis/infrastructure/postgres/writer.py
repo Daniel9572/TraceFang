@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from market_analysis.application.persistence import MarketDataStore, PersistenceHealth
+from market_analysis.domain.market_events import RealtimeBar
 from market_analysis.domain.models import Candle, QuoteSnapshot
 
 
@@ -20,7 +21,12 @@ class _WriteCandles:
     values: tuple[Candle, ...]
 
 
-_WriteRequest = _WriteQuote | _WriteCandles
+@dataclass(frozen=True, slots=True)
+class _WriteRealtimeBars:
+    values: tuple[RealtimeBar, ...]
+
+
+_WriteRequest = _WriteQuote | _WriteCandles | _WriteRealtimeBars
 
 
 class BufferedMarketDataWriter:
@@ -69,6 +75,12 @@ class BufferedMarketDataWriter:
             return True
         return self._submit(_WriteCandles(rows))
 
+    def submit_realtime_bars(self, bars: Sequence[RealtimeBar]) -> bool:
+        rows = tuple(bars)
+        if not rows:
+            return True
+        return self._submit(_WriteRealtimeBars(rows))
+
     def _submit(self, request: _WriteRequest) -> bool:
         try:
             self._queue.put_nowait(request)
@@ -107,8 +119,10 @@ class BufferedMarketDataWriter:
             try:
                 if isinstance(pending, _WriteQuote):
                     await self._store.save_quote(pending.value)
-                else:
+                elif isinstance(pending, _WriteCandles):
                     await self._store.save_candles(pending.values)
+                else:
+                    await self._store.save_realtime_bars(pending.values)
             except asyncio.CancelledError:
                 raise
             except Exception as error:

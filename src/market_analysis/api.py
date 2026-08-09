@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from market_analysis.application.acquisition import QuoteAcquisitionRouter
+from market_analysis.application.period_bars import PERIOD_DEFINITIONS, PeriodBarService
 from market_analysis.application.quotes import (
     JIN10_CLIENT_SOURCE,
     JIN10_LOCAL_CHANNEL,
@@ -27,9 +28,9 @@ from market_analysis.application.quotes import (
     QuoteViewService,
 )
 from market_analysis.application.realtime import QuoteStreamCoordinator
-from market_analysis.application.realtime_klines import (
-    RealtimeKlineBinding,
-    RealtimeKlineService,
+from market_analysis.application.realtime_bars import (
+    RealtimeBarContract,
+    RealtimeBarService,
 )
 from market_analysis.application.sources import (
     MarketSourceManager,
@@ -98,7 +99,8 @@ class Runtime:
         self.quote_stream: QuoteStreamCoordinator | None = None
         self.quote_views: QuoteViewService | None = None
         self.acquisition: QuoteAcquisitionRouter | None = None
-        self.realtime_klines: RealtimeKlineService | None = None
+        self.realtime_bars: RealtimeBarService | None = None
+        self.period_bars: PeriodBarService | None = None
         self.instrument_sources: dict[str, str] = {}
         self.watchlist_codes: list[str] = list(DEFAULT_WATCHLIST_CODES)
         self.catalog_cache: AsyncTtlCache[Any] = AsyncTtlCache()
@@ -112,6 +114,7 @@ runtime = Runtime()
 
 _SPOT_METALS_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "America/New_York",
+    "trading_day_rule": "session_end",
     "reference": "OTC 贵金属常规交易时段",
     "sessions": [
         {
@@ -126,6 +129,7 @@ _SPOT_METALS_MARKET_SCHEDULE: dict[str, Any] = {
 
 _FOREX_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "America/New_York",
+    "trading_day_rule": "session_end",
     "reference": "OTC 外汇常规交易时段",
     "sessions": [
         {
@@ -140,6 +144,7 @@ _FOREX_MARKET_SCHEDULE: dict[str, Any] = {
 
 _SHFE_METALS_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "Asia/Shanghai",
+    "trading_day_rule": "shfe",
     "reference": "上海期货交易所贵金属期货常规交易时段",
     "sessions": [
         session
@@ -175,6 +180,7 @@ _SHFE_METALS_MARKET_SCHEDULE: dict[str, Any] = {
 
 _SSE_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "Asia/Shanghai",
+    "trading_day_rule": "session_start",
     "reference": "上海证券交易所指数常规行情时段",
     "sessions": [
         session
@@ -198,6 +204,7 @@ _SSE_MARKET_SCHEDULE: dict[str, Any] = {
 
 _NASDAQ_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "America/New_York",
+    "trading_day_rule": "session_start",
     "reference": "纳斯达克常规交易时段",
     "sessions": [
         {
@@ -212,6 +219,7 @@ _NASDAQ_MARKET_SCHEDULE: dict[str, Any] = {
 
 _USD_INDEX_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "UTC",
+    "trading_day_rule": "session_start",
     "reference": "同花顺美元指数公开行情常规时段",
     "sessions": [
         {
@@ -226,6 +234,7 @@ _USD_INDEX_MARKET_SCHEDULE: dict[str, Any] = {
 
 _ICE_BRENT_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "Europe/London",
+    "trading_day_rule": "session_end",
     "reference": "ICE Futures Europe 布伦特原油常规电子交易时段",
     "sessions": [
         {
@@ -474,7 +483,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     runtime.persistence = None
     runtime.database_store = None
-    runtime.realtime_klines = None
+    runtime.realtime_bars = None
+    runtime.period_bars = None
     runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
     runtime.persistence_setup_error = None
     try:
@@ -509,23 +519,32 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if runtime.database_store and runtime.database_store.is_open
         else None
     )
-    runtime.realtime_klines = RealtimeKlineService(
-        kline_store,
-        bindings=(
-            RealtimeKlineBinding(
-                realtime_source_id=JIN10_CLIENT_SOURCE,
-                history_channel_id=client_composition.kline_channel_id,
-                live_quote_channel_id=JIN10_WEB_CHANNEL,
-                history_provider=local_provider,
-            ),
-            RealtimeKlineBinding(
-                realtime_source_id=TONGHUASHUN_FUTURES_SOURCE,
-                history_channel_id=TONGHUASHUN_FUTURES_SOURCE,
-                live_quote_channel_id=TONGHUASHUN_FUTURES_SOURCE,
-                history_provider=tonghuashun_futures_provider,
-            ),
+    bar_contracts = (
+        RealtimeBarContract(
+            source_id=JIN10_CLIENT_SOURCE,
+            authoritative_bar_channel_id=client_composition.kline_channel_id,
+            quote_channel_ids=(JIN10_WEB_CHANNEL,),
+            history_provider=local_provider,
+        ),
+        RealtimeBarContract(
+            source_id=TONGHUASHUN_FUTURES_SOURCE,
+            authoritative_bar_channel_id=TONGHUASHUN_FUTURES_SOURCE,
+            quote_channel_ids=(TONGHUASHUN_FUTURES_SOURCE,),
+            history_provider=tonghuashun_futures_provider,
         ),
     )
+    contract_source_ids = {item.source_id for item in bar_contracts}
+    registered_source_ids = set(_manager().realtime_source_ids())
+    if contract_source_ids != registered_source_ids:
+        raise RuntimeError(
+            "every selectable realtime source must have exactly one RealtimeBarContract"
+        )
+    runtime.realtime_bars = RealtimeBarService(
+        kline_store,
+        contracts=bar_contracts,
+        writer=runtime.persistence,
+    )
+    runtime.period_bars = PeriodBarService(runtime.realtime_bars)
 
     async def load_latest_quote(instrument, source_id):
         store = runtime.database_store
@@ -547,8 +566,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     def accept_raw_quote(value):
         quote_views = runtime.quote_views
-        if runtime.realtime_klines is not None:
-            runtime.realtime_klines.accept_quote(value)
+        normalized_event = (
+            runtime.realtime_bars.normalize_quote(value)
+            if runtime.realtime_bars is not None
+            else None
+        )
+        if runtime.realtime_bars is not None and normalized_event is not None:
+            runtime.realtime_bars.accept(normalized_event)
+            if runtime.quote_stream is not None:
+                runtime.quote_stream.publish_sample(
+                    runtime.realtime_bars.sample_from_quote_event(normalized_event)
+                )
         # Persist every raw channel frame, including late or duplicate deliveries.
         # Only the latest presentation view applies the monotonic timestamp guard;
         # raw evidence must never be filtered by UI-cache semantics.
@@ -578,9 +606,25 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                     SPOT_GOLD_CNH_PER_GRAM,
                     JIN10_CLIENT_SOURCE,
                 )
-                if runtime.realtime_klines is not None:
-                    runtime.realtime_klines.accept_view(derived)
+                if runtime.realtime_bars is not None:
+                    runtime.realtime_bars.accept_view(derived)
                 stream.publish(derived)
+
+    def accept_raw_bar(value):
+        normalized_event = (
+            runtime.realtime_bars.normalize_bar(value)
+            if runtime.realtime_bars is not None
+            else None
+        )
+        if runtime.realtime_bars is not None and normalized_event is not None:
+            runtime.realtime_bars.accept(normalized_event)
+            if runtime.quote_stream is not None:
+                runtime.quote_stream.publish_bar_update(
+                    value.instrument,
+                    source=normalized_event.source_id,
+                )
+        if runtime.persistence is not None:
+            runtime.persistence.submit_candles((value,))
 
     def report_acquisition_error(instrument, source_id, error):
         if runtime.quote_stream is not None:
@@ -609,9 +653,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         on_error=report_acquisition_error,
     )
     local_quote_listener = None
+    local_candle_listener = None
     if local_provider is not None:
         local_quote_listener = accept_raw_quote
         local_provider.add_quote_listener(local_quote_listener)
+        local_candle_listener = accept_raw_bar
+        local_provider.add_candle_listener(local_candle_listener)
     web_quote_listener = None
     if web_provider is not None:
         web_quote_listener = accept_raw_quote
@@ -640,6 +687,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             runtime.instrument_sources[requirement.symbol] = source_id
             if runtime.database_store is not None and runtime.database_store.is_open:
                 await runtime.database_store.set_instrument_source(requirement, source_id)
+    if runtime.realtime_bars is not None:
+        hydration_targets = {
+            (instrument, source_id) for instrument, source_id in initial_routes.items()
+        }
+        for instrument, source_id in hydration_targets:
+            await runtime.realtime_bars.hydrate(instrument, source_id=source_id)
     await runtime.acquisition.start(initial_routes)
     runtime.clear_caches()
     yield
@@ -647,12 +700,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await runtime.acquisition.stop()
     if local_provider is not None and local_quote_listener is not None:
         local_provider.remove_quote_listener(local_quote_listener)
+    if local_provider is not None and local_candle_listener is not None:
+        local_provider.remove_candle_listener(local_candle_listener)
     if web_provider is not None and web_quote_listener is not None:
         web_provider.remove_quote_listener(web_quote_listener)
     if runtime.quote_stream is not None:
         await runtime.quote_stream.close()
-    if runtime.realtime_klines is not None:
-        await runtime.realtime_klines.close()
+    if runtime.realtime_bars is not None:
+        await runtime.realtime_bars.close()
     if runtime.persistence is not None:
         await runtime.persistence.stop()
     if runtime.local_provider is not None:
@@ -671,7 +726,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     runtime.quote_stream = None
     runtime.quote_views = None
     runtime.acquisition = None
-    runtime.realtime_klines = None
+    runtime.realtime_bars = None
+    runtime.period_bars = None
     runtime.instrument_sources.clear()
     runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
     runtime.clear_caches()
@@ -711,10 +767,16 @@ def _acquisition() -> QuoteAcquisitionRouter:
     return runtime.acquisition
 
 
-def _realtime_klines() -> RealtimeKlineService:
-    if runtime.realtime_klines is None:
-        raise HTTPException(status_code=503, detail="Realtime Kline runtime is unavailable")
-    return runtime.realtime_klines
+def _realtime_bars() -> RealtimeBarService:
+    if runtime.realtime_bars is None:
+        raise HTTPException(status_code=503, detail="Realtime Bar runtime is unavailable")
+    return runtime.realtime_bars
+
+
+def _period_bars() -> PeriodBarService:
+    if runtime.period_bars is None:
+        raise HTTPException(status_code=503, detail="Period Bar runtime is unavailable")
+    return runtime.period_bars
 
 
 def _public_source(value: Any) -> dict[str, Any]:
@@ -792,6 +854,7 @@ async def health() -> dict[str, Any]:
     else:
         database = asdict(runtime.persistence.health())
     database_healthy = database["state"] == "healthy"
+    live_bar_count = runtime.realtime_bars.live_count() if runtime.realtime_bars else 0
     return {
         "status": "ok" if healthy and database_healthy else "degraded",
         "sources": [_public_source(item) for item in sources],
@@ -804,12 +867,11 @@ async def health() -> dict[str, Any]:
             "governance": "frozen",
             "cross_source_fallback": False,
             "upstream_calls_on_read": False,
-            "live_kline_count": (
-                runtime.realtime_klines.live_count() if runtime.realtime_klines is not None else 0
-            ),
+            "live_bar_count": live_bar_count,
+            "live_kline_count": live_bar_count,
             "backfill_pending": (
-                runtime.realtime_klines.pending_backfill_count()
-                if runtime.realtime_klines is not None
+                runtime.realtime_bars.pending_backfill_count()
+                if runtime.realtime_bars is not None
                 else 0
             ),
         },
@@ -857,7 +919,7 @@ async def test_source(
             if descriptor.state != "connected_waiting_quote":
                 raise
             value = None
-        kline_rows = await _realtime_klines().get_candles(
+        kline_rows = await _realtime_bars().get_bars(
             instrument,
             source_id=source_id,
             count=1,
@@ -1046,6 +1108,26 @@ async def last_quote(code: str) -> dict[str, Any]:
     return asdict(value)
 
 
+@app.get("/api/bars/{code}")
+async def chart_bars(
+    code: str,
+    period: str = Query(default="1m"),
+    before: int | None = Query(default=None, description="Exclusive Unix-second cursor"),
+) -> dict[str, Any]:
+    if period not in PERIOD_DEFINITIONS:
+        raise HTTPException(status_code=422, detail=f"unsupported chart period: {period}")
+    normalized_code, instrument, source_id = await _instrument_source(code)
+    definition = instrument_definition(normalized_code)
+    page = await _period_bars().get_page(
+        instrument,
+        source_id=source_id,
+        period_id=period,
+        schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
+        before=datetime.fromtimestamp(before, tz=UTC) if before is not None else None,
+    )
+    return asdict(page)
+
+
 @app.get("/api/candles/{code}")
 async def candles(
     code: str,
@@ -1054,7 +1136,7 @@ async def candles(
 ) -> list[dict[str, Any]]:
     _, instrument, source_id = await _instrument_source(code)
     start = datetime.fromtimestamp(time, tz=UTC) if time else None
-    values = await _realtime_klines().get_candles(
+    values = await _realtime_bars().get_bars(
         instrument,
         source_id=source_id,
         start=start,
@@ -1079,13 +1161,29 @@ async def backfill_candles(
         )
     _, instrument, source_id = await _instrument_source(code)
     start = datetime.fromtimestamp(time, tz=UTC)
-    result = await _realtime_klines().backfill(
+    result = await _realtime_bars().backfill(
         instrument,
         source_id=source_id,
         start=start,
         count=count,
     )
     return asdict(result)
+
+
+@app.get("/api/timeline/{code}")
+async def timeline_samples(
+    code: str,
+    cursor: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    """Reads every persisted raw quote event through an opaque transport cursor."""
+
+    _, instrument, source_id = await _instrument_source(code)
+    page = await _realtime_bars().get_quote_sample_page(
+        instrument,
+        source_id=source_id,
+        before_id=cursor,
+    )
+    return asdict(page)
 
 
 @app.websocket("/api/stream/quotes/{code}")

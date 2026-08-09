@@ -1,3 +1,5 @@
+"""Deprecated compatibility surface; runtime code lives in ``realtime_bars``."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +9,9 @@ from decimal import Decimal
 from typing import Protocol
 
 from market_analysis.application.quotes import QuoteView
+from market_analysis.application.realtime_bars import BarBackfillResult as _BarBackfillResult
+from market_analysis.application.realtime_bars import RealtimeBarContract as _RealtimeBarContract
+from market_analysis.application.realtime_bars import RealtimeBarService as _RealtimeBarService
 from market_analysis.domain.errors import ProviderUnavailableError
 from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
 
@@ -409,3 +414,9 @@ class RealtimeKlineService:
         )
         for key in keys[:-240]:
             del self._live[key]
+
+
+# Import compatibility only. New application code must use realtime_bars directly.
+CandleBackfillResult = _BarBackfillResult  # noqa: F811
+RealtimeKlineBinding = _RealtimeBarContract  # noqa: F811
+RealtimeKlineService = _RealtimeBarService  # noqa: F811

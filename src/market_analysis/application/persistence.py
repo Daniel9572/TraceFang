@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from market_analysis.domain.market_events import RealtimeBar
 from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot
 
 
@@ -30,6 +31,8 @@ class MarketDataStore(Protocol):
     ) -> QuoteSnapshot | None: ...
 
     async def save_candles(self, candles: Sequence[Candle]) -> None: ...
+
+    async def save_realtime_bars(self, bars: Sequence[RealtimeBar]) -> None: ...
 
     async def remove_source_from_standard_history(
         self,
@@ -67,5 +70,7 @@ class MarketDataWriter(Protocol):
     def submit_quote(self, quote: QuoteSnapshot) -> bool: ...
 
     def submit_candles(self, candles: Sequence[Candle]) -> bool: ...
+
+    def submit_realtime_bars(self, bars: Sequence[RealtimeBar]) -> bool: ...
 
     def health(self) -> PersistenceHealth: ...

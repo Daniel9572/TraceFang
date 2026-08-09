@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from market_analysis.application.quotes import QuoteView
+from market_analysis.domain.market_events import QuoteSample
 from market_analysis.domain.models import Instrument
 
 
@@ -23,6 +24,7 @@ class QuoteStreamEvent:
     state: QuoteStreamState
     emitted_at: datetime
     quote: QuoteView | None = None
+    sample: QuoteSample | None = None
     error: str | None = None
 
 
@@ -103,6 +105,31 @@ class QuoteStreamCoordinator:
         )
         pump.latest = event
         self._broadcast(pump, event)
+
+    def publish_sample(self, sample: QuoteSample) -> None:
+        pump = self._pumps.get((sample.source_id, sample.instrument.symbol))
+        if pump is None:
+            return
+        event = QuoteStreamEvent(
+            kind="sample",
+            state=QuoteStreamState.LIVE,
+            emitted_at=datetime.now(UTC),
+            sample=sample,
+        )
+        self._broadcast(pump, event)
+
+    def publish_bar_update(self, instrument: Instrument, *, source: str) -> None:
+        pump = self._pumps.get((source, instrument.symbol))
+        if pump is None:
+            return
+        self._broadcast(
+            pump,
+            QuoteStreamEvent(
+                kind="bar",
+                state=QuoteStreamState.LIVE,
+                emitted_at=datetime.now(UTC),
+            ),
+        )
 
     def publish_unavailable(self, instrument: Instrument, source: str, error: Exception) -> None:
         pump = self._pumps.get((source, instrument.symbol))

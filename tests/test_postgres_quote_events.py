@@ -7,10 +7,17 @@ from market_analysis.infrastructure.postgres.store import (
     _INSERT_QUOTE,
     _SELECT_CANDLE_CACHE_RANGES,
     _SELECT_INSTRUMENT_SOURCE,
+    _SELECT_QUOTE_CANDLES_BEFORE,
+    _SELECT_QUOTE_EVENT_PAGE,
     _SELECT_RANGE_QUOTE_CANDLES,
+    _SELECT_RANGE_REALTIME_BARS,
     _SELECT_RANGE_SOURCE_CANDLES,
+    _SELECT_REALTIME_BARS_BEFORE,
     _SELECT_RECENT_QUOTE_CANDLES,
+    _SELECT_RECENT_REALTIME_BARS,
     _SELECT_RECENT_SOURCE_CANDLES,
+    _SELECT_SOURCE_CANDLES_BEFORE,
+    _UPSERT_REALTIME_BAR,
 )
 
 
@@ -49,6 +56,26 @@ class QuoteEventPersistenceTests(unittest.TestCase):
             SCHEMA_SQL,
         )
 
+    def test_lossless_quote_history_uses_storage_cursor_without_time_conflation(self) -> None:
+        self.assertIn("ix_quote_events_timeline_cursor", SCHEMA_SQL)
+        self.assertIn("instrument_symbol, source_id, id DESC", SCHEMA_SQL)
+        self.assertIn("id < $3", _SELECT_QUOTE_EVENT_PAGE)
+        self.assertIn("source_id = ANY($2::text[])", _SELECT_QUOTE_EVENT_PAGE)
+        self.assertIn("ORDER BY id DESC", _SELECT_QUOTE_EVENT_PAGE)
+        self.assertNotIn("GROUP BY", _SELECT_QUOTE_EVENT_PAGE)
+
+    def test_internal_bar_pages_use_exclusive_time_cursors(self) -> None:
+        for query in (
+            _SELECT_QUOTE_CANDLES_BEFORE,
+            _SELECT_SOURCE_CANDLES_BEFORE,
+            _SELECT_REALTIME_BARS_BEFORE,
+        ):
+            self.assertIn("ORDER BY", query)
+            self.assertIn("LIMIT", query)
+        self.assertIn("observed_at < $3", _SELECT_QUOTE_CANDLES_BEFORE)
+        self.assertIn("open_time < $4", _SELECT_SOURCE_CANDLES_BEFORE)
+        self.assertIn("open_time < $4", _SELECT_REALTIME_BARS_BEFORE)
+
     def test_kline_cache_queries_one_exact_raw_channel(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS standard_candles", SCHEMA_SQL)
         for query in (_SELECT_RECENT_QUOTE_CANDLES, _SELECT_RANGE_QUOTE_CANDLES):
@@ -69,6 +96,17 @@ class QuoteEventPersistenceTests(unittest.TestCase):
         self.assertIn("realtime_source_id = $2", _SELECT_CANDLE_CACHE_RANGES)
         self.assertIn("range_end > $4", _SELECT_CANDLE_CACHE_RANGES)
         self.assertIn("range_start < $5", _SELECT_CANDLE_CACHE_RANGES)
+
+    def test_realtime_bar_projection_persists_lifecycle_and_lineage(self) -> None:
+        self.assertIn("CREATE TABLE IF NOT EXISTS realtime_bars", SCHEMA_SQL)
+        self.assertIn("evidence_channel_id TEXT NOT NULL", SCHEMA_SQL)
+        self.assertIn("state TEXT NOT NULL", SCHEMA_SQL)
+        self.assertIn("revision INTEGER NOT NULL", SCHEMA_SQL)
+        self.assertIn("finalized_at TIMESTAMPTZ", SCHEMA_SQL)
+        for query in (_SELECT_RECENT_REALTIME_BARS, _SELECT_RANGE_REALTIME_BARS):
+            self.assertIn("FROM realtime_bars", query)
+            self.assertIn("realtime_source_id = $2", query)
+        self.assertIn("EXCLUDED.revision > realtime_bars.revision", _UPSERT_REALTIME_BAR)
 
 
 if __name__ == "__main__":

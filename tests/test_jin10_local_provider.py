@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock
 from market_analysis.infrastructure.providers.jin10 import SPOT_GOLD
 from market_analysis.infrastructure.providers.jin10_local.protocol import (
     KLINE_HISTORY_PROTOCOL,
+    KLINE_UPDATE_PROTOCOL,
     QUOTE_PUSH_PROTOCOL,
     Jin10KlineHistoryManifest,
+    Jin10KlineSnapshot,
     Jin10WireCandle,
     Jin10WireQuote,
 )
@@ -64,7 +66,7 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
             timestamp=int(timestamp.timestamp()),
         )
 
-    async def test_builds_minute_candles_only_from_local_quotes(self) -> None:
+    async def test_quotes_do_not_build_provider_owned_minute_candles(self) -> None:
         provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
         first_minute = datetime.now(UTC).replace(second=5, microsecond=0)
 
@@ -83,13 +85,41 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
 
         candles = await provider.get_candles(SPOT_GOLD, count=10)
 
-        self.assertEqual(len(candles), 2)
-        self.assertEqual(candles[0].open, Decimal("4250.000000"))
-        self.assertEqual(candles[0].high, Decimal("4252.000000"))
-        self.assertEqual(candles[0].low, Decimal("4250.000000"))
-        self.assertEqual(candles[0].close, Decimal("4252.000000"))
-        self.assertEqual(candles[0].source.provider, "jin10_local")
-        self.assertEqual(candles[1].open, Decimal("4249.000000"))
+        self.assertEqual(candles, ())
+
+    async def test_dispatches_native_bar_updates_to_candle_listener(self) -> None:
+        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        received = []
+        provider.add_candle_listener(received.append)
+        timestamp = int(datetime.now(UTC).replace(second=0, microsecond=0).timestamp())
+
+        provider._store_kline_snapshot(
+            Jin10KlineSnapshot(
+                provider_code="XAUUSD.GOODS",
+                time_type=1,
+                candles=(
+                    Jin10WireCandle(
+                        timestamp=timestamp,
+                        high_micros=4_252_000_000,
+                        open_micros=4_250_000_000,
+                        low_micros=4_249_000_000,
+                        close_micros=4_251_000_000,
+                        volume=10,
+                    ),
+                ),
+            ),
+            protocol=KLINE_UPDATE_PROTOCOL,
+        )
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].close, Decimal("4251.000000"))
+        self.assertEqual(
+            received[0].source.raw_payload["bar_state"],
+            "provisional_authoritative",
+        )
+
+        provider.remove_candle_listener(received.append)
+        self.assertEqual(len(provider._candle_listeners), 0)
 
     async def test_stores_exact_history_file_ohlcv_and_lineage(self) -> None:
         provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
@@ -151,6 +181,45 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
             time_type=1,
             boundary_timestamp=boundary,
         )
+
+    async def test_history_fetch_does_not_promote_live_native_bar_to_final_history(self) -> None:
+        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        start = datetime(2026, 8, 1, tzinfo=UTC)
+        provider._store_kline_snapshot(
+            Jin10KlineSnapshot(
+                provider_code="XAUUSD.GOODS",
+                time_type=1,
+                candles=(
+                    Jin10WireCandle(
+                        timestamp=int(start.timestamp()),
+                        high_micros=4_252_000_000,
+                        open_micros=4_250_000_000,
+                        low_micros=4_249_000_000,
+                        close_micros=4_251_000_000,
+                        volume=10,
+                    ),
+                ),
+            ),
+            protocol=KLINE_UPDATE_PROTOCOL,
+        )
+        provider.open = AsyncMock()
+        provider._connection_ready.set()
+        provider._request_history_manifest = AsyncMock(
+            return_value=Jin10KlineHistoryManifest(
+                provider_code="XAUUSD.GOODS",
+                time_type=1,
+                boundary_timestamp=int((start + timedelta(minutes=1)).timestamp()),
+                files=(),
+            )
+        )
+
+        candles = await provider.fetch_historical_candles(
+            SPOT_GOLD,
+            start=start,
+            count=1,
+        )
+
+        self.assertEqual(candles, ())
 
 
 if __name__ == "__main__":

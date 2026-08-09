@@ -9,6 +9,7 @@ from enum import Enum
 
 import asyncpg
 
+from market_analysis.domain.market_events import BarState, QuoteSample, RealtimeBar
 from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
 from market_analysis.infrastructure.postgres.schema import SCHEMA_SQL
 from market_analysis.infrastructure.postgres.settings import PostgresSettings
@@ -136,6 +137,55 @@ ON CONFLICT (source_id, provider_symbol, interval_seconds, open_time) DO UPDATE 
     raw_payload = EXCLUDED.raw_payload,
     persisted_at = now()
 WHERE EXCLUDED.received_at >= candles.received_at
+"""
+
+_SELECT_QUOTE_EVENT_PAGE = """
+SELECT *
+FROM (
+    SELECT
+        id, instrument_symbol, source_id, provider_symbol,
+        observed_at, received_at, last
+    FROM quote_events
+    WHERE instrument_symbol = $1
+      AND source_id = ANY($2::text[])
+      AND ($3::bigint IS NULL OR id < $3)
+    ORDER BY id DESC
+    LIMIT $4
+) AS recent
+ORDER BY id ASC
+"""
+
+_UPSERT_REALTIME_BAR = """
+INSERT INTO realtime_bars (
+    instrument_symbol, realtime_source_id, evidence_channel_id, provider_symbol,
+    interval_seconds, open_time, observed_at, received_at,
+    open, high, low, close, volume, state, revision, finalized_at, raw_payload
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8,
+    $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb
+)
+ON CONFLICT (realtime_source_id, instrument_symbol, interval_seconds, open_time)
+DO UPDATE SET
+    evidence_channel_id = EXCLUDED.evidence_channel_id,
+    provider_symbol = EXCLUDED.provider_symbol,
+    observed_at = EXCLUDED.observed_at,
+    received_at = EXCLUDED.received_at,
+    open = EXCLUDED.open,
+    high = EXCLUDED.high,
+    low = EXCLUDED.low,
+    close = EXCLUDED.close,
+    volume = EXCLUDED.volume,
+    state = EXCLUDED.state,
+    revision = EXCLUDED.revision,
+    finalized_at = EXCLUDED.finalized_at,
+    raw_payload = EXCLUDED.raw_payload,
+    persisted_at = now()
+WHERE EXCLUDED.revision > realtime_bars.revision
+   OR (
+       EXCLUDED.revision = realtime_bars.revision
+       AND EXCLUDED.received_at > realtime_bars.received_at
+   )
 """
 
 _SELECT_INSTRUMENT_SOURCE = """
@@ -406,6 +456,27 @@ ORDER BY open_time
 LIMIT $5
 """
 
+_SELECT_QUOTE_CANDLES_BEFORE = """
+SELECT *
+FROM (
+    SELECT
+        date_trunc('minute', observed_at) AS open_time,
+        (array_agg(provider_symbol ORDER BY observed_at, id))[1] AS provider_symbol,
+        (array_agg(last ORDER BY observed_at, id))[1] AS open,
+        max(last) AS high,
+        min(last) AS low,
+        (array_agg(last ORDER BY observed_at DESC, id DESC))[1] AS close,
+        max(observed_at) AS observed_at,
+        max(received_at) AS received_at
+    FROM quote_events
+    WHERE instrument_symbol = $1 AND source_id = $2 AND observed_at < $3
+    GROUP BY date_trunc('minute', observed_at)
+    ORDER BY open_time DESC
+    LIMIT $4
+) AS recent
+ORDER BY open_time
+"""
+
 _SELECT_RECENT_SOURCE_CANDLES = """
 SELECT *
 FROM (
@@ -432,6 +503,71 @@ WHERE instrument_symbol = $1
   AND open_time < $5
 ORDER BY open_time
 LIMIT $6
+"""
+
+_SELECT_SOURCE_CANDLES_BEFORE = """
+SELECT *
+FROM (
+    SELECT
+        instrument_symbol, source_id, provider_symbol, interval_seconds, open_time,
+        observed_at, received_at, open, high, low, close, volume, raw_payload
+    FROM candles
+    WHERE instrument_symbol = $1 AND source_id = $2 AND interval_seconds = $3
+      AND open_time < $4
+    ORDER BY open_time DESC
+    LIMIT $5
+) AS recent
+ORDER BY open_time
+"""
+
+_SELECT_RECENT_REALTIME_BARS = """
+SELECT *
+FROM (
+    SELECT
+        instrument_symbol, realtime_source_id, evidence_channel_id, provider_symbol,
+        interval_seconds, open_time, observed_at, received_at,
+        open, high, low, close, volume, state, revision, finalized_at, raw_payload
+    FROM realtime_bars
+    WHERE instrument_symbol = $1
+      AND realtime_source_id = $2
+      AND interval_seconds = $3
+    ORDER BY open_time DESC
+    LIMIT $4
+) AS recent
+ORDER BY open_time
+"""
+
+_SELECT_RANGE_REALTIME_BARS = """
+SELECT
+    instrument_symbol, realtime_source_id, evidence_channel_id, provider_symbol,
+    interval_seconds, open_time, observed_at, received_at,
+    open, high, low, close, volume, state, revision, finalized_at, raw_payload
+FROM realtime_bars
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND interval_seconds = $3
+  AND open_time >= $4
+  AND open_time < $5
+ORDER BY open_time
+LIMIT $6
+"""
+
+_SELECT_REALTIME_BARS_BEFORE = """
+SELECT *
+FROM (
+    SELECT
+        instrument_symbol, realtime_source_id, evidence_channel_id, provider_symbol,
+        interval_seconds, open_time, observed_at, received_at,
+        open, high, low, close, volume, state, revision, finalized_at, raw_payload
+    FROM realtime_bars
+    WHERE instrument_symbol = $1
+      AND realtime_source_id = $2
+      AND interval_seconds = $3
+      AND open_time < $4
+    ORDER BY open_time DESC
+    LIMIT $5
+) AS recent
+ORDER BY open_time
 """
 
 _SELECT_CANDLE_CACHE_RANGES = """
@@ -526,6 +662,29 @@ def _candle_values(candle: Candle) -> tuple[object, ...]:
     )
 
 
+def _realtime_bar_values(bar: RealtimeBar) -> tuple[object, ...]:
+    source = bar.source
+    return (
+        bar.instrument.symbol,
+        source.provider,
+        bar.evidence_channel_id,
+        source.provider_symbol,
+        int(bar.interval.total_seconds()),
+        bar.open_time,
+        source.observed_at,
+        source.received_at,
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+        bar.volume,
+        bar.state.value,
+        bar.revision,
+        bar.finalized_at,
+        _payload_json(bar, source.raw_payload),
+    )
+
+
 def _raw_payload(value: object) -> Mapping[str, object] | None:
     if isinstance(value, str):
         decoded = json.loads(value)
@@ -550,6 +709,30 @@ def _candle_from_row(row: Mapping[str, object], instrument: Instrument) -> Candl
             received_at=row["received_at"],
             raw_payload=_raw_payload(row["raw_payload"]),
         ),
+    )
+
+
+def _realtime_bar_from_row(row: Mapping[str, object], instrument: Instrument) -> RealtimeBar:
+    return RealtimeBar(
+        instrument=instrument,
+        interval=timedelta(seconds=int(row["interval_seconds"])),
+        open_time=row["open_time"],
+        open=Decimal(row["open"]),
+        high=Decimal(row["high"]),
+        low=Decimal(row["low"]),
+        close=Decimal(row["close"]),
+        volume=Decimal(row["volume"]) if row["volume"] is not None else None,
+        source=SourceMetadata(
+            provider=str(row["realtime_source_id"]),
+            provider_symbol=str(row["provider_symbol"]),
+            observed_at=row["observed_at"],
+            received_at=row["received_at"],
+            raw_payload=_raw_payload(row["raw_payload"]),
+        ),
+        evidence_channel_id=str(row["evidence_channel_id"]),
+        state=BarState(str(row["state"])),
+        revision=int(row["revision"]),
+        finalized_at=row["finalized_at"],
     )
 
 
@@ -700,6 +883,44 @@ class PostgresMarketDataStore:
             )
         return _quote_from_row(row, instrument) if row is not None else None
 
+    async def load_quote_event_page(
+        self,
+        instrument: Instrument,
+        *,
+        source_ids: tuple[str, ...],
+        before_id: int | None = None,
+        page_size: int = 2_000,
+    ) -> tuple[QuoteSample, ...]:
+        if not source_ids:
+            return ()
+        if page_size < 1:
+            raise ValueError("page_size must be positive")
+        if before_id is not None and before_id < 1:
+            raise ValueError("before_id must be positive")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                _SELECT_QUOTE_EVENT_PAGE,
+                instrument.symbol,
+                source_ids,
+                before_id,
+                page_size,
+            )
+        return tuple(
+            QuoteSample(
+                source_id=str(row["source_id"]),
+                channel_id=str(row["source_id"]),
+                event_id=f"persisted:{row['id']}",
+                instrument=instrument,
+                provider_symbol=str(row["provider_symbol"]),
+                observed_at=row["observed_at"],
+                received_at=row["received_at"],
+                value=Decimal(row["last"]),
+                storage_id=int(row["id"]),
+            )
+            for row in rows
+        )
+
     async def save_candles(self, candles: Sequence[Candle]) -> None:
         if not candles:
             return
@@ -712,6 +933,26 @@ class PostgresMarketDataStore:
             for source_id in sources:
                 await connection.execute(_UPSERT_SOURCE, source_id)
             await connection.executemany(_UPSERT_CANDLE, [_candle_values(row) for row in candles])
+
+    async def save_realtime_bars(self, bars: Sequence[RealtimeBar]) -> None:
+        if not bars:
+            return
+        pool = self._require_pool()
+        instruments = {bar.instrument.symbol: bar.instrument for bar in bars}
+        sources = {
+            source_id
+            for bar in bars
+            for source_id in (bar.source.provider, bar.evidence_channel_id)
+        }
+        async with pool.acquire() as connection, connection.transaction():
+            for instrument in instruments.values():
+                await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
+            for source_id in sources:
+                await connection.execute(_UPSERT_SOURCE, source_id)
+            await connection.executemany(
+                _UPSERT_REALTIME_BAR,
+                [_realtime_bar_values(row) for row in bars],
+            )
 
     async def remove_source_from_standard_history(
         self,
@@ -831,6 +1072,71 @@ class PostgresMarketDataStore:
                 source_id,
             )
 
+    async def load_realtime_bars(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        interval: timedelta = timedelta(minutes=1),
+        start: datetime | None = None,
+        count: int = 100,
+    ) -> tuple[RealtimeBar, ...]:
+        if not 1 <= count <= 10_000:
+            raise ValueError("count must be between 1 and 10000")
+        if start is not None and (start.tzinfo is None or start.utcoffset() is None):
+            raise ValueError("start must be timezone-aware")
+        interval_seconds = int(interval.total_seconds())
+        if interval_seconds < 1:
+            raise ValueError("interval must be positive")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            if start is None:
+                rows = await connection.fetch(
+                    _SELECT_RECENT_REALTIME_BARS,
+                    instrument.symbol,
+                    source_id,
+                    interval_seconds,
+                    count,
+                )
+            else:
+                rows = await connection.fetch(
+                    _SELECT_RANGE_REALTIME_BARS,
+                    instrument.symbol,
+                    source_id,
+                    interval_seconds,
+                    start,
+                    start + interval * count,
+                    count,
+                )
+        return tuple(_realtime_bar_from_row(row, instrument) for row in rows)
+
+    async def load_realtime_bars_before(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        interval: timedelta = timedelta(minutes=1),
+        before: datetime | None = None,
+        count: int = 2_000,
+    ) -> tuple[RealtimeBar, ...]:
+        if not 1 <= count <= 10_000:
+            raise ValueError("count must be between 1 and 10000")
+        pool = self._require_pool()
+        interval_seconds = int(interval.total_seconds())
+        async with pool.acquire() as connection:
+            query = (
+                _SELECT_RECENT_REALTIME_BARS
+                if before is None
+                else _SELECT_REALTIME_BARS_BEFORE
+            )
+            arguments = (
+                (instrument.symbol, source_id, interval_seconds, count)
+                if before is None
+                else (instrument.symbol, source_id, interval_seconds, before, count)
+            )
+            rows = await connection.fetch(query, *arguments)
+        return tuple(_realtime_bar_from_row(row, instrument) for row in rows)
+
     async def load_source_candles(
         self,
         instrument: Instrument,
@@ -867,6 +1173,33 @@ class PostgresMarketDataStore:
                     start + interval * count,
                     count,
                 )
+        return tuple(_candle_from_row(row, instrument) for row in rows)
+
+    async def load_source_candles_before(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        interval: timedelta = timedelta(minutes=1),
+        before: datetime | None = None,
+        count: int = 2_000,
+    ) -> tuple[Candle, ...]:
+        if not 1 <= count <= 10_000:
+            raise ValueError("count must be between 1 and 10000")
+        pool = self._require_pool()
+        interval_seconds = int(interval.total_seconds())
+        async with pool.acquire() as connection:
+            query = (
+                _SELECT_RECENT_SOURCE_CANDLES
+                if before is None
+                else _SELECT_SOURCE_CANDLES_BEFORE
+            )
+            arguments = (
+                (instrument.symbol, source_id, interval_seconds, count)
+                if before is None
+                else (instrument.symbol, source_id, interval_seconds, before, count)
+            )
+            rows = await connection.fetch(query, *arguments)
         return tuple(_candle_from_row(row, instrument) for row in rows)
 
     async def candle_missing_ranges(
@@ -992,6 +1325,56 @@ class PostgresMarketDataStore:
                     source_id,
                     start,
                     start + timedelta(minutes=count),
+                    count,
+                )
+        return tuple(
+            Candle(
+                instrument=instrument,
+                interval=timedelta(minutes=1),
+                open_time=row["open_time"],
+                open=row["open"],
+                high=row["high"],
+                low=row["low"],
+                close=row["close"],
+                volume=None,
+                source=SourceMetadata(
+                    provider=source_id,
+                    provider_symbol=row["provider_symbol"],
+                    observed_at=row["observed_at"],
+                    received_at=row["received_at"],
+                    raw_payload={"derived_from": "persisted_quote_events"},
+                ),
+            )
+            for row in rows
+        )
+
+    async def load_quote_candles_before(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        before: datetime | None = None,
+        count: int = 2_000,
+    ) -> tuple[Candle, ...]:
+        if not 1 <= count <= 10_000:
+            raise ValueError("count must be between 1 and 10000")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            if before is None:
+                cutoff = datetime.now(UTC) - timedelta(minutes=max(180, count * 3))
+                rows = await connection.fetch(
+                    _SELECT_RECENT_QUOTE_CANDLES,
+                    instrument.symbol,
+                    source_id,
+                    cutoff,
+                    count,
+                )
+            else:
+                rows = await connection.fetch(
+                    _SELECT_QUOTE_CANDLES_BEFORE,
+                    instrument.symbol,
+                    source_id,
+                    before,
                     count,
                 )
         return tuple(

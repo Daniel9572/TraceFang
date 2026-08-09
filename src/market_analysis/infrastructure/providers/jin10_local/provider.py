@@ -15,6 +15,7 @@ from market_analysis.domain.errors import (
     ProviderDataError,
     ProviderUnavailableError,
 )
+from market_analysis.domain.market_events import BarState
 from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
 from market_analysis.infrastructure.providers.jin10_local.protocol import (
     ADVANCED_QUOTE_PUSH_PROTOCOL,
@@ -53,6 +54,7 @@ _KLINE_TIME_TYPE = 1
 _MAX_HISTORY_PAGES = 64
 _MAX_HISTORY_FILE_CACHE = 32
 QuoteListener = Callable[[QuoteSnapshot], None]
+CandleListener = Callable[[Candle], None]
 
 
 class Jin10LocalProvider:
@@ -76,6 +78,7 @@ class Jin10LocalProvider:
         self._connected = False
         self._last_error: str | None = None
         self._quote_listeners: set[QuoteListener] = set()
+        self._candle_listeners: set[CandleListener] = set()
         self._connection_had_quote = False
         self._connection_ready = asyncio.Event()
         self._active_socket: ClientConnection | None = None
@@ -142,6 +145,12 @@ class Jin10LocalProvider:
 
     def remove_quote_listener(self, listener: QuoteListener) -> None:
         self._quote_listeners.discard(listener)
+
+    def add_candle_listener(self, listener: CandleListener) -> None:
+        self._candle_listeners.add(listener)
+
+    def remove_candle_listener(self, listener: CandleListener) -> None:
+        self._candle_listeners.discard(listener)
 
     def health(self) -> tuple[bool, str, str | None]:
         if not self._subscriptions:
@@ -291,9 +300,6 @@ class Jin10LocalProvider:
             else:
                 raise ProviderUnavailableError("金十同源 K 线回补超过安全分页上限")
 
-        for candle in self._minute_candles.get(provider_code, {}).values():
-            if range_start <= candle.open_time < range_end:
-                collected[candle.open_time] = candle
         return tuple(collected[key] for key in sorted(collected))
 
     def seed_candles(self, candles: tuple[Candle, ...]) -> None:
@@ -548,6 +554,8 @@ class Jin10LocalProvider:
             value.candles,
             protocol=protocol,
             time_type=value.time_type,
+            state=BarState.PROVISIONAL_AUTHORITATIVE,
+            publish=True,
         )
 
     def _store_wire_candles(
@@ -559,6 +567,8 @@ class Jin10LocalProvider:
         protocol: int,
         time_type: int,
         file_name: str | None = None,
+        state: BarState = BarState.FINAL,
+        publish: bool = False,
     ) -> tuple[Candle, ...]:
         received_at = datetime.now(UTC)
         target = self._minute_candles.setdefault(provider_code, {})
@@ -587,12 +597,17 @@ class Jin10LocalProvider:
                         "time_type": time_type,
                         "price_scale": 1_000_000,
                         "history_file": file_name,
+                        "bar_state": state.value,
                     },
                 ),
             )
             current = target.get(open_time)
             if current is None or candle.source.received_at >= current.source.received_at:
                 target[open_time] = candle
+                if publish:
+                    for listener in tuple(self._candle_listeners):
+                        with suppress(Exception):
+                            listener(candle)
             rows.append(candle)
         self._trim_candles(target)
         return tuple(rows)
@@ -644,7 +659,6 @@ class Jin10LocalProvider:
                 },
             ),
         )
-        self._store_minute_candle(quote)
         self._latest[wire.provider_code] = quote
         self._last_error = None
         self._connection_had_quote = True
@@ -652,49 +666,6 @@ class Jin10LocalProvider:
             with suppress(Exception):
                 listener(quote)
         self._updates[wire.provider_code].set()
-
-    def _store_minute_candle(self, quote: QuoteSnapshot) -> None:
-        open_time = quote.source.observed_at.replace(second=0, microsecond=0)
-        rows = self._minute_candles.setdefault(quote.source.provider_symbol, {})
-        current = rows.get(open_time)
-        if current is None:
-            rows[open_time] = Candle(
-                instrument=quote.instrument,
-                interval=timedelta(minutes=1),
-                open_time=open_time,
-                open=quote.last,
-                high=quote.last,
-                low=quote.last,
-                close=quote.last,
-                volume=None,
-                source=SourceMetadata(
-                    provider=self.name,
-                    provider_symbol=quote.source.provider_symbol,
-                    observed_at=quote.source.observed_at,
-                    received_at=quote.source.received_at,
-                    raw_payload={"derived_from": "local_quote_stream"},
-                ),
-            )
-            self._trim_candles(rows)
-            return
-
-        rows[open_time] = Candle(
-            instrument=current.instrument,
-            interval=current.interval,
-            open_time=current.open_time,
-            open=current.open,
-            high=max(current.high, quote.last),
-            low=min(current.low, quote.last),
-            close=quote.last,
-            volume=None,
-            source=SourceMetadata(
-                provider=self.name,
-                provider_symbol=quote.source.provider_symbol,
-                observed_at=quote.source.observed_at,
-                received_at=quote.source.received_at,
-                raw_payload={"derived_from": "local_quote_stream"},
-            ),
-        )
 
     @staticmethod
     def _trim_candles(rows: dict[datetime, Candle]) -> None:
