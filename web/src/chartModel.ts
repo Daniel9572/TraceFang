@@ -66,12 +66,11 @@ export function mergeLivePrice(
     return result;
   }
 
-  const open = latest.close;
   result.push({
     time: bucket,
-    open,
-    high: Math.max(open, livePrice),
-    low: Math.min(open, livePrice),
+    open: livePrice,
+    high: livePrice,
+    low: livePrice,
     close: livePrice,
   });
   return result;
@@ -120,12 +119,11 @@ export function mergeLiveSamples(
       latest.close = sample.value;
       continue;
     }
-    const open = latest.close;
     result.push({
       time: bucket,
-      open,
-      high: Math.max(open, sample.value),
-      low: Math.min(open, sample.value),
+      open: sample.value,
+      high: sample.value,
+      low: sample.value,
       close: sample.value,
     });
   }

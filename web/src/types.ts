@@ -21,6 +21,7 @@ export interface SourceMetadata {
   provider_symbol: string;
   observed_at: string;
   received_at: string;
+  raw_payload?: Record<string, unknown> | null;
 }
 
 export interface Instrument {
@@ -31,11 +32,33 @@ export interface Instrument {
   venue: string | null;
 }
 
+export interface TradingSessionWindow {
+  weekday: 0 | 1 | 2 | 3 | 4 | 5 | 6;
+  open: string;
+  close: string;
+  close_day_offset: number;
+}
+
+export interface MarketSchedule {
+  time_zone: string;
+  sessions: TradingSessionWindow[];
+  reference: string;
+}
+
+export type MarketPhase = "open" | "closed" | "unknown";
+
 export interface InstrumentEntry {
   provider: string;
   provider_code: string;
   name: string;
   instrument: Instrument | null;
+  price_unit: string;
+  price_digits: number;
+  quote_kind: "direct" | "derived";
+  history_available: boolean;
+  source_ids: SourceId[];
+  dependencies: string[];
+  market_schedule?: MarketSchedule | null;
 }
 
 export interface QuoteSnapshot {
@@ -95,15 +118,28 @@ export interface SourceDescriptor {
   last_success_at: string | null;
 }
 
+export interface CandleBackfillResult {
+  source_id: SourceId;
+  state: "cached" | "fetched";
+  start: string;
+  end: string;
+  row_count: number;
+}
+
 export interface SourceConnectionTest {
   source_id: SourceId;
   code: string;
-  last: number | string;
-  observed_at: string;
+  state: string;
+  detail: string | null;
+  data_fresh: boolean;
+  last: number | string | null;
+  observed_at: string | null;
   latency_ms: number;
-  quality: "complete" | "degraded";
+  quality: "complete" | "degraded" | "unavailable";
   unavailable_fields: string[];
   stale_fields: string[];
+  kline_points: number;
+  kline_open_time: string | null;
 }
 
 export interface InstrumentSourceSelection {

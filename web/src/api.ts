@@ -1,5 +1,6 @@
 import type {
   Candle,
+  CandleBackfillResult,
   InstrumentEntry,
   InstrumentSourceSelection,
   QuoteView,
@@ -7,6 +8,7 @@ import type {
   SourceDescriptor,
   SourceId,
 } from "./types";
+import { historyWindowBefore, type HistoryWindow } from "./historyLoading";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -30,21 +32,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-const HISTORY_LOOKBACK_MINUTES = 23 * 60;
-const HISTORY_PAGE_SIZE = 100;
-const HISTORY_CACHE_MILLISECONDS = 30 * 60 * 1_000;
+const HISTORY_LOOKBACK_MINUTES = 48 * 60;
+const HISTORY_PAGE_SIZE = 1_000;
 
 interface CandleRequestOptions {
   time?: number;
   count?: number;
 }
 
-interface CandleHistoryCacheEntry {
-  expiresAt: number;
-  promise: Promise<Candle[]>;
+interface CandleHistoryBackfill {
+  result: CandleBackfillResult;
+  candles: Candle[];
 }
 
-const candleHistoryCache = new Map<string, CandleHistoryCacheEntry>();
+const candleHistoryRequests = new Map<string, Promise<Candle[]>>();
+const candleBackfillRequests = new Map<string, Promise<CandleHistoryBackfill>>();
 
 export function mergeCandleRows(...pages: Candle[][]): Candle[] {
   const rows = new Map<string, Candle>();
@@ -56,58 +58,133 @@ export function mergeCandleRows(...pages: Candle[][]): Candle[] {
   );
 }
 
+function historyWindow(now = Date.now()): HistoryWindow {
+  const end = Math.floor(now / (5 * 60_000)) * 5 * 60;
+  return {
+    start: end - HISTORY_LOOKBACK_MINUTES * 60,
+    end,
+    count: HISTORY_LOOKBACK_MINUTES,
+  };
+}
+
 function fetchCandles(
   code: string,
+  expectedSourceId: SourceId,
   options: CandleRequestOptions = {},
 ): Promise<Candle[]> {
   const params = new URLSearchParams({
     count: String(options.count ?? HISTORY_PAGE_SIZE),
   });
   if (options.time !== undefined) params.set("time", String(options.time));
-  return request<Candle[]>(`/api/candles/${encodeURIComponent(code)}?${params.toString()}`);
+  return request<Candle[]>(`/api/candles/${encodeURIComponent(code)}?${params.toString()}`)
+    .then((rows) => {
+      if (rows.some((row) => row.source.provider !== expectedSourceId)) {
+        throw new Error("合约实时数据源已变化，请重新读取 K 线");
+      }
+      return rows;
+    });
 }
 
-async function fetchCandleHistory(code: string): Promise<Candle[]> {
-  const cacheKey = code;
-  const now = Date.now();
-  const cached = candleHistoryCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) return cached.promise;
+async function fetchCandleWindow(
+  code: string,
+  sourceId: SourceId,
+  window: HistoryWindow,
+): Promise<Candle[]> {
+  const requests: Array<{ time: number; count: number }> = [];
+  for (let time = window.start; time < window.end; time += HISTORY_PAGE_SIZE * 60) {
+    requests.push({
+      time,
+      count: Math.min(HISTORY_PAGE_SIZE, Math.ceil((window.end - time) / 60)),
+    });
+  }
+  const pages = await Promise.all(
+    requests.map((options) => fetchCandles(code, sourceId, options)),
+  );
+  return mergeCandleRows(...pages);
+}
 
-  const promise = (async () => {
-    const endMinute = Math.floor(now / 60_000) * 60;
-    const recentWindowStart = endMinute - HISTORY_PAGE_SIZE * 60;
-    const historyStart = endMinute - HISTORY_LOOKBACK_MINUTES * 60;
-    const requests: Array<{ time: number; count: number }> = [];
-
-    for (let time = historyStart; time < recentWindowStart; time += HISTORY_PAGE_SIZE * 60) {
-      requests.push({
-        time,
-        count: Math.min(HISTORY_PAGE_SIZE, Math.ceil((recentWindowStart - time) / 60)),
-      });
-    }
-
-    const pages = await Promise.all(
-      requests.map((options) => fetchCandles(code, options)),
-    );
-    return mergeCandleRows(...pages);
-  })();
-
-  candleHistoryCache.set(cacheKey, {
-    expiresAt: now + HISTORY_CACHE_MILLISECONDS,
-    promise,
-  });
+async function fetchCandleHistory(code: string, sourceId: SourceId): Promise<Candle[]> {
+  const window = historyWindow();
+  const cacheKey = `${sourceId}:${code}:${window.start}:${window.count}`;
+  const active = candleHistoryRequests.get(cacheKey);
+  if (active) return active;
+  const promise = fetchCandleWindow(code, sourceId, window);
+  candleHistoryRequests.set(cacheKey, promise);
   try {
     return await promise;
-  } catch (error) {
-    if (candleHistoryCache.get(cacheKey)?.promise === promise) {
-      candleHistoryCache.delete(cacheKey);
+  } finally {
+    if (candleHistoryRequests.get(cacheKey) === promise) {
+      candleHistoryRequests.delete(cacheKey);
     }
-    throw error;
   }
+}
+
+async function backfillCandleWindow(
+  code: string,
+  sourceId: SourceId,
+  window: HistoryWindow,
+): Promise<CandleHistoryBackfill> {
+  const cacheKey = `${sourceId}:${code}:${window.start}:${window.count}`;
+  const active = candleBackfillRequests.get(cacheKey);
+  if (active) return active;
+  const promise = (async () => {
+    const params = new URLSearchParams({
+      time: String(window.start),
+      count: String(window.count),
+    });
+    const result = await request<CandleBackfillResult>(
+      `/api/candles/${encodeURIComponent(code)}/backfill?${params.toString()}`,
+      { method: "POST" },
+    );
+    if (result.source_id !== sourceId) {
+      throw new Error("合约实时数据源已变化，请重新读取 K 线");
+    }
+    return {
+      result,
+      candles: await fetchCandleWindow(code, sourceId, window),
+    };
+  })();
+  candleBackfillRequests.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    if (candleBackfillRequests.get(cacheKey) === promise) {
+      candleBackfillRequests.delete(cacheKey);
+    }
+  }
+}
+
+function backfillCandleHistory(
+  code: string,
+  sourceId: SourceId,
+): Promise<CandleHistoryBackfill> {
+  return backfillCandleWindow(code, sourceId, historyWindow());
+}
+
+function loadOlderCandleHistory(
+  code: string,
+  sourceId: SourceId,
+  beforeEpochSeconds: number,
+  countMinutes: number,
+): Promise<CandleHistoryBackfill> {
+  return backfillCandleWindow(
+    code,
+    sourceId,
+    historyWindowBefore(beforeEpochSeconds, countMinutes),
+  );
 }
 
 export const marketApi = {
   instruments: () => request<InstrumentEntry[]>("/api/instruments"),
+  watchlist: () => request<InstrumentEntry[]>("/api/watchlist"),
+  addToWatchlist: (code: string) =>
+    request<InstrumentEntry[]>(`/api/watchlist/${encodeURIComponent(code)}`, {
+      method: "POST",
+    }),
+  removeFromWatchlist: (code: string) =>
+    request<InstrumentEntry[]>(`/api/watchlist/${encodeURIComponent(code)}`, {
+      method: "DELETE",
+    }),
   instrumentSource: (code: string) =>
     request<InstrumentSourceSelection>(`/api/instruments/${encodeURIComponent(code)}/source`),
   updateInstrumentSource: (code: string, sourceId: SourceId) =>
@@ -119,13 +196,21 @@ export const marketApi = {
     request<SourceDescriptor[]>(`/api/sources?refresh=${refresh ? "true" : "false"}`),
   quote: (code: string) =>
     request<QuoteView>(`/api/quotes/${encodeURIComponent(code)}`),
-  candles: fetchCandles,
+  lastQuote: (code: string) =>
+    request<QuoteView>(`/api/quotes/${encodeURIComponent(code)}/last`),
+  candles: (code: string, sourceId: SourceId, options: CandleRequestOptions = {}) =>
+    fetchCandles(code, sourceId, options),
   candleHistory: fetchCandleHistory,
+  backfillCandleHistory,
+  olderCandleHistory: loadOlderCandleHistory,
   openQuoteStream: (code: string) => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}`;
     return new WebSocket(url);
   },
-  testSource: (sourceId: SourceId) =>
-    request<SourceConnectionTest>(`/api/sources/${sourceId}/test`, { method: "POST" }),
+  testSource: (sourceId: SourceId, code: string) =>
+    request<SourceConnectionTest>(
+      `/api/sources/${sourceId}/test?code=${encodeURIComponent(code)}`,
+      { method: "POST" },
+    ),
 };

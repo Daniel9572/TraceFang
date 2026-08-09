@@ -21,10 +21,10 @@ import {
   sourceAccessLabels,
   sourceHealthLabels,
 } from "./sourcePresentation";
-import type { QuoteServiceTier, SourceDescriptor, SourceId } from "./types";
+import type { MarketPhase, QuoteServiceTier, SourceDescriptor, SourceId } from "./types";
 
 export interface SourceTestFeedback {
-  tone: "success" | "error";
+  tone: "success" | "warning" | "error";
   message: string;
 }
 
@@ -34,7 +34,8 @@ interface SourcePickerProps {
   fallbackLabel: string;
   busy: boolean;
   contractCode: string;
-  connectionState: "connecting" | "live" | "unavailable";
+  connectionState: "connecting" | "live" | "waiting" | "unavailable";
+  marketPhase: MarketPhase;
   connectionError: string | null;
   testingSourceId: SourceId | null;
   testResults: Partial<Record<SourceId, SourceTestFeedback>>;
@@ -85,6 +86,7 @@ export function SourcePicker({
   busy,
   contractCode,
   connectionState,
+  marketPhase,
   connectionError,
   testingSourceId,
   testResults,
@@ -98,7 +100,10 @@ export function SourcePicker({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const options = useMemo(
-    () => sources.filter((source) => source.capabilities.includes("quote")),
+    () => sources.filter(
+      (source) => source.capabilities.includes("quote")
+        && source.capabilities.includes("candles"),
+    ),
     [sources],
   );
   const selected = options.find((source) => source.source_id === selectedSource)
@@ -114,17 +119,22 @@ export function SourcePicker({
     && selected?.manual_connection_required
     && !selected.connection_active,
   );
+  const closedWaiting = marketPhase === "closed" && connectionState !== "unavailable";
   const connectionLabel = !selected?.selectable
       ? "不可选择"
       : awaitingManualConnection
       ? "待连接"
+      : closedWaiting || connectionState === "waiting"
+        ? "休市待机"
       : connectionState === "live"
         ? "在线"
         : connectionState === "connecting"
           ? "连接中"
-          : "已停滞";
+          : "连接不可用";
   const selectedHealth = !selected?.selectable || awaitingManualConnection
       ? "unknown"
+      : closedWaiting || connectionState === "waiting"
+      ? "waiting"
       : connectionState === "live"
       ? "healthy"
       : connectionState === "connecting"
@@ -236,7 +246,7 @@ export function SourcePicker({
           id="market-source-console"
           className="source-picker-menu"
           role="dialog"
-          aria-label={contractCode + " 逻辑数据源"}
+          aria-label={contractCode + " 实时数据源"}
           ref={menuRef}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
@@ -248,7 +258,7 @@ export function SourcePicker({
           <div className="source-console-head">
             <div>
               <span className="source-console-title">
-                <strong>逻辑数据源</strong>
+                <strong>实时数据源</strong>
                 <b>{contractCode}</b>
               </span>
               <small>一个合约只保留一个绑定；新选择会原子替换旧来源</small>
@@ -426,7 +436,7 @@ export function SourcePicker({
 
           <div className="source-console-foot">
             <span aria-hidden="true" />
-            物理采集通道由逻辑源内部管理，不作为合约可选项。
+            内部采集通道由实时数据源管理，不作为合约可选项。
           </div>
         </div>
       ) : null}

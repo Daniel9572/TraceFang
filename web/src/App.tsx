@@ -2,10 +2,13 @@ import {
   Activity,
   Bell,
   CandlestickChart,
+  Check,
   ChevronDown,
   ChevronRight,
   CircleHelp,
   Gauge,
+  ListPlus,
+  LoaderCircle,
   Maximize2,
   Newspaper,
   PanelLeftClose,
@@ -15,15 +18,19 @@ import {
   Search,
   Sparkles,
   Waypoints,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { marketApi, mergeCandleRows } from "./api";
 import { appendTimelineSample, buildChartBars } from "./chartModel";
 import { chartPeriodById, type ChartPeriodId } from "./chartPeriods";
+import { historyBatchMinutes } from "./historyLoading";
+import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
 import { SourcePicker, type SourceTestFeedback } from "./SourcePicker";
+import { startWatchlistQuoteStream, watchlistQuoteStreamTargets } from "./watchlistStreams";
 import type {
   Candle,
   HoverCandle,
@@ -42,22 +49,37 @@ const defaultInstruments: InstrumentEntry[] = [
     provider_code: "XAUUSD",
     name: "现货黄金",
     instrument: { symbol: "XAU/USD", asset_class: "spot", base: "XAU", quote: "USD", venue: "OTC" },
+    price_unit: "美元/盎司",
+    price_digits: 2,
+    quote_kind: "direct",
+    history_available: true,
+    source_ids: ["jin10_client"],
+    dependencies: [],
+    market_schedule: SPOT_METALS_MARKET_SCHEDULE,
   },
   {
     provider: "canonical",
     provider_code: "XAGUSD",
     name: "现货白银",
     instrument: { symbol: "XAG/USD", asset_class: "spot", base: "XAG", quote: "USD", venue: "OTC" },
+    price_unit: "美元/盎司",
+    price_digits: 3,
+    quote_kind: "direct",
+    history_available: true,
+    source_ids: ["jin10_client"],
+    dependencies: [],
+    market_schedule: SPOT_METALS_MARKET_SCHEDULE,
   },
 ];
 
 const sourceLabels: Record<SourceId, string> = {
   jin10_client: "金十客户端行情",
+  tonghuashun_futures: "同花顺公开行情",
 };
 
 const errorTranslations: Array<[RegExp, string]> = [
-  [/internal channel.*not a selectable logical source/i, "该来源不是可绑定的逻辑数据源"],
-  [/not a selectable logical quote source/i, "该来源不是可绑定的逻辑数据源"],
+  [/internal channel.*not a selectable realtime source/i, "该通道不是可绑定的实时数据源"],
+  [/not a selectable realtime source/i, "该来源不是可绑定的实时数据源"],
 ];
 
 function translateError(error: unknown): string {
@@ -71,13 +93,27 @@ function numeric(value: number | string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function digitsFor(code: string): number {
-  return code === "XAGUSD" ? 3 : 2;
+function digitsFor(code: string, instrument?: InstrumentEntry): number {
+  if (instrument) return instrument.price_digits;
+  if (code === "XAGUSD") return 3;
+  if (code === "USDCNH") return 4;
+  return 2;
 }
 
-function formatPrice(value: number | string | null | undefined, code: string): string {
+function unitFor(code: string, instrument?: InstrumentEntry): string {
+  if (instrument) return instrument.price_unit;
+  if (code === "USDCNH") return "人民币/美元";
+  if (code === "XAUCNHG") return "人民币/克";
+  return code === "XAUUSD" || code === "XAGUSD" ? "美元/盎司" : "";
+}
+
+function formatPrice(
+  value: number | string | null | undefined,
+  code: string,
+  instrument?: InstrumentEntry,
+): string {
   const parsed = numeric(value);
-  return parsed === null ? "—" : parsed.toFixed(digitsFor(code));
+  return parsed === null ? "—" : parsed.toFixed(digitsFor(code, instrument));
 }
 
 function formatSigned(value: number | string | null | undefined, digits = 2): string {
@@ -192,6 +228,7 @@ function LiveClock() {
 }
 
 export default function App() {
+  const [catalog, setCatalog] = useState(defaultInstruments);
   const [instruments, setInstruments] = useState(defaultInstruments);
   const [selectedCode, setSelectedCode] = useState("XAUUSD");
   const [instrumentSources, setInstrumentSources] = useState<Record<string, SourceId>>({});
@@ -206,6 +243,10 @@ export default function App() {
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
   const [watchOpen, setWatchOpen] = useState(true);
   const [watchPinned, setWatchPinned] = useState(true);
+  const [watchManagerOpen, setWatchManagerOpen] = useState(false);
+  const [watchSearch, setWatchSearch] = useState("");
+  const [watchlistBusyCode, setWatchlistBusyCode] = useState<string | null>(null);
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [periodId, setPeriodId] = useState<ChartPeriodId>("1m");
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
@@ -218,16 +259,30 @@ export default function App() {
   >({});
   const [loadingQuote, setLoadingQuote] = useState(true);
   const [loadingCandles, setLoadingCandles] = useState(true);
-  const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "unavailable">("connecting");
+  const [historySyncing, setHistorySyncing] = useState(false);
+  const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "waiting" | "unavailable">("connecting");
   const candleRequestRef = useRef(0);
+  const candlesRef = useRef<Candle[]>([]);
+  const historyCursorRef = useRef<number | null>(null);
+  const historyLoadInFlightRef = useRef(false);
+  candlesRef.current = candles;
+  const watchlistQuoteStreamsRef = useRef(
+    new Map<string, { sourceId: SourceId; stop: () => void }>(),
+  );
 
   const selectedInstrument =
-    instruments.find((instrument) => instrument.provider_code === selectedCode) ?? defaultInstruments[0];
+    catalog.find((instrument) => instrument.provider_code === selectedCode)
+    ?? instruments.find((instrument) => instrument.provider_code === selectedCode)
+    ?? defaultInstruments[0];
   const selectedSource = instrumentSources[selectedCode] ?? "jin10_client";
   const selectedPeriod = chartPeriodById(periodId);
   const sourceById = useMemo(
     () => new Map(sources.map((source) => [source.source_id, source])),
     [sources],
+  );
+  const compatibleSources = useMemo(
+    () => sources.filter((source) => (selectedInstrument.source_ids ?? ["jin10_client"]).includes(source.source_id)),
+    [selectedInstrument, sources],
   );
   const selectedSourceDescriptor = sourceById.get(selectedSource);
   const selectedSourceReady = Boolean(
@@ -236,6 +291,9 @@ export default function App() {
     && selectedSourceDescriptor.selectable
     && (!selectedSourceDescriptor.manual_connection_required || selectedSourceDescriptor.connection_active),
   );
+  const [marketSession, setMarketSession] = useState(() => marketSessionAt(defaultInstruments[0].market_schedule));
+  const marketPhaseRef = useRef(marketSession.phase);
+  marketPhaseRef.current = marketSession.phase;
 
   const loadSources = useCallback(async () => {
     setSourceBusy(true);
@@ -260,29 +318,43 @@ export default function App() {
 
   const loadCandles = useCallback(async () => {
     const requestId = ++candleRequestRef.current;
+    historyCursorRef.current = null;
+    historyLoadInFlightRef.current = false;
     setLoadingCandles(true);
+    setHistorySyncing(false);
     setCandles([]);
     try {
-      const recent = await marketApi.candles(selectedCode);
+      const recent = await marketApi.candles(selectedCode, selectedSource);
       if (requestId !== candleRequestRef.current) return;
       setCandles(recent);
       setCandleError(null);
-      if (recent.length < 100) {
-        void (async () => {
-          for (const delay of [150, 500, 1_500]) {
-            await new Promise((resolve) => window.setTimeout(resolve, delay));
-            if (requestId !== candleRequestRef.current) return;
-            try {
-              const localRows = await marketApi.candles(selectedCode);
-              if (requestId !== candleRequestRef.current) return;
-              setCandles((current) => mergeCandleRows(current, localRows));
-              if (localRows.length >= 100) return;
-            } catch {
-              // A failed background fill never blocks local history or the live stream.
-            }
+      if (!selectedInstrument.history_available) return;
+      void (async () => {
+        historyLoadInFlightRef.current = true;
+        try {
+          const localHistory = await marketApi.candleHistory(selectedCode, selectedSource);
+          if (requestId !== candleRequestRef.current) return;
+          setCandles((current) => mergeCandleRows(localHistory, current));
+        } catch {
+          // A local cache miss must not delay or blank the live chart.
+        }
+        if (requestId !== candleRequestRef.current) return;
+        setHistorySyncing(true);
+        try {
+          const filled = await marketApi.backfillCandleHistory(selectedCode, selectedSource);
+          if (requestId !== candleRequestRef.current) return;
+          const cursor = Math.floor(new Date(filled.result.start).getTime() / 1_000);
+          if (Number.isFinite(cursor)) historyCursorRef.current = cursor;
+          setCandles((current) => mergeCandleRows(filled.candles, current));
+        } catch {
+          // Historical backfill is isolated from the realtime quote path.
+        } finally {
+          if (requestId === candleRequestRef.current) {
+            historyLoadInFlightRef.current = false;
+            setHistorySyncing(false);
           }
-        })();
-      }
+        }
+      })();
     } catch (error) {
       if (requestId !== candleRequestRef.current) return;
       setCandles([]);
@@ -290,23 +362,68 @@ export default function App() {
     } finally {
       if (requestId === candleRequestRef.current) setLoadingCandles(false);
     }
-  }, [selectedCode]);
+  }, [selectedCode, selectedInstrument.history_available, selectedSource]);
+
+  const loadOlderCandles = useCallback(async () => {
+    if (!selectedInstrument.history_available || historyLoadInFlightRef.current) return;
+    const earliest = candlesRef.current.at(0);
+    const earliestSeconds = earliest
+      ? Math.floor(new Date(earliest.open_time).getTime() / 1_000)
+      : null;
+    const before = historyCursorRef.current ?? earliestSeconds;
+    if (before === null || !Number.isFinite(before)) return;
+
+    const requestId = candleRequestRef.current;
+    historyLoadInFlightRef.current = true;
+    setHistorySyncing(true);
+    try {
+      const filled = await marketApi.olderCandleHistory(
+        selectedCode,
+        selectedSource,
+        before,
+        historyBatchMinutes(selectedPeriod),
+      );
+      if (requestId !== candleRequestRef.current) return;
+      const cursor = Math.floor(new Date(filled.result.start).getTime() / 1_000);
+      if (Number.isFinite(cursor)) historyCursorRef.current = cursor;
+      setCandles((current) => mergeCandleRows(filled.candles, current));
+    } catch {
+      // Keep the visible chart interactive; the next left-edge gesture can retry.
+    } finally {
+      if (requestId === candleRequestRef.current) {
+        historyLoadInFlightRef.current = false;
+        setHistorySyncing(false);
+      }
+    }
+  }, [selectedCode, selectedInstrument.history_available, selectedPeriod, selectedSource]);
 
   const refreshCandles = useCallback(async () => {
     try {
-      const recent = await marketApi.candles(selectedCode);
+      const recent = await marketApi.candles(selectedCode, selectedSource);
       setCandles((current) => mergeCandleRows(current, recent));
       setCandleError(null);
     } catch (error) {
       setCandleError(translateError(error));
     }
-  }, [selectedCode]);
+  }, [selectedCode, selectedSource]);
 
   useEffect(() => {
-    void marketApi
-      .instruments()
-      .then((values) => setInstruments(values.length > 0 ? values : defaultInstruments))
-      .catch(() => setInstruments(defaultInstruments));
+    void Promise.all([marketApi.instruments(), marketApi.watchlist()])
+      .then(([available, observed]) => {
+        const nextCatalog = available.length > 0 ? available : defaultInstruments;
+        const nextWatchlist = observed.length > 0 ? observed : defaultInstruments;
+        setCatalog(nextCatalog);
+        setInstruments(nextWatchlist);
+        setSelectedCode((current) =>
+          nextWatchlist.some((item) => item.provider_code === current)
+            ? current
+            : nextWatchlist[0].provider_code,
+        );
+      })
+      .catch(() => {
+        setCatalog(defaultInstruments);
+        setInstruments(defaultInstruments);
+      });
     void loadSources();
   }, [loadSources]);
 
@@ -335,6 +452,16 @@ export default function App() {
   }, [instruments]);
 
   useEffect(() => {
+    const refresh = () => {
+      const next = marketSessionAt(selectedInstrument.market_schedule);
+      setMarketSession((current) => current.phase === next.phase ? current : next);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 15_000);
+    return () => window.clearInterval(timer);
+  }, [selectedInstrument.market_schedule, selectedInstrument.provider_code]);
+
+  useEffect(() => {
     void loadCandles();
   }, [loadCandles]);
 
@@ -354,7 +481,7 @@ export default function App() {
       setQuoteStreamState("unavailable");
       setQuoteError(selectedSourceDescriptor && !selectedSourceDescriptor.selectable
         ? `${selectedSourceDescriptor.display_name}当前不可选择`
-        : `${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在逻辑数据源菜单中测试连接`);
+        : `${selectedSourceDescriptor?.display_name ?? "当前行情源"}待连接，请在实时数据源菜单中测试连接`);
       setLoadingQuote(false);
       return;
     }
@@ -364,13 +491,16 @@ export default function App() {
       socket = marketApi.openQuoteStream(selectedCode);
       socket.onopen = () => {
         retryCount = 0;
-        setQuoteStreamState("connecting");
+        const marketClosed = marketPhaseRef.current === "closed";
+        setQuoteStreamState(marketClosed ? "waiting" : "connecting");
+        if (marketClosed) setLoadingQuote(false);
       };
       socket.onmessage = (message) => {
         if (disposed) return;
         const event = JSON.parse(String(message.data)) as QuoteStreamEvent;
-        setQuoteStreamState(event.state);
+        const marketClosed = marketPhaseRef.current === "closed";
         if (event.kind === "quote" && event.quote) {
+          setQuoteStreamState(marketClosed ? "waiting" : "live");
           setQuote(event.quote);
           setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteView }));
           setWatchPriceSeries((current) => appendWatchPriceSample(current, selectedCode, event.quote as QuoteView));
@@ -401,8 +531,11 @@ export default function App() {
           setQuoteError(null);
           setLoadingQuote(false);
         } else if (event.state === "unavailable") {
-          setQuoteError(translateError(event.error ?? "当前行情源不可用"));
+          setQuoteStreamState(marketClosed ? "waiting" : "unavailable");
+          setQuoteError(marketClosed ? null : translateError(event.error ?? "当前行情源不可用"));
           setLoadingQuote(false);
+        } else {
+          setQuoteStreamState(marketClosed ? "waiting" : event.state);
         }
       };
       socket.onerror = () => socket?.close();
@@ -424,6 +557,79 @@ export default function App() {
       socket?.close();
     };
   }, [instrumentSourcesLoaded, selectedCode, selectedSource, selectedSourceDescriptor?.display_name, selectedSourceReady, sourcesLoaded]);
+
+  useEffect(() => {
+    const activeStreams = watchlistQuoteStreamsRef.current;
+    const targets = instrumentSourcesLoaded && sourcesLoaded
+      ? watchlistQuoteStreamTargets(instruments, selectedCode, instrumentSources, sourceById)
+      : [];
+    const targetByCode = new Map(targets.map((target) => [target.code, target]));
+
+    for (const [code, stream] of activeStreams) {
+      const target = targetByCode.get(code);
+      if (target && target.sourceId === stream.sourceId) continue;
+      stream.stop();
+      activeStreams.delete(code);
+    }
+    for (const target of targets) {
+      if (activeStreams.has(target.code)) continue;
+      activeStreams.set(target.code, {
+        sourceId: target.sourceId,
+        stop: startWatchlistQuoteStream({
+          code: target.code,
+          openStream: marketApi.openQuoteStream,
+          onQuote: (code, value) => {
+            setWatchQuotes((current) => ({ ...current, [code]: value }));
+            setWatchPriceSeries((current) => appendWatchPriceSample(current, code, value));
+          },
+        }),
+      });
+    }
+  }, [instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded]);
+
+  useEffect(() => () => {
+    const activeStreams = watchlistQuoteStreamsRef.current;
+    for (const stream of activeStreams.values()) stream.stop();
+    activeStreams.clear();
+  }, []);
+
+  useEffect(() => {
+    if (
+      marketSession.phase !== "closed"
+      || !instrumentSourcesLoaded
+      || !selectedSourceReady
+    ) {
+      return;
+    }
+    let disposed = false;
+    void marketApi.lastQuote(selectedCode).then((lastView) => {
+      if (disposed || lastView.source_id !== selectedSource) return;
+      setQuote((current) => {
+        if (!current) return lastView;
+        const currentTime = new Date(current.quote.source.received_at).getTime();
+        const lastTime = new Date(lastView.quote.source.received_at).getTime();
+        return currentTime >= lastTime ? current : lastView;
+      });
+      setWatchQuotes((current) => {
+        const currentView = current[selectedCode];
+        if (
+          currentView
+          && new Date(currentView.quote.source.received_at).getTime()
+            >= new Date(lastView.quote.source.received_at).getTime()
+        ) {
+          return current;
+        }
+        return { ...current, [selectedCode]: lastView };
+      });
+      setWatchPriceSeries((current) => appendWatchPriceSample(current, selectedCode, lastView));
+      setLoadingQuote(false);
+    }).catch(() => {
+      // Same-source K-line close remains the final display fallback during a cold start.
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [instrumentSourcesLoaded, marketSession.phase, selectedCode, selectedSource, selectedSourceReady]);
 
   useEffect(() => {
     setTimelineSamples([]);
@@ -486,7 +692,8 @@ export default function App() {
     let disposed = false;
     void Promise.allSettled(
       instruments.map(async (item) => {
-        const rows = await marketApi.candles(item.provider_code, { count: WATCH_SPARKLINE_CANDLE_WINDOW });
+        const source = instrumentSources[item.provider_code] ?? "jin10_client";
+        const rows = await marketApi.candles(item.provider_code, source, { count: WATCH_SPARKLINE_CANDLE_WINDOW });
         const prices = downsamplePrices(rows
           .map((row) => numeric(row.close))
           .filter((value): value is number => value !== null), WATCH_SPARKLINE_LIMIT);
@@ -503,24 +710,21 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [instrumentSourcesLoaded, instruments, sourcesLoaded]);
+  }, [instrumentSources, instrumentSourcesLoaded, instruments, sourcesLoaded]);
 
   const preferSource = async (source: SourceDescriptor) => {
     setSourceBusy(true);
     try {
       const value = await marketApi.updateInstrumentSource(selectedCode, source.source_id);
+      setCandles([]);
+      setTimelineSamples([]);
       setInstrumentSources((current) => ({ ...current, [selectedCode]: value.source_id }));
       setWatchQuotes((current) => {
         const next = { ...current };
         delete next[selectedCode];
         return next;
       });
-      setWatchPriceSeries((current) => {
-        const next = { ...current };
-        delete next[selectedCode];
-        return next;
-      });
-      setTestMessage(`${selectedCode} 的实时行情已切换为 ${source.display_name}`);
+      setTestMessage(`${selectedCode} 的实时数据源已切换为 ${source.display_name}`);
     } catch (error) {
       setTestMessage(`合约来源更新失败：${translateError(error)}`);
     } finally {
@@ -536,13 +740,20 @@ export default function App() {
       return next;
     });
     try {
-      const value = await marketApi.testSource(source.source_id);
-      const observedAt = new Date(value.observed_at).toLocaleTimeString("zh-CN", { hour12: false });
+      const value = await marketApi.testSource(source.source_id, selectedCode);
+      const observedAt = value.observed_at
+        ? new Date(value.observed_at).toLocaleTimeString("zh-CN", { hour12: false })
+        : null;
+      const ready = value.data_fresh && value.kline_points > 0;
+      const qualityWarning = value.quality !== "complete";
+      const message = ready
+        ? `连接成功 · 报价 ${formatPrice(value.last!, value.code, selectedInstrument)} · K线 ${value.kline_points} · ${value.latency_ms}ms · ${observedAt}`
+        : `连接已建立 · ${value.detail ?? "正在等待同源报价与 K 线"} · ${value.latency_ms}ms`;
       setSourceTestResults((current) => ({
         ...current,
         [source.source_id]: {
-          tone: "success",
-          message: `连接成功 · 黄金 ${formatPrice(value.last, "XAUUSD")} · ${value.latency_ms}ms · ${observedAt}`,
+          tone: ready && !qualityWarning ? "success" : "warning",
+          message,
         },
       }));
     } catch (error) {
@@ -564,10 +775,51 @@ export default function App() {
     }
   }, []);
 
+  const observedCodes = useMemo(
+    () => new Set(instruments.map((item) => item.provider_code)),
+    [instruments],
+  );
+  const filteredCatalog = useMemo(() => {
+    const query = watchSearch.trim().toLocaleLowerCase("zh-CN");
+    if (!query) return catalog;
+    return catalog.filter((item) =>
+      item.name.toLocaleLowerCase("zh-CN").includes(query)
+      || item.provider_code.toLocaleLowerCase("zh-CN").includes(query)
+      || item.price_unit.toLocaleLowerCase("zh-CN").includes(query),
+    );
+  }, [catalog, watchSearch]);
+
+  const toggleWatchlistInstrument = async (item: InstrumentEntry) => {
+    const isObserved = observedCodes.has(item.provider_code);
+    setWatchlistBusyCode(item.provider_code);
+    setWatchlistError(null);
+    try {
+      const next = isObserved
+        ? await marketApi.removeFromWatchlist(item.provider_code)
+        : await marketApi.addToWatchlist(item.provider_code);
+      setInstruments(next);
+      if (
+        isObserved
+        && item.provider_code === selectedCode
+        && next.length > 0
+      ) {
+        setSelectedCode(next[0].provider_code);
+      }
+    } catch (error) {
+      setWatchlistError(translateError(error));
+    } finally {
+      setWatchlistBusyCode(null);
+    }
+  };
+
   const priceQuote = quote?.quote ?? null;
   const dailyQuote = priceQuote;
-  const livePrice = numeric(priceQuote?.last);
-  const quoteObservedAt = priceQuote?.source.observed_at ?? null;
+  const latestCandle = candles.at(-1) ?? null;
+  const quotedPrice = numeric(priceQuote?.last);
+  const cachedClose = numeric(latestCandle?.close);
+  const livePrice = quotedPrice ?? (marketSession.phase === "closed" ? cachedClose : null);
+  const quoteObservedAt = priceQuote?.source.observed_at
+    ?? (marketSession.phase === "closed" ? latestCandle?.open_time ?? null : null);
   const chartBars = useMemo(
     () => buildChartBars(
       candles,
@@ -608,7 +860,13 @@ export default function App() {
         ? `${Math.round(timelineSamplingSeconds)}秒`
         : "分钟级";
 
-  const quoteTrend = trendClass(priceQuote);
+  const quoteTrend = priceQuote
+    ? trendClass(priceQuote)
+    : latestCandle && numeric(latestCandle.close) !== null && numeric(latestCandle.open) !== null
+      ? (numeric(latestCandle.close) as number) >= (numeric(latestCandle.open) as number)
+        ? "trend-up"
+        : "trend-down"
+      : "trend-neutral";
   const aggregateState = quote?.stale_fields.length
     ? "部分聚合字段已过期"
     : quote?.unavailable_fields.length
@@ -616,7 +874,10 @@ export default function App() {
       : null;
 
   return (
-    <div className={`terminal-shell ${watchOpen && watchPinned ? "is-watch-docked" : ""}`}>
+    <div
+      className={`terminal-shell ${watchOpen && watchPinned ? "is-watch-docked" : ""}`}
+      data-market-phase={marketSession.phase}
+    >
       <header className="top-command-bar">
         <div className="top-brand" title="Market Pulse">
           <div className="top-brand-mark"><span>M</span></div>
@@ -665,13 +926,24 @@ export default function App() {
         }}
       >
         <div className="market-tabs">
-          <div className="market-tab-list">
-            <button type="button" className="is-active">自选</button>
-            <button type="button">外汇</button>
-            <button type="button">贵金属</button>
-            <button type="button">能源</button>
+          <div className="watch-panel-title">
+            <strong>自选</strong>
+            <span>{instruments.length}</span>
           </div>
           <div className="watch-panel-actions">
+            <button
+              type="button"
+              className={watchManagerOpen ? "is-active" : ""}
+              title="管理观察品种"
+              aria-label="管理观察品种"
+              aria-expanded={watchManagerOpen}
+              onClick={() => {
+                setWatchManagerOpen((current) => !current);
+                setWatchlistError(null);
+              }}
+            >
+              <ListPlus size={15} />
+            </button>
             <button
               type="button"
               className={watchPinned ? "is-active" : ""}
@@ -694,6 +966,70 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {watchManagerOpen ? (
+          <section id="watch-manager" className="watch-manager" aria-label="管理观察品种">
+            <div className="watch-manager-heading">
+              <div>
+                <strong>添加观察品种</strong>
+                <span>直连行情与实时换算</span>
+              </div>
+              <button
+                type="button"
+                title="关闭品种管理"
+                aria-label="关闭品种管理"
+                onClick={() => setWatchManagerOpen(false)}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <label className="watch-manager-search">
+              <Search size={13} />
+              <input
+                value={watchSearch}
+                onChange={(event) => setWatchSearch(event.target.value)}
+                placeholder="搜索名称或代码"
+              />
+            </label>
+            <div className="watch-manager-list">
+              {filteredCatalog.map((item) => {
+                const isObserved = observedCodes.has(item.provider_code);
+                const isBusy = watchlistBusyCode === item.provider_code;
+                const isLast = isObserved && instruments.length === 1;
+                return (
+                  <button
+                    type="button"
+                    key={item.provider_code}
+                    className={"watch-manager-row " + (isObserved ? "is-observed" : "")}
+                    aria-pressed={isObserved}
+                    disabled={isBusy || isLast}
+                    title={isLast ? "观察列表至少保留一个品种" : undefined}
+                    onClick={() => void toggleWatchlistInstrument(item)}
+                  >
+                    <span className={"instrument-kind is-" + item.quote_kind}>
+                      {item.quote_kind === "derived" ? "算" : "直"}
+                    </span>
+                    <span>
+                      <strong>{item.name}</strong>
+                      <small>{item.provider_code} · {item.price_unit}</small>
+                    </span>
+                    <span className="watch-manager-toggle">
+                      {isBusy
+                        ? <RefreshCw size={13} className="spin" />
+                        : isObserved
+                          ? <Check size={14} />
+                          : <ListPlus size={14} />}
+                    </span>
+                  </button>
+                );
+              })}
+              {filteredCatalog.length === 0 ? (
+                <div className="watch-manager-empty">没有匹配的品种</div>
+              ) : null}
+            </div>
+            {watchlistError ? <div className="watch-manager-error">{watchlistError}</div> : null}
+          </section>
+        ) : null}
 
         <div className="watch-list-head" aria-hidden="true">
           <span className="watch-list-modes"><Activity size={17} /><Waypoints size={16} /></span>
@@ -721,7 +1057,7 @@ export default function App() {
                   samples={watchPriceSeries[item.provider_code] ?? []}
                 />
                 <div className={`instrument-price ${direction}`}>
-                  <strong>{formatPrice(itemQuote?.quote.last, item.provider_code)}</strong>
+                  <strong>{formatPrice(itemQuote?.quote.last, item.provider_code, item)}</strong>
                 </div>
                 <div className={`instrument-change ${direction}`}>
                   <strong>
@@ -729,11 +1065,24 @@ export default function App() {
                       ? "—"
                       : `${formatSigned(itemQuote?.quote.change_percent)}%`}
                   </strong>
-                  <span>{formatSigned(itemQuote?.quote.change, digitsFor(item.provider_code))}</span>
+                  <span>{formatSigned(itemQuote?.quote.change, digitsFor(item.provider_code, item))}</span>
                 </div>
               </button>
             );
           })}
+          <button
+            type="button"
+            className="watch-add-market-button"
+            aria-controls="watch-manager"
+            aria-expanded={watchManagerOpen}
+            onClick={() => {
+              setWatchSearch("");
+              setWatchlistError(null);
+              setWatchManagerOpen(true);
+            }}
+          >
+            + 添加行情
+          </button>
         </div>
 
       </aside>
@@ -775,12 +1124,13 @@ export default function App() {
             </span>
           ) : null}
           <SourcePicker
-            sources={sources}
+            sources={compatibleSources}
             selectedSource={selectedSource}
             fallbackLabel={sourceLabels[selectedSource]}
             busy={sourceBusy}
             contractCode={selectedCode}
             connectionState={quoteStreamState}
+            marketPhase={marketSession.phase}
             connectionError={quoteError}
             testingSourceId={testingSourceId}
             testResults={sourceTestResults}
@@ -799,30 +1149,46 @@ export default function App() {
                 <strong>{selectedInstrument.name}</strong>
                 <span>{selectedCode}</span>
                 <ChevronDown size={13} />
-                <span className="session-badge">交易中</span>
                 <small><LiveClock /></small>
+                <span
+                  className={`session-badge is-${marketSession.phase}`}
+                  title={selectedInstrument.market_schedule?.reference}
+                >
+                  {marketSession.label}
+                </span>
+                {unitFor(selectedCode, selectedInstrument) ? <span className="quote-unit-badge">{unitFor(selectedCode, selectedInstrument)}</span> : null}
+                {selectedInstrument.quote_kind === "derived" ? (
+                  <span
+                    className="quote-derivation-badge"
+                    title="现货黄金(美元/盎司) × 美元兑离岸人民币 ÷ 31.1034768"
+                  >
+                    实时换算
+                  </span>
+                ) : null}
               </div>
               <div className={`hero-price chart-hero-price ${quoteTrend}`}>
-                <strong>{loadingQuote && !quote ? "读取中" : formatPrice(priceQuote?.last, selectedCode)}</strong>
+                <strong>{loadingQuote && livePrice === null ? "读取中" : formatPrice(livePrice, selectedCode, selectedInstrument)}</strong>
                 {numeric(priceQuote?.change) === null ? null : (
                   <span>{(numeric(priceQuote?.change) ?? 0) >= 0 ? "↑" : "↓"}</span>
                 )}
                 <small>{formatSigned(priceQuote?.change_percent)}%</small>
-                <small>{formatSigned(priceQuote?.change, digitsFor(selectedCode))}</small>
+                <small>{formatSigned(priceQuote?.change, digitsFor(selectedCode, selectedInstrument))}</small>
               </div>
             </div>
             <div className="chart-context-secondary">
               <dl className="chart-daily-stats">
-                <div><dt>最高</dt><dd className="trend-up">{formatPrice(dailyQuote?.high, selectedCode)}</dd></div>
-                <div><dt>最低</dt><dd className="trend-down">{formatPrice(dailyQuote?.low, selectedCode)}</dd></div>
-                <div><dt>今开</dt><dd>{formatPrice(dailyQuote?.open, selectedCode)}</dd></div>
+                <div><dt>最高</dt><dd className="trend-up">{formatPrice(dailyQuote?.high, selectedCode, selectedInstrument)}</dd></div>
+                <div><dt>最低</dt><dd className="trend-down">{formatPrice(dailyQuote?.low, selectedCode, selectedInstrument)}</dd></div>
+                <div><dt>今开</dt><dd>{formatPrice(dailyQuote?.open, selectedCode, selectedInstrument)}</dd></div>
               </dl>
               <div className="chart-freshness">
-                <span className={`status-dot ${quoteError ? "is-error" : ""}`} />
+                <span className={`status-dot ${quoteError ? "is-error" : marketSession.phase === "closed" ? "is-closed" : ""}`} />
                 <span>
                   {quoteError
                     ? quoteError
-                    : `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · ${priceQuote ? new Date(priceQuote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}${aggregateState ? ` · ${aggregateState}` : ""}`}
+                    : marketSession.phase === "closed"
+                      ? `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · 休市，显示最后有效行情${quoteObservedAt ? ` · ${new Date(quoteObservedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : ""}${aggregateState ? ` · ${aggregateState}` : ""}`
+                      : `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · ${priceQuote ? new Date(priceQuote.source.observed_at).toLocaleTimeString("zh-CN", { hour12: false }) : "等待数据"}${aggregateState ? ` · ${aggregateState}` : ""}`}
                 </span>
               </div>
             </div>
@@ -832,16 +1198,16 @@ export default function App() {
               <span>{new Date(displayBar.time * 1000).toLocaleString("zh-CN", { hour12: false })}</span>
               {selectedPeriod.mode === "timeline" ? (
                 <>
-                  <span>价格 <b>{formatPrice(displayBar.close, selectedCode)}</b></span>
-                  <span>涨跌 <b className={timelineTrend}>{formatSigned(timelineChange, digitsFor(selectedCode))}</b></span>
+                  <span>价格 <b>{formatPrice(displayBar.close, selectedCode, selectedInstrument)}</b></span>
+                  <span>涨跌 <b className={timelineTrend}>{formatSigned(timelineChange, digitsFor(selectedCode, selectedInstrument))}</b></span>
                   <span>涨幅 <b className={timelineTrend}>{formatSigned(timelinePercent)}%</b></span>
                 </>
               ) : (
                 <>
-                  <span>开 <b>{formatPrice(displayBar.open, selectedCode)}</b></span>
-                  <span>高 <b className="trend-up">{formatPrice(displayBar.high, selectedCode)}</b></span>
-                  <span>低 <b className="trend-down">{formatPrice(displayBar.low, selectedCode)}</b></span>
-                  <span>收 <b>{formatPrice(displayBar.close, selectedCode)}</b></span>
+                  <span>开 <b>{formatPrice(displayBar.open, selectedCode, selectedInstrument)}</b></span>
+                  <span>高 <b className="trend-up">{formatPrice(displayBar.high, selectedCode, selectedInstrument)}</b></span>
+                  <span>低 <b className="trend-down">{formatPrice(displayBar.low, selectedCode, selectedInstrument)}</b></span>
+                  <span>收 <b>{formatPrice(displayBar.close, selectedCode, selectedInstrument)}</b></span>
                 </>
               )}
             </div>
@@ -854,9 +1220,24 @@ export default function App() {
             observedAt={quoteObservedAt}
             referencePrice={timelineReferencePrice}
             timelineResolutionSeconds={timelineSamplingSeconds}
-            priceDigits={digitsFor(selectedCode)}
+            priceDigits={digitsFor(selectedCode, selectedInstrument)}
+            marketPhase={marketSession.phase}
+            marketSchedule={selectedInstrument.market_schedule}
+            historyLoading={historySyncing}
+            onRequestOlderHistory={loadOlderCandles}
             onHover={setHover}
           />
+          {historySyncing ? (
+            <div
+              className="history-loading-indicator"
+              role="status"
+              aria-live="polite"
+              title="正在从当前实时数据源补齐历史行情"
+            >
+              <LoaderCircle size={12} aria-hidden="true" />
+              <span>加载中...</span>
+            </div>
+          ) : null}
           {loadingCandles && candles.length === 0 ? <div className="chart-state"><RefreshCw size={20} className="spin" /><strong>正在读取 K 线</strong></div> : null}
           {candleError ? <div className="chart-state is-error"><CircleHelp size={22} /><strong>K 线暂不可用</strong><span>{candleError}</span><button type="button" onClick={() => void loadCandles()}>重试</button></div> : null}
         </section>

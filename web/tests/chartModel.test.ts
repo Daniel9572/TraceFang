@@ -58,7 +58,7 @@ test("updates the current bar from a live quote without mutating history", () =>
   assert.equal(updated.at(-1)?.high, 103);
 });
 
-test("opens a new bar from the previous close when a quote crosses the boundary", () => {
+test("opens a new bar from the first same-source quote across the boundary", () => {
   const previousTime = Math.floor(Date.parse("2026-08-06T01:47:00Z") / 1000);
   const updated = mergeLivePrice(
     [{ time: previousTime, open: 100, high: 102, low: 99, close: 101 }],
@@ -70,8 +70,8 @@ test("opens a new bar from the previous close when a quote crosses the boundary"
   assert.equal(updated.length, 2);
   assert.deepEqual(updated.at(-1), {
     time: previousTime + 60,
-    open: 101,
-    high: 101,
+    open: 100.5,
+    high: 100.5,
     low: 100.5,
     close: 100.5,
   });
