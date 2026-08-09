@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Annotated, Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -15,9 +15,15 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from market_analysis.application.acquisition import QuoteAcquisitionRouter
+from market_analysis.application.expert_ai import (
+    EXPERT_AI_MAX_BARS,
+    CodexExpertAnalysisService,
+    ExpertStrategyId,
+)
+from market_analysis.application.options import GoldOptionsService
 from market_analysis.application.period_bars import PERIOD_DEFINITIONS, PeriodBarService
 from market_analysis.application.quotes import (
     JIN10_CLIENT_SOURCE,
@@ -65,6 +71,10 @@ from market_analysis.infrastructure.providers.jin10_web import (
     Jin10WebProvider,
     Jin10WebSettings,
 )
+from market_analysis.infrastructure.providers.shfe_options import (
+    ShfeGoldOptionsProvider,
+    ShfeGoldOptionsSettings,
+)
 from market_analysis.infrastructure.providers.tonghuashun_futures import (
     TonghuashunFuturesProvider,
     TonghuashunFuturesSettings,
@@ -101,6 +111,8 @@ class Runtime:
         self.acquisition: QuoteAcquisitionRouter | None = None
         self.realtime_bars: RealtimeBarService | None = None
         self.period_bars: PeriodBarService | None = None
+        self.expert_ai: CodexExpertAnalysisService | None = None
+        self.gold_options: GoldOptionsService | None = None
         self.instrument_sources: dict[str, str] = {}
         self.watchlist_codes: list[str] = list(DEFAULT_WATCHLIST_CODES)
         self.catalog_cache: AsyncTtlCache[Any] = AsyncTtlCache()
@@ -270,6 +282,22 @@ class InstrumentSourceUpdate(BaseModel):
     source_id: str = Field(min_length=1)
 
 
+_ExpertCode = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=32),
+]
+_ExpertPeriod = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=16),
+]
+class ExpertAiAnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: _ExpertCode = "XAUUSD"
+    period: _ExpertPeriod = "15m"
+    enabled_strategies: list[ExpertStrategyId] = Field(default_factory=list, max_length=7)
+
+
 def _source_store_path() -> Path:
     configured = os.environ.get("MARKET_ANALYSIS_SOURCE_CONFIG", "").strip()
     return Path(configured).expanduser() if configured else _repo_root / "data" / "sources.json"
@@ -303,6 +331,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     tonghuashun_futures_settings = TonghuashunFuturesSettings.from_env()
     tonghuashun_futures_provider = TonghuashunFuturesProvider(tonghuashun_futures_settings)
+    shfe_options_settings = ShfeGoldOptionsSettings.from_env()
+    shfe_options_provider = (
+        ShfeGoldOptionsProvider(shfe_options_settings) if shfe_options_settings.enabled else None
+    )
 
     async def probe_local_provider() -> ProviderProbe:
         if local_provider is None:
@@ -485,6 +517,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     runtime.database_store = None
     runtime.realtime_bars = None
     runtime.period_bars = None
+    runtime.expert_ai = CodexExpertAnalysisService(working_directory=_repo_root)
+    runtime.gold_options = GoldOptionsService(
+        (shfe_options_provider,) if shfe_options_provider is not None else (),
+        refresh_after_seconds=shfe_options_settings.snapshot_cache_seconds,
+    )
     runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
     runtime.persistence_setup_error = None
     try:
@@ -716,6 +753,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await runtime.web_provider.close()
     if runtime.tonghuashun_futures_provider is not None:
         await runtime.tonghuashun_futures_provider.close()
+    if runtime.gold_options is not None:
+        await runtime.gold_options.close()
     runtime.local_provider = None
     runtime.web_provider = None
     runtime.tonghuashun_futures_provider = None
@@ -728,6 +767,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     runtime.acquisition = None
     runtime.realtime_bars = None
     runtime.period_bars = None
+    runtime.expert_ai = None
+    runtime.gold_options = None
     runtime.instrument_sources.clear()
     runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
     runtime.clear_caches()
@@ -777,6 +818,18 @@ def _period_bars() -> PeriodBarService:
     if runtime.period_bars is None:
         raise HTTPException(status_code=503, detail="Period Bar runtime is unavailable")
     return runtime.period_bars
+
+
+def _expert_ai() -> CodexExpertAnalysisService:
+    if runtime.expert_ai is None:
+        raise HTTPException(status_code=503, detail="local Codex analysis runtime is unavailable")
+    return runtime.expert_ai
+
+
+def _gold_options() -> GoldOptionsService:
+    if runtime.gold_options is None:
+        raise HTTPException(status_code=503, detail="gold option runtime is unavailable")
+    return runtime.gold_options
 
 
 def _public_source(value: Any) -> dict[str, Any]:
@@ -973,6 +1026,68 @@ def _public_watchlist() -> list[dict[str, Any]]:
     return [_public_instrument(instrument_definition(code)) for code in runtime.watchlist_codes]
 
 
+def _compact_expert_bar(value: Any) -> dict[str, Any]:
+    raw_payload = value.source.raw_payload or {}
+    bucket_end = raw_payload.get("bucket_end")
+    return {
+        "open_time": value.open_time.isoformat(),
+        "interval_seconds": int(value.interval.total_seconds()),
+        "open": str(value.open),
+        "high": str(value.high),
+        "low": str(value.low),
+        "close": str(value.close),
+        "volume": str(value.volume) if value.volume is not None else None,
+        "state": value.state.value,
+        "revision": value.revision,
+        "bucket_end": bucket_end if isinstance(bucket_end, str) else None,
+        "observed_at": value.source.observed_at.isoformat(),
+        "received_at": value.source.received_at.isoformat(),
+    }
+
+
+def _expert_market_snapshot(
+    *,
+    code: str,
+    definition: InstrumentDefinition,
+    period: str,
+    source_id: str,
+    quote_view: Any,
+    bars: tuple[Any, ...],
+) -> dict[str, Any]:
+    quote = quote_view.quote
+    observations = [quote.source.observed_at]
+    observations.extend(value.source.observed_at for value in bars)
+    data_as_of = max(observations).astimezone(UTC)
+    return {
+        "schema_version": "expert-market-snapshot-v1",
+        "code": code,
+        "name": definition.name,
+        "instrument": asdict(definition.instrument),
+        "period": period,
+        "source_id": source_id,
+        "data_as_of": data_as_of.isoformat(),
+        "market_schedule": _MARKET_SCHEDULES[definition.market_schedule_id],
+        "quote": {
+            "last": str(quote.last),
+            "open": str(quote.open) if quote.open is not None else None,
+            "high": str(quote.high) if quote.high is not None else None,
+            "low": str(quote.low) if quote.low is not None else None,
+            "volume": str(quote.volume) if quote.volume is not None else None,
+            "change": str(quote.change) if quote.change is not None else None,
+            "change_percent": (
+                str(quote.change_percent) if quote.change_percent is not None else None
+            ),
+            "quality": quote_view.quality.value,
+            "unavailable_fields": list(quote_view.unavailable_fields),
+            "stale_fields": list(quote_view.stale_fields),
+            "provider_symbol": quote.source.provider_symbol,
+            "observed_at": quote.source.observed_at.isoformat(),
+            "received_at": quote.source.received_at.isoformat(),
+        },
+        "bars": [_compact_expert_bar(value) for value in bars],
+    }
+
+
 async def _source_for_instrument(instrument: Instrument) -> str:
     definition = definition_for_instrument(instrument)
     default_source_id = definition.source_ids[0]
@@ -1092,6 +1207,47 @@ async def update_instrument_source(
     return {"code": normalized_code, "source_id": update.source_id}
 
 
+@app.get("/api/expert/ai/status")
+async def expert_ai_status() -> dict[str, Any]:
+    return asdict(await _expert_ai().status())
+
+
+@app.get("/api/expert/options/gold")
+async def expert_gold_options() -> dict[str, Any]:
+    return jsonable_encoder(asdict(await _gold_options().snapshot()))
+
+
+@app.post("/api/expert/ai/analyze")
+async def expert_ai_analyze(request: ExpertAiAnalyzeRequest) -> dict[str, Any]:
+    if request.period not in PERIOD_DEFINITIONS:
+        raise HTTPException(status_code=422, detail=f"unsupported chart period: {request.period}")
+    normalized_code, instrument, source_id = await _instrument_source(request.code)
+    definition = instrument_definition(normalized_code)
+    quote_view = await _quote_views().get_last(instrument, source_id)
+    page = await _period_bars().get_page(
+        instrument,
+        source_id=source_id,
+        period_id=request.period,
+        schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
+    )
+    bars = page.items[-EXPERT_AI_MAX_BARS:]
+    snapshot = _expert_market_snapshot(
+        code=normalized_code,
+        definition=definition,
+        period=request.period,
+        source_id=source_id,
+        quote_view=quote_view,
+        bars=bars,
+    )
+    option_snapshot = await _gold_options().snapshot()
+    snapshot["gold_options"] = GoldOptionsService.ai_context(option_snapshot)
+    result = await _expert_ai().analyze(
+        snapshot,
+        enabled_strategies=request.enabled_strategies,
+    )
+    return asdict(result)
+
+
 @app.get("/api/quotes/{code}")
 async def quote(code: str) -> dict[str, Any]:
     _, instrument, source_id = await _instrument_source(code)
@@ -1113,6 +1269,7 @@ async def chart_bars(
     code: str,
     period: str = Query(default="1m"),
     before: int | None = Query(default=None, description="Exclusive Unix-second cursor"),
+    page_size: int = Query(default=500, ge=1),
 ) -> dict[str, Any]:
     if period not in PERIOD_DEFINITIONS:
         raise HTTPException(status_code=422, detail=f"unsupported chart period: {period}")
@@ -1124,6 +1281,7 @@ async def chart_bars(
         period_id=period,
         schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
         before=datetime.fromtimestamp(before, tz=UTC) if before is not None else None,
+        page_size=page_size,
     )
     return asdict(page)
 
@@ -1174,6 +1332,7 @@ async def backfill_candles(
 async def timeline_samples(
     code: str,
     cursor: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20_000, ge=1),
 ) -> dict[str, Any]:
     """Reads every persisted raw quote event through an opaque transport cursor."""
 
@@ -1182,6 +1341,7 @@ async def timeline_samples(
         instrument,
         source_id=source_id,
         before_id=cursor,
+        page_size=page_size,
     )
     return asdict(page)
 

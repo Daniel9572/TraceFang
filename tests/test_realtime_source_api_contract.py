@@ -24,11 +24,11 @@ class RealtimeSourceApiContractTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(inspect.signature(api.chart_bars).parameters),
-            ("code", "period", "before"),
+            ("code", "period", "before", "page_size"),
         )
         self.assertEqual(
             tuple(inspect.signature(api.timeline_samples).parameters),
-            ("code", "cursor"),
+            ("code", "cursor", "page_size"),
         )
         self.assertEqual(
             tuple(inspect.signature(api.backfill_candles).parameters),
