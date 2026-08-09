@@ -127,12 +127,12 @@ runtime = Runtime()
 _SPOT_METALS_MARKET_SCHEDULE: dict[str, Any] = {
     "time_zone": "America/New_York",
     "trading_day_rule": "session_end",
-    "reference": "OTC 贵金属常规交易时段",
+    "reference": "OTC 贵金属来源校验交易时段",
     "sessions": [
         {
             "weekday": weekday,
-            "open": "18:05",
-            "close": "16:59",
+            "open": "18:00",
+            "close": "17:00",
             "close_day_offset": 1,
         }
         for weekday in range(5)
@@ -581,7 +581,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         contracts=bar_contracts,
         writer=runtime.persistence,
     )
-    runtime.period_bars = PeriodBarService(runtime.realtime_bars)
+    runtime.period_bars = PeriodBarService(runtime.realtime_bars, store=kline_store)
 
     async def load_latest_quote(instrument, source_id):
         store = runtime.database_store
@@ -611,9 +611,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if runtime.realtime_bars is not None and normalized_event is not None:
             runtime.realtime_bars.accept(normalized_event)
             if runtime.quote_stream is not None:
-                runtime.quote_stream.publish_sample(
-                    runtime.realtime_bars.sample_from_quote_event(normalized_event)
-                )
+                sample = runtime.realtime_bars.sample_from_quote_event(normalized_event)
+                if sample is not None:
+                    runtime.quote_stream.publish_sample(sample)
         # Persist every raw channel frame, including late or duplicate deliveries.
         # Only the latest presentation view applies the monotonic timestamp guard;
         # raw evidence must never be filtered by UI-cache semantics.
@@ -1334,7 +1334,7 @@ async def timeline_samples(
     cursor: int | None = Query(default=None, ge=1),
     page_size: int = Query(default=20_000, ge=1),
 ) -> dict[str, Any]:
-    """Reads every persisted raw quote event through an opaque transport cursor."""
+    """Reads canonical chart samples while raw quote evidence remains losslessly stored."""
 
     _, instrument, source_id = await _instrument_source(code)
     page = await _realtime_bars().get_quote_sample_page(

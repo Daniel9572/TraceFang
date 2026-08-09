@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Protocol
 
 from market_analysis.application.quotes import QuoteView
@@ -183,6 +184,8 @@ class QuoteSamplePage:
 
 _BarKey = tuple[str, Instrument, timedelta, datetime]
 _SeriesKey = tuple[str, Instrument, timedelta]
+_SampleKey = tuple[str, str, str, str]
+_SampleObservation = tuple[datetime, Decimal, int | None]
 
 
 class RealtimeBarService:
@@ -221,6 +224,7 @@ class RealtimeBarService:
 
         self._bars: dict[_BarKey, RealtimeBar] = {}
         self._watermarks: dict[_SeriesKey, datetime] = {}
+        self._latest_sample_observations: dict[_SampleKey, _SampleObservation] = {}
         self._backfills: dict[
             tuple[str, Instrument, datetime, int],
             asyncio.Task[BarBackfillResult],
@@ -278,12 +282,31 @@ class RealtimeBarService:
         event = self.normalize_quote(quote)
         return self.accept(event) if event is not None else False
 
-    def sample_from_quote_event(self, event: QuoteEvent) -> QuoteSample:
+    def sample_from_quote_event(self, event: QuoteEvent) -> QuoteSample | None:
         if event.source_id not in self._contracts:
             raise ProviderUnavailableError(
                 f"{event.source_id} has no source-bound timeline capability"
             )
         value = event.quote
+        sample_key = (
+            event.source_id,
+            event.channel_id,
+            value.instrument.symbol,
+            value.source.provider_symbol,
+        )
+        observation = (value.source.observed_at, value.last, event.sequence)
+        previous = self._latest_sample_observations.get(sample_key)
+        if previous is not None:
+            previous_time, previous_value, previous_sequence = previous
+            if value.source.observed_at < previous_time:
+                return None
+            if (
+                value.source.observed_at == previous_time
+                and value.last == previous_value
+                and (event.sequence is None or event.sequence == previous_sequence)
+            ):
+                return None
+        self._latest_sample_observations[sample_key] = observation
         return QuoteSample(
             source_id=event.source_id,
             channel_id=event.channel_id,
@@ -294,6 +317,7 @@ class RealtimeBarService:
                 value.source.observed_at,
                 value.source.received_at,
                 value.last,
+                sequence=event.sequence,
             ),
             instrument=value.instrument,
             provider_symbol=value.source.provider_symbol,
@@ -323,7 +347,7 @@ class RealtimeBarService:
         )
         has_more = len(rows) > page_size
         visible = rows[-page_size:] if has_more else rows
-        items = tuple(
+        mapped = tuple(
             replace(
                 row,
                 source_id=source_id,
@@ -338,7 +362,8 @@ class RealtimeBarService:
             )
             for row in visible
         )
-        next_cursor = min((item.storage_id for item in items if item.storage_id), default=None)
+        items = self._collapse_repeated_observations(mapped)
+        next_cursor = min((item.storage_id for item in visible if item.storage_id), default=None)
         return QuoteSamplePage(items, next_cursor, has_more)
 
     def accept_bar(self, candle: Candle) -> bool:
@@ -1006,6 +1031,8 @@ class RealtimeBarService:
         observed_at: datetime,
         received_at: datetime,
         value: object,
+        *,
+        sequence: int | None = None,
     ) -> str:
         return "|".join(
             (
@@ -1015,8 +1042,30 @@ class RealtimeBarService:
                 observed_at.isoformat(timespec="microseconds"),
                 received_at.isoformat(timespec="microseconds"),
                 str(value),
+                "" if sequence is None else str(sequence),
             )
         )
+
+    @staticmethod
+    def _collapse_repeated_observations(
+        samples: tuple[QuoteSample, ...],
+    ) -> tuple[QuoteSample, ...]:
+        """Drops polling duplicates while preserving every ordered price revision."""
+
+        rows: list[QuoteSample] = []
+        previous: tuple[str, str, datetime, Decimal] | None = None
+        for sample in samples:
+            observation = (
+                sample.channel_id,
+                sample.provider_symbol,
+                sample.observed_at,
+                sample.value,
+            )
+            if observation == previous:
+                continue
+            rows.append(sample)
+            previous = observation
+        return tuple(rows)
 
     @staticmethod
     def _public_metadata(

@@ -78,7 +78,7 @@ MarketEvent = QuoteEvent | BarEvent
 
 @dataclass(frozen=True, slots=True)
 class QuoteSample:
-    """One lossless timeline sample; source and raw evidence channel stay distinct."""
+    """One canonical business timeline sample derived from lossless raw evidence."""
 
     source_id: str
     channel_id: str

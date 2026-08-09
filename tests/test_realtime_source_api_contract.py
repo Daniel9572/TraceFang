@@ -118,8 +118,8 @@ class RealtimeSourceApiContractTests(unittest.TestCase):
             schedule = item["market_schedule"]
             self.assertEqual(schedule["time_zone"], "America/New_York")
             self.assertEqual(len(schedule["sessions"]), 5)
-            self.assertEqual(schedule["sessions"][0]["open"], "18:05")
-            self.assertEqual(schedule["sessions"][-1]["close"], "16:59")
+            self.assertEqual(schedule["sessions"][0]["open"], "18:00")
+            self.assertEqual(schedule["sessions"][-1]["close"], "17:00")
         forex = next(item for item in payload if item["provider_code"] == "USDCNH")
         self.assertEqual(forex["market_schedule"]["time_zone"], "America/New_York")
         self.assertEqual(forex["market_schedule"]["sessions"][0]["open"], "17:05")

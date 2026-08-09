@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from market_analysis.application.realtime_bars import (
@@ -44,6 +47,7 @@ PERIOD_DEFINITIONS: dict[str, PeriodDefinition] = {
 }
 
 _DEFAULT_BAR_PAGE_SIZE = 500
+_PERIOD_BAR_MATERIALIZATION_ALGORITHM = "period-bars-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +56,88 @@ class PeriodBarPage:
     items: tuple[RealtimeBar, ...]
     next_before: datetime | None
     has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodBarInputChange:
+    mutation_id: int
+    open_time: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodBarMaterializationState:
+    source_cursor: datetime | None = None
+    oldest_bucket_open_time: datetime | None = None
+    history_exhausted: bool = False
+    processed_mutation_id: int = 0
+
+
+class PeriodBarStore(Protocol):
+    async def load_period_bar_materialization(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+    ) -> PeriodBarMaterializationState | None: ...
+
+    async def save_period_bar_materialization(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+        state: PeriodBarMaterializationState,
+    ) -> None: ...
+
+    async def load_materialized_period_bars_before(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+        before: datetime | None,
+        count: int,
+    ) -> tuple[RealtimeBar, ...]: ...
+
+    async def save_materialized_period_bars(
+        self,
+        bars: Sequence[RealtimeBar],
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+    ) -> None: ...
+
+    async def delete_materialized_period_bar(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+        open_time: datetime,
+    ) -> None: ...
+
+    async def latest_realtime_bar_mutation_id(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+    ) -> int: ...
+
+    async def load_realtime_bar_input_changes(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        after_mutation_id: int,
+        through_mutation_id: int,
+        count: int,
+    ) -> tuple[PeriodBarInputChange, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,11 +354,43 @@ def project_period_bars(
     return tuple(sorted(projected, key=lambda item: item.open_time))
 
 
-class PeriodBarService:
-    """Builds schedule-aware chart Bars from the canonical one-minute projection."""
+def _materialization_version(schedule: Mapping[str, Any] | None) -> str:
+    serialized = json.dumps(
+        {
+            "algorithm": _PERIOD_BAR_MATERIALIZATION_ALGORITHM,
+            "schedule": schedule,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
+    return f"{_PERIOD_BAR_MATERIALIZATION_ALGORITHM}:{digest}"
 
-    def __init__(self, realtime_bars: RealtimeBarService) -> None:
+
+def _payload_time(bar: RealtimeBar, field: str, default: datetime) -> datetime:
+    value = (bar.source.raw_payload or {}).get(field)
+    if not isinstance(value, str):
+        return default
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError(f"materialized period Bar {field} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+class PeriodBarService:
+    """Materializes schedule-aware chart Bars from the canonical minute series."""
+
+    def __init__(
+        self,
+        realtime_bars: RealtimeBarService,
+        *,
+        store: PeriodBarStore | None = None,
+    ) -> None:
         self._realtime_bars = realtime_bars
+        self._store = store
+        self._locks: dict[tuple[str, Instrument, str, str], asyncio.Lock] = {}
 
     async def get_page(
         self,
@@ -288,6 +406,336 @@ class PeriodBarService:
             raise ValueError(f"unsupported chart period {period_id!r}")
         if page_size < 1:
             raise ValueError("page_size must be positive")
+        if before is not None and (before.tzinfo is None or before.utcoffset() is None):
+            raise ValueError("before must be timezone-aware")
+        if self._store is None or period_id in {"timeline", "1m"}:
+            return await self._get_unmaterialized_page(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                before=before,
+                page_size=page_size,
+            )
+
+        version = _materialization_version(schedule)
+        lock_key = (source_id, instrument, period_id, version)
+        lock = self._locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            state = (
+                await self._store.load_period_bar_materialization(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=version,
+                )
+                or PeriodBarMaterializationState()
+            )
+            target_mutation_id = await self._store.latest_realtime_bar_mutation_id(
+                instrument,
+                source_id=source_id,
+            )
+            state = await self._refresh_changed_buckets(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                materialization_version=version,
+                state=state,
+                target_mutation_id=target_mutation_id,
+            )
+            await self._store.save_period_bar_materialization(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                materialization_version=version,
+                state=state,
+            )
+            requested_count = page_size + 1
+            if state.oldest_bucket_open_time is None and not state.history_exhausted:
+                # A crash may persist a derived chunk before its coverage cursor.
+                # Rebuild that first chunk so orphan rows never become trusted state.
+                values: tuple[RealtimeBar, ...] = ()
+            else:
+                values = await self._store.load_materialized_period_bars_before(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=version,
+                    before=before,
+                    count=requested_count,
+                )
+            while len(values) < requested_count and not state.history_exhausted:
+                prior_progress = (
+                    state.source_cursor,
+                    state.oldest_bucket_open_time,
+                    state.history_exhausted,
+                )
+                state = await self._materialize_next_history_chunk(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    schedule=schedule,
+                    materialization_version=version,
+                    state=state,
+                    remaining_bars=requested_count - len(values),
+                )
+                await self._store.save_period_bar_materialization(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=version,
+                    state=state,
+                )
+                progress = (
+                    state.source_cursor,
+                    state.oldest_bucket_open_time,
+                    state.history_exhausted,
+                )
+                if progress == prior_progress:
+                    raise RuntimeError("period Bar materialization cursor did not advance")
+                values = await self._store.load_materialized_period_bars_before(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=version,
+                    before=before,
+                    count=requested_count,
+                )
+
+        items = values[-page_size:]
+        oldest_component = (
+            _payload_time(items[0], "bucket_first_open_time", items[0].open_time) if items else None
+        )
+        return PeriodBarPage(
+            period_id=period_id,
+            items=items,
+            next_before=oldest_component,
+            has_more=len(values) > page_size,
+        )
+
+    async def _refresh_changed_buckets(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        materialization_version: str,
+        state: PeriodBarMaterializationState,
+        target_mutation_id: int,
+    ) -> PeriodBarMaterializationState:
+        if target_mutation_id <= state.processed_mutation_id:
+            return state
+        if state.oldest_bucket_open_time is None and not state.history_exhausted:
+            return replace(state, processed_mutation_id=target_mutation_id)
+
+        cursor = state.processed_mutation_id
+        affected: dict[str, _Bucket] = {}
+        definition = PERIOD_DEFINITIONS[period_id]
+        while cursor < target_mutation_id:
+            changes = await self._store.load_realtime_bar_input_changes(
+                instrument,
+                source_id=source_id,
+                after_mutation_id=cursor,
+                through_mutation_id=target_mutation_id,
+                count=REALTIME_BAR_READ_PAGE_SIZE_MAX,
+            )
+            if not changes:
+                break
+            for change in changes:
+                bucket = _bucket_for(change.open_time, definition, schedule)
+                if (
+                    state.history_exhausted
+                    or state.oldest_bucket_open_time is None
+                    or bucket.start >= state.oldest_bucket_open_time
+                ):
+                    affected[bucket.key] = bucket
+            next_cursor = max(item.mutation_id for item in changes)
+            if next_cursor <= cursor:
+                raise RuntimeError("realtime Bar mutation cursor did not advance")
+            cursor = next_cursor
+
+        for bucket in sorted(affected.values(), key=lambda item: item.start):
+            await self._recompute_bucket(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                materialization_version=materialization_version,
+                bucket=bucket,
+            )
+        return replace(state, processed_mutation_id=target_mutation_id)
+
+    async def _recompute_bucket(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        materialization_version: str,
+        bucket: _Bucket,
+    ) -> None:
+        rows = await self._load_bucket_rows(
+            instrument,
+            source_id=source_id,
+            period_id=period_id,
+            schedule=schedule,
+            bucket=bucket,
+        )
+        projected = project_period_bars(
+            rows,
+            period_id=period_id,
+            schedule=schedule,
+        )
+        value = next((item for item in projected if item.open_time == bucket.start), None)
+        if value is None:
+            await self._store.delete_materialized_period_bar(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                materialization_version=materialization_version,
+                open_time=bucket.start,
+            )
+            return
+        await self._store.save_materialized_period_bars(
+            (value,),
+            source_id=source_id,
+            period_id=period_id,
+            materialization_version=materialization_version,
+        )
+
+    async def _load_bucket_rows(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        bucket: _Bucket,
+    ) -> tuple[RealtimeBar, ...]:
+        definition = PERIOD_DEFINITIONS[period_id]
+        cursor = bucket.end
+        rows: dict[datetime, RealtimeBar] = {}
+        bucket_minutes = max(
+            1,
+            int((bucket.end - bucket.start) / timedelta(minutes=1)),
+        )
+        detection_minutes = bucket_minutes + (
+            24 * 60 + 1 if definition.calendar_unit is not None else 1
+        )
+        transport_count = min(
+            REALTIME_BAR_READ_PAGE_SIZE_MAX,
+            detection_minutes,
+        )
+        while True:
+            page = await self._realtime_bars.get_bars_before(
+                instrument,
+                source_id=source_id,
+                before=cursor,
+                count=transport_count,
+            )
+            if not page:
+                break
+            crossed_bucket_start = False
+            for row in page:
+                candidate = _bucket_for(row.open_time, definition, schedule)
+                if candidate.key == bucket.key:
+                    rows[row.open_time] = row
+                elif candidate.start < bucket.start:
+                    crossed_bucket_start = True
+            next_cursor = page[0].open_time
+            if next_cursor >= cursor:
+                raise RuntimeError("minute Bar bucket cursor did not advance")
+            cursor = next_cursor
+            if crossed_bucket_start:
+                break
+        return tuple(sorted(rows.values(), key=lambda item: item.open_time))
+
+    async def _materialize_next_history_chunk(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        materialization_version: str,
+        state: PeriodBarMaterializationState,
+        remaining_bars: int,
+    ) -> PeriodBarMaterializationState:
+        definition = PERIOD_DEFINITIONS[period_id]
+        estimated_minutes_per_bar = definition.minutes or 24 * 60
+        transport_count = min(
+            REALTIME_BAR_READ_PAGE_SIZE_MAX,
+            max(1, (remaining_bars + 1) * estimated_minutes_per_bar),
+        )
+        cursor = state.source_cursor
+        minute_rows: dict[datetime, RealtimeBar] = {}
+        bucket_keys: set[str] = set()
+        exhausted = False
+        while len(bucket_keys) < 2:
+            page = await self._realtime_bars.get_bars_before(
+                instrument,
+                source_id=source_id,
+                before=cursor,
+                count=transport_count,
+            )
+            if not page:
+                exhausted = True
+                break
+            for row in page:
+                minute_rows[row.open_time] = row
+                bucket_keys.add(_bucket_for(row.open_time, definition, schedule).key)
+            next_cursor = page[0].open_time
+            if cursor is not None and next_cursor >= cursor:
+                raise RuntimeError("minute Bar materialization cursor did not advance")
+            cursor = next_cursor
+
+        projected = project_period_bars(
+            tuple(minute_rows.values()),
+            period_id=period_id,
+            schedule=schedule,
+        )
+        stable = projected if exhausted else projected[1:]
+        if stable:
+            await self._store.save_materialized_period_bars(
+                stable,
+                source_id=source_id,
+                period_id=period_id,
+                materialization_version=materialization_version,
+            )
+            oldest = stable[0]
+            source_cursor = _payload_time(
+                oldest,
+                "bucket_first_open_time",
+                oldest.open_time,
+            )
+            oldest_bucket = (
+                oldest.open_time
+                if state.oldest_bucket_open_time is None
+                else min(state.oldest_bucket_open_time, oldest.open_time)
+            )
+        else:
+            source_cursor = state.source_cursor
+            oldest_bucket = state.oldest_bucket_open_time
+        return replace(
+            state,
+            source_cursor=source_cursor,
+            oldest_bucket_open_time=oldest_bucket,
+            history_exhausted=state.history_exhausted or exhausted,
+        )
+
+    async def _get_unmaterialized_page(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        before: datetime | None,
+        page_size: int,
+    ) -> PeriodBarPage:
         definition = PERIOD_DEFINITIONS[period_id]
         estimated_minutes_per_bar = definition.minutes or 24 * 60
         cursor = before
@@ -331,14 +779,9 @@ class PeriodBarService:
                 schedule=schedule,
             )
         items = projected[-page_size:]
-        oldest_component = None
-        if items:
-            payload = items[0].source.raw_payload or {}
-            raw_value = payload.get("bucket_first_open_time")
-            if isinstance(raw_value, str):
-                oldest_component = datetime.fromisoformat(raw_value).astimezone(UTC)
-            else:
-                oldest_component = items[0].open_time
+        oldest_component = (
+            _payload_time(items[0], "bucket_first_open_time", items[0].open_time) if items else None
+        )
         return PeriodBarPage(
             period_id=period_id,
             items=items,

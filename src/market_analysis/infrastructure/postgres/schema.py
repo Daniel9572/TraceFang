@@ -129,6 +129,8 @@ CREATE TABLE IF NOT EXISTS candles (
 CREATE INDEX IF NOT EXISTS ix_candles_instrument_interval_time
     ON candles (instrument_symbol, interval_seconds, open_time DESC);
 
+CREATE SEQUENCE IF NOT EXISTS realtime_bar_mutation_id_seq;
+
 CREATE TABLE IF NOT EXISTS realtime_bars (
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
     realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
@@ -149,6 +151,7 @@ CREATE TABLE IF NOT EXISTS realtime_bars (
     ),
     revision INTEGER NOT NULL CHECK (revision > 0),
     finalized_at TIMESTAMPTZ,
+    mutation_id BIGINT NOT NULL DEFAULT nextval('realtime_bar_mutation_id_seq'),
     raw_payload JSONB NOT NULL,
     CHECK (
         (state = 'final' AND finalized_at IS NOT NULL)
@@ -157,8 +160,88 @@ CREATE TABLE IF NOT EXISTS realtime_bars (
     PRIMARY KEY (realtime_source_id, instrument_symbol, interval_seconds, open_time)
 );
 
+ALTER TABLE realtime_bars
+    ADD COLUMN IF NOT EXISTS mutation_id BIGINT;
+
+UPDATE realtime_bars
+SET mutation_id = nextval('realtime_bar_mutation_id_seq')
+WHERE mutation_id IS NULL;
+
+ALTER TABLE realtime_bars
+    ALTER COLUMN mutation_id SET DEFAULT nextval('realtime_bar_mutation_id_seq'),
+    ALTER COLUMN mutation_id SET NOT NULL;
+
 CREATE INDEX IF NOT EXISTS ix_realtime_bars_source_instrument_time
     ON realtime_bars (realtime_source_id, instrument_symbol, interval_seconds, open_time DESC);
+
+CREATE INDEX IF NOT EXISTS ix_realtime_bars_source_mutation
+    ON realtime_bars (realtime_source_id, instrument_symbol, mutation_id);
+
+CREATE TABLE IF NOT EXISTS derived_period_bars (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    period_id TEXT NOT NULL,
+    materialization_version TEXT NOT NULL,
+    evidence_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    first_component_open_time TIMESTAMPTZ NOT NULL,
+    bucket_end TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    materialized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    open NUMERIC(38, 18) NOT NULL,
+    high NUMERIC(38, 18) NOT NULL,
+    low NUMERIC(38, 18) NOT NULL,
+    close NUMERIC(38, 18) NOT NULL,
+    volume NUMERIC(38, 18),
+    state TEXT NOT NULL CHECK (
+        state IN ('provisional_quote', 'provisional_authoritative', 'final')
+    ),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    finalized_at TIMESTAMPTZ,
+    raw_payload JSONB NOT NULL,
+    CHECK (bucket_end > first_component_open_time),
+    CHECK (
+        (state = 'final' AND finalized_at IS NOT NULL)
+        OR (state <> 'final' AND finalized_at IS NULL)
+    ),
+    PRIMARY KEY (
+        realtime_source_id,
+        instrument_symbol,
+        period_id,
+        materialization_version,
+        open_time
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_derived_period_bars_page
+    ON derived_period_bars (
+        realtime_source_id,
+        instrument_symbol,
+        period_id,
+        materialization_version,
+        open_time DESC
+    );
+
+CREATE TABLE IF NOT EXISTS period_bar_materializations (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    period_id TEXT NOT NULL,
+    materialization_version TEXT NOT NULL,
+    source_cursor TIMESTAMPTZ,
+    oldest_bucket_open_time TIMESTAMPTZ,
+    history_exhausted BOOLEAN NOT NULL DEFAULT FALSE,
+    processed_mutation_id BIGINT NOT NULL DEFAULT 0 CHECK (processed_mutation_id >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (
+        realtime_source_id,
+        instrument_symbol,
+        period_id,
+        materialization_version
+    )
+);
 
 CREATE TABLE IF NOT EXISTS realtime_candle_cache_ranges (
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,

@@ -9,6 +9,10 @@ from enum import Enum
 
 import asyncpg
 
+from market_analysis.application.period_bars import (
+    PeriodBarInputChange,
+    PeriodBarMaterializationState,
+)
 from market_analysis.domain.market_events import BarState, QuoteSample, RealtimeBar
 from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
 from market_analysis.infrastructure.postgres.schema import SCHEMA_SQL
@@ -179,6 +183,7 @@ DO UPDATE SET
     state = EXCLUDED.state,
     revision = EXCLUDED.revision,
     finalized_at = EXCLUDED.finalized_at,
+    mutation_id = nextval('realtime_bar_mutation_id_seq'),
     raw_payload = EXCLUDED.raw_payload,
     persisted_at = now()
 WHERE EXCLUDED.revision > realtime_bars.revision
@@ -570,6 +575,132 @@ FROM (
 ORDER BY open_time
 """
 
+_LATEST_REALTIME_BAR_MUTATION_ID = """
+SELECT COALESCE(max(mutation_id), 0)
+FROM realtime_bars
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND interval_seconds = 60
+"""
+
+_SELECT_REALTIME_BAR_INPUT_CHANGES = """
+SELECT mutation_id, open_time
+FROM realtime_bars
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND interval_seconds = 60
+  AND mutation_id > $3
+  AND mutation_id <= $4
+ORDER BY mutation_id
+LIMIT $5
+"""
+
+_SELECT_PERIOD_BAR_MATERIALIZATION = """
+SELECT source_cursor, oldest_bucket_open_time, history_exhausted, processed_mutation_id
+FROM period_bar_materializations
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND period_id = $3
+  AND materialization_version = $4
+"""
+
+_UPSERT_PERIOD_BAR_MATERIALIZATION = """
+INSERT INTO period_bar_materializations (
+    instrument_symbol, realtime_source_id, period_id, materialization_version,
+    source_cursor, oldest_bucket_open_time, history_exhausted, processed_mutation_id
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (
+    realtime_source_id, instrument_symbol, period_id, materialization_version
+) DO UPDATE SET
+    source_cursor = CASE
+        WHEN period_bar_materializations.source_cursor IS NULL
+            THEN EXCLUDED.source_cursor
+        WHEN EXCLUDED.source_cursor IS NULL
+            THEN period_bar_materializations.source_cursor
+        ELSE LEAST(period_bar_materializations.source_cursor, EXCLUDED.source_cursor)
+    END,
+    oldest_bucket_open_time = CASE
+        WHEN period_bar_materializations.oldest_bucket_open_time IS NULL
+            THEN EXCLUDED.oldest_bucket_open_time
+        WHEN EXCLUDED.oldest_bucket_open_time IS NULL
+            THEN period_bar_materializations.oldest_bucket_open_time
+        ELSE LEAST(
+            period_bar_materializations.oldest_bucket_open_time,
+            EXCLUDED.oldest_bucket_open_time
+        )
+    END,
+    history_exhausted = (
+        period_bar_materializations.history_exhausted OR EXCLUDED.history_exhausted
+    ),
+    processed_mutation_id = GREATEST(
+        period_bar_materializations.processed_mutation_id,
+        EXCLUDED.processed_mutation_id
+    ),
+    updated_at = now()
+"""
+
+_SELECT_MATERIALIZED_PERIOD_BARS_BEFORE = """
+SELECT *
+FROM (
+    SELECT
+        instrument_symbol, realtime_source_id, evidence_channel_id, provider_symbol,
+        interval_seconds, open_time, observed_at, received_at,
+        open, high, low, close, volume, state, revision, finalized_at, raw_payload
+    FROM derived_period_bars
+    WHERE instrument_symbol = $1
+      AND realtime_source_id = $2
+      AND period_id = $3
+      AND materialization_version = $4
+      AND ($5::timestamptz IS NULL OR open_time < $5)
+    ORDER BY open_time DESC
+    LIMIT $6
+) AS recent
+ORDER BY open_time
+"""
+
+_UPSERT_MATERIALIZED_PERIOD_BAR = """
+INSERT INTO derived_period_bars (
+    instrument_symbol, realtime_source_id, period_id, materialization_version,
+    evidence_channel_id, provider_symbol, interval_seconds, open_time,
+    first_component_open_time, bucket_end, observed_at, received_at,
+    open, high, low, close, volume, state, revision, finalized_at, raw_payload
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+    $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb
+)
+ON CONFLICT (
+    realtime_source_id, instrument_symbol, period_id, materialization_version, open_time
+) DO UPDATE SET
+    evidence_channel_id = EXCLUDED.evidence_channel_id,
+    provider_symbol = EXCLUDED.provider_symbol,
+    interval_seconds = EXCLUDED.interval_seconds,
+    first_component_open_time = EXCLUDED.first_component_open_time,
+    bucket_end = EXCLUDED.bucket_end,
+    observed_at = EXCLUDED.observed_at,
+    received_at = EXCLUDED.received_at,
+    open = EXCLUDED.open,
+    high = EXCLUDED.high,
+    low = EXCLUDED.low,
+    close = EXCLUDED.close,
+    volume = EXCLUDED.volume,
+    state = EXCLUDED.state,
+    revision = EXCLUDED.revision,
+    finalized_at = EXCLUDED.finalized_at,
+    raw_payload = EXCLUDED.raw_payload,
+    materialized_at = now()
+"""
+
+_DELETE_MATERIALIZED_PERIOD_BAR = """
+DELETE FROM derived_period_bars
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND period_id = $3
+  AND materialization_version = $4
+  AND open_time = $5
+"""
+
 _SELECT_CANDLE_CACHE_RANGES = """
 SELECT range_start, range_end
 FROM realtime_candle_cache_ranges
@@ -671,6 +802,53 @@ def _realtime_bar_values(bar: RealtimeBar) -> tuple[object, ...]:
         source.provider_symbol,
         int(bar.interval.total_seconds()),
         bar.open_time,
+        source.observed_at,
+        source.received_at,
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+        bar.volume,
+        bar.state.value,
+        bar.revision,
+        bar.finalized_at,
+        _payload_json(bar, source.raw_payload),
+    )
+
+
+def _period_bar_payload_time(
+    bar: RealtimeBar,
+    field: str,
+    default: datetime,
+) -> datetime:
+    value = (bar.source.raw_payload or {}).get(field)
+    parsed = datetime.fromisoformat(value) if isinstance(value, str) else default
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"period Bar {field} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _materialized_period_bar_values(
+    bar: RealtimeBar,
+    *,
+    source_id: str,
+    period_id: str,
+    materialization_version: str,
+) -> tuple[object, ...]:
+    source = bar.source
+    if source.provider != source_id:
+        raise ValueError("materialized period Bar must keep its logical realtime source")
+    return (
+        bar.instrument.symbol,
+        source_id,
+        period_id,
+        materialization_version,
+        bar.evidence_channel_id,
+        source.provider_symbol,
+        int(bar.interval.total_seconds()),
+        bar.open_time,
+        _period_bar_payload_time(bar, "bucket_first_open_time", bar.open_time),
+        _period_bar_payload_time(bar, "bucket_end", bar.open_time + bar.interval),
         source.observed_at,
         source.received_at,
         bar.open,
@@ -952,6 +1130,179 @@ class PostgresMarketDataStore:
             await connection.executemany(
                 _UPSERT_REALTIME_BAR,
                 [_realtime_bar_values(row) for row in bars],
+            )
+
+    async def load_period_bar_materialization(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+    ) -> PeriodBarMaterializationState | None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                _SELECT_PERIOD_BAR_MATERIALIZATION,
+                instrument.symbol,
+                source_id,
+                period_id,
+                materialization_version,
+            )
+        if row is None:
+            return None
+        return PeriodBarMaterializationState(
+            source_cursor=row["source_cursor"],
+            oldest_bucket_open_time=row["oldest_bucket_open_time"],
+            history_exhausted=bool(row["history_exhausted"]),
+            processed_mutation_id=int(row["processed_mutation_id"]),
+        )
+
+    async def save_period_bar_materialization(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+        state: PeriodBarMaterializationState,
+    ) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
+            await connection.execute(_UPSERT_SOURCE, source_id)
+            await connection.execute(
+                _UPSERT_PERIOD_BAR_MATERIALIZATION,
+                instrument.symbol,
+                source_id,
+                period_id,
+                materialization_version,
+                state.source_cursor,
+                state.oldest_bucket_open_time,
+                state.history_exhausted,
+                state.processed_mutation_id,
+            )
+
+    async def latest_realtime_bar_mutation_id(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+    ) -> int:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            value = await connection.fetchval(
+                _LATEST_REALTIME_BAR_MUTATION_ID,
+                instrument.symbol,
+                source_id,
+            )
+        return int(value)
+
+    async def load_realtime_bar_input_changes(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        after_mutation_id: int,
+        through_mutation_id: int,
+        count: int,
+    ) -> tuple[PeriodBarInputChange, ...]:
+        if after_mutation_id < 0 or through_mutation_id < after_mutation_id:
+            raise ValueError("invalid realtime Bar mutation range")
+        if not 1 <= count <= 10_000:
+            raise ValueError("mutation page count must be between 1 and 10000")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                _SELECT_REALTIME_BAR_INPUT_CHANGES,
+                instrument.symbol,
+                source_id,
+                after_mutation_id,
+                through_mutation_id,
+                count,
+            )
+        return tuple(
+            PeriodBarInputChange(
+                mutation_id=int(row["mutation_id"]),
+                open_time=row["open_time"],
+            )
+            for row in rows
+        )
+
+    async def load_materialized_period_bars_before(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+        before: datetime | None,
+        count: int,
+    ) -> tuple[RealtimeBar, ...]:
+        if count < 1:
+            raise ValueError("count must be positive")
+        if before is not None and (before.tzinfo is None or before.utcoffset() is None):
+            raise ValueError("before must be timezone-aware")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                _SELECT_MATERIALIZED_PERIOD_BARS_BEFORE,
+                instrument.symbol,
+                source_id,
+                period_id,
+                materialization_version,
+                before,
+                count,
+            )
+        return tuple(_realtime_bar_from_row(row, instrument) for row in rows)
+
+    async def save_materialized_period_bars(
+        self,
+        bars: Sequence[RealtimeBar],
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+    ) -> None:
+        if not bars:
+            return
+        pool = self._require_pool()
+        instruments = {bar.instrument.symbol: bar.instrument for bar in bars}
+        sources = {candidate for bar in bars for candidate in (source_id, bar.evidence_channel_id)}
+        values = [
+            _materialized_period_bar_values(
+                bar,
+                source_id=source_id,
+                period_id=period_id,
+                materialization_version=materialization_version,
+            )
+            for bar in bars
+        ]
+        async with pool.acquire() as connection, connection.transaction():
+            for instrument in instruments.values():
+                await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
+            for candidate in sources:
+                await connection.execute(_UPSERT_SOURCE, candidate)
+            await connection.executemany(_UPSERT_MATERIALIZED_PERIOD_BAR, values)
+
+    async def delete_materialized_period_bar(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        materialization_version: str,
+        open_time: datetime,
+    ) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            await connection.execute(
+                _DELETE_MATERIALIZED_PERIOD_BAR,
+                instrument.symbol,
+                source_id,
+                period_id,
+                materialization_version,
+                open_time,
             )
 
     async def remove_source_from_standard_history(

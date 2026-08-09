@@ -7,16 +7,19 @@ from market_analysis.infrastructure.postgres.store import (
     _INSERT_QUOTE,
     _SELECT_CANDLE_CACHE_RANGES,
     _SELECT_INSTRUMENT_SOURCE,
+    _SELECT_MATERIALIZED_PERIOD_BARS_BEFORE,
     _SELECT_QUOTE_CANDLES_BEFORE,
     _SELECT_QUOTE_EVENT_PAGE,
     _SELECT_RANGE_QUOTE_CANDLES,
     _SELECT_RANGE_REALTIME_BARS,
     _SELECT_RANGE_SOURCE_CANDLES,
+    _SELECT_REALTIME_BAR_INPUT_CHANGES,
     _SELECT_REALTIME_BARS_BEFORE,
     _SELECT_RECENT_QUOTE_CANDLES,
     _SELECT_RECENT_REALTIME_BARS,
     _SELECT_RECENT_SOURCE_CANDLES,
     _SELECT_SOURCE_CANDLES_BEFORE,
+    _UPSERT_MATERIALIZED_PERIOD_BAR,
     _UPSERT_REALTIME_BAR,
 )
 
@@ -107,6 +110,18 @@ class QuoteEventPersistenceTests(unittest.TestCase):
             self.assertIn("FROM realtime_bars", query)
             self.assertIn("realtime_source_id = $2", query)
         self.assertIn("EXCLUDED.revision > realtime_bars.revision", _UPSERT_REALTIME_BAR)
+
+    def test_derived_period_bars_are_versioned_and_revision_aware(self) -> None:
+        self.assertIn("CREATE SEQUENCE IF NOT EXISTS realtime_bar_mutation_id_seq", SCHEMA_SQL)
+        self.assertIn("mutation_id BIGINT", SCHEMA_SQL)
+        self.assertIn("CREATE TABLE IF NOT EXISTS derived_period_bars", SCHEMA_SQL)
+        self.assertIn("CREATE TABLE IF NOT EXISTS period_bar_materializations", SCHEMA_SQL)
+        self.assertIn("materialization_version TEXT NOT NULL", SCHEMA_SQL)
+        self.assertIn("mutation_id > $3", _SELECT_REALTIME_BAR_INPUT_CHANGES)
+        self.assertIn("ORDER BY mutation_id", _SELECT_REALTIME_BAR_INPUT_CHANGES)
+        self.assertIn("FROM derived_period_bars", _SELECT_MATERIALIZED_PERIOD_BARS_BEFORE)
+        self.assertIn("ORDER BY open_time DESC", _SELECT_MATERIALIZED_PERIOD_BARS_BEFORE)
+        self.assertIn("materialized_at = now()", _UPSERT_MATERIALIZED_PERIOD_BAR)
 
 
 if __name__ == "__main__":

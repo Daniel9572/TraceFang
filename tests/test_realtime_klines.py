@@ -50,7 +50,13 @@ def metadata(
     )
 
 
-def quote(source: str, price: str, at: datetime) -> QuoteSnapshot:
+def quote(
+    source: str,
+    price: str,
+    at: datetime,
+    *,
+    received_at: datetime | None = None,
+) -> QuoteSnapshot:
     return QuoteSnapshot(
         instrument=INSTRUMENT,
         last=Decimal(price),
@@ -60,7 +66,7 @@ def quote(source: str, price: str, at: datetime) -> QuoteSnapshot:
         volume=None,
         change=None,
         change_percent=None,
-        source=metadata(source, at),
+        source=metadata(source, at, received_at=received_at),
     )
 
 
@@ -276,7 +282,7 @@ def binding(provider: FakeHistoryProvider | None = None) -> RealtimeBarContract:
 
 
 class RealtimeBarServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_persisted_quote_samples_page_without_merging_raw_events(self) -> None:
+    async def test_persisted_quote_samples_preserve_distinct_price_revisions(self) -> None:
         samples = tuple(
             QuoteSample(
                 source_id="live-a",
@@ -311,6 +317,77 @@ class RealtimeBarServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item.source_id == "source-a" for item in first.items))
         self.assertEqual([item.storage_id for item in second.items], [1])
         self.assertFalse(second.has_more)
+
+    async def test_persisted_quote_samples_collapse_only_consecutive_poll_duplicates(self) -> None:
+        values = ("4200", "4200", "4201", "4200")
+        samples = tuple(
+            QuoteSample(
+                source_id="live-a",
+                channel_id="live-a",
+                event_id=f"stored-{index}",
+                instrument=INSTRUMENT,
+                provider_symbol="XAUUSD",
+                observed_at=START,
+                received_at=START + timedelta(microseconds=index),
+                value=Decimal(value),
+                storage_id=index,
+            )
+            for index, value in enumerate(values, start=1)
+        )
+        service = RealtimeBarService(FakeStore(quote_samples=samples), contracts=(binding(),))
+
+        page = await service.get_quote_sample_page(
+            INSTRUMENT,
+            source_id="source-a",
+            page_size=10,
+        )
+
+        self.assertEqual([item.storage_id for item in page.items], [1, 3, 4])
+        self.assertEqual([item.value for item in page.items], [
+            Decimal("4200"),
+            Decimal("4201"),
+            Decimal("4200"),
+        ])
+
+    async def test_live_business_samples_ignore_received_only_and_late_duplicates(self) -> None:
+        service = RealtimeBarService(None, contracts=(binding(),))
+        frames = (
+            quote("live-a", "4200", START, received_at=START),
+            quote("live-a", "4200", START, received_at=START + timedelta(seconds=1)),
+            quote("live-a", "4201", START, received_at=START + timedelta(seconds=2)),
+            quote(
+                "live-a",
+                "4199",
+                START - timedelta(seconds=1),
+                received_at=START + timedelta(seconds=3),
+            ),
+        )
+
+        samples = [
+            service.sample_from_quote_event(event)
+            for frame in frames
+            if (event := service.normalize_quote(frame)) is not None
+        ]
+
+        self.assertIsNotNone(samples[0])
+        self.assertIsNone(samples[1])
+        self.assertEqual(samples[2].value if samples[2] else None, Decimal("4201"))
+        self.assertIsNone(samples[3])
+
+    async def test_business_sample_identity_never_deduplicates_across_sources(self) -> None:
+        second = RealtimeBarContract(
+            source_id="source-b",
+            authoritative_bar_channel_id="history-b",
+            quote_channel_ids=("live-b",),
+        )
+        service = RealtimeBarService(None, contracts=(binding(), second))
+        source_a = service.normalize_quote(quote("live-a", "4200", START))
+        source_b = service.normalize_quote(quote("live-b", "4200", START))
+
+        self.assertIsNotNone(source_a)
+        self.assertIsNotNone(source_b)
+        self.assertIsNotNone(service.sample_from_quote_event(source_a))
+        self.assertIsNotNone(service.sample_from_quote_event(source_b))
 
     async def test_multiple_realtime_sources_share_one_reducer_without_cross_talk(self) -> None:
         second = RealtimeBarContract(

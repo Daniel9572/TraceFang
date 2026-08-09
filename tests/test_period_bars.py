@@ -4,7 +4,12 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.period_bars import PeriodBarService, project_period_bars
+from market_analysis.application.period_bars import (
+    PeriodBarInputChange,
+    PeriodBarMaterializationState,
+    PeriodBarService,
+    project_period_bars,
+)
 from market_analysis.domain.market_events import BarState, RealtimeBar
 from market_analysis.domain.models import AssetClass, Instrument, SourceMetadata
 
@@ -156,6 +161,129 @@ class _StrictPagedMinuteReader:
         return candidates[-count:]
 
 
+class _TrackedMinuteReader:
+    def __init__(self, rows: tuple[RealtimeBar, ...]) -> None:
+        self.rows = list(rows)
+        self.calls: list[tuple[datetime | None, int]] = []
+
+    async def get_bars_before(self, _instrument, *, source_id, before=None, count=10_000):
+        del source_id
+        self.calls.append((before, count))
+        candidates = tuple(row for row in self.rows if before is None or row.open_time < before)
+        return candidates[-count:]
+
+    def replace(self, value: RealtimeBar) -> None:
+        self.rows = [row for row in self.rows if row.open_time != value.open_time]
+        self.rows.append(value)
+        self.rows.sort(key=lambda row: row.open_time)
+
+
+class _MaterializedPeriodStore:
+    def __init__(self) -> None:
+        self.states: dict[tuple[str, str, str, str], PeriodBarMaterializationState] = {}
+        self.values: dict[tuple[str, str, str, str, datetime], RealtimeBar] = {}
+        self.mutation_id = 0
+        self.changes: list[PeriodBarInputChange] = []
+
+    @staticmethod
+    def _key(instrument, source_id, period_id, materialization_version):
+        return instrument.symbol, source_id, period_id, materialization_version
+
+    async def load_period_bar_materialization(
+        self, instrument, *, source_id, period_id, materialization_version
+    ):
+        return self.states.get(self._key(instrument, source_id, period_id, materialization_version))
+
+    async def save_period_bar_materialization(
+        self,
+        instrument,
+        *,
+        source_id,
+        period_id,
+        materialization_version,
+        state,
+    ):
+        self.states[self._key(instrument, source_id, period_id, materialization_version)] = state
+
+    async def load_materialized_period_bars_before(
+        self,
+        instrument,
+        *,
+        source_id,
+        period_id,
+        materialization_version,
+        before,
+        count,
+    ):
+        prefix = self._key(instrument, source_id, period_id, materialization_version)
+        candidates = sorted(
+            (
+                value
+                for key, value in self.values.items()
+                if key[:4] == prefix and (before is None or value.open_time < before)
+            ),
+            key=lambda value: value.open_time,
+        )
+        return tuple(candidates[-count:])
+
+    async def save_materialized_period_bars(
+        self,
+        bars,
+        *,
+        source_id,
+        period_id,
+        materialization_version,
+    ):
+        for value in bars:
+            key = (
+                value.instrument.symbol,
+                source_id,
+                period_id,
+                materialization_version,
+                value.open_time,
+            )
+            self.values[key] = value
+
+    async def delete_materialized_period_bar(
+        self,
+        instrument,
+        *,
+        source_id,
+        period_id,
+        materialization_version,
+        open_time,
+    ):
+        self.values.pop(
+            (*self._key(instrument, source_id, period_id, materialization_version), open_time),
+            None,
+        )
+
+    async def latest_realtime_bar_mutation_id(self, instrument, *, source_id):
+        del instrument, source_id
+        return self.mutation_id
+
+    async def load_realtime_bar_input_changes(
+        self,
+        instrument,
+        *,
+        source_id,
+        after_mutation_id,
+        through_mutation_id,
+        count,
+    ):
+        del instrument, source_id
+        candidates = tuple(
+            value
+            for value in self.changes
+            if after_mutation_id < value.mutation_id <= through_mutation_id
+        )
+        return candidates[:count]
+
+    def record_change(self, open_time: datetime) -> None:
+        self.mutation_id += 1
+        self.changes.append(PeriodBarInputChange(self.mutation_id, open_time))
+
+
 class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_transport_pages_continue_until_chart_page_is_complete(self) -> None:
         start = datetime(2026, 1, 1, tzinfo=UTC)
@@ -220,6 +348,228 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(page.has_more)
         self.assertGreater(len(reader.requested_counts), 1)
         self.assertLessEqual(max(reader.requested_counts), 10_000)
+
+    async def test_derived_period_is_materialized_once_and_reused(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(1_440)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+
+        first = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=3,
+        )
+        cold_read_calls = len(reader.calls)
+        second = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=3,
+        )
+
+        self.assertEqual(first, second)
+        self.assertGreater(cold_read_calls, 0)
+        self.assertEqual(len(reader.calls), cold_read_calls)
+
+    async def test_minute_revision_recomputes_only_its_materialized_bucket(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(1_200)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+        await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=2,
+        )
+        calls_before_revision = len(reader.calls)
+        revised = bar(
+            (start + timedelta(minutes=1_199)).isoformat(),
+            "99999",
+            revision=2,
+        )
+        reader.replace(revised)
+        store.record_change(revised.open_time)
+
+        page = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=2,
+        )
+
+        revision_calls = reader.calls[calls_before_revision:]
+        self.assertEqual(len(revision_calls), 1)
+        self.assertLessEqual(revision_calls[0][1], 241)
+        self.assertEqual(page.items[-1].high, Decimal("99999"))
+
+    async def test_orphan_materialized_rows_rebuild_their_coverage_cursor(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(1_440)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        first_service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+        expected = await first_service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=3,
+        )
+        store.states.clear()
+        calls_before_recovery = len(reader.calls)
+        recovered_service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+
+        recovered = await recovered_service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=3,
+        )
+        recovery_calls = len(reader.calls)
+        repeated = await recovered_service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=3,
+        )
+
+        self.assertEqual(recovered, expected)
+        self.assertEqual(repeated, expected)
+        self.assertGreater(recovery_calls, calls_before_recovery)
+        self.assertEqual(len(reader.calls), recovery_calls)
+        self.assertTrue(store.states)
+
+    async def test_unchanged_provisional_tail_is_not_recomputed_on_every_read(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar(
+                (start + timedelta(minutes=index)).isoformat(),
+                str(100 + index),
+                state=BarState.PROVISIONAL_AUTHORITATIVE,
+            )
+            for index in range(240)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+
+        first = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=1,
+        )
+        cold_read_calls = len(reader.calls)
+        second = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=1,
+        )
+
+        self.assertEqual(first.items[0].state, BarState.PROVISIONAL_AUTHORITATIVE)
+        self.assertEqual(first, second)
+        self.assertEqual(len(reader.calls), cold_read_calls)
+
+    async def test_materialized_daily_pages_match_one_shot_session_projection(self) -> None:
+        rows = tuple(
+            bar(at, value)
+            for at, value in (
+                ("2026-08-10T21:00:00+08:00", "100"),
+                ("2026-08-11T09:00:00+08:00", "101"),
+                ("2026-08-11T14:59:00+08:00", "102"),
+                ("2026-08-11T21:00:00+08:00", "103"),
+                ("2026-08-12T09:00:00+08:00", "104"),
+                ("2026-08-12T14:59:00+08:00", "105"),
+                ("2026-08-12T21:00:00+08:00", "106"),
+                ("2026-08-13T09:00:00+08:00", "107"),
+                ("2026-08-13T14:59:00+08:00", "108"),
+            )
+        )
+        expected = project_period_bars(
+            rows,
+            period_id="1d",
+            schedule=SHFE_SCHEDULE,
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+
+        latest = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="1d",
+            schedule=SHFE_SCHEDULE,
+            page_size=2,
+        )
+        older = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="1d",
+            schedule=SHFE_SCHEDULE,
+            before=latest.next_before,
+            page_size=2,
+        )
+
+        self.assertEqual((*older.items, *latest.items), expected)
+        self.assertFalse(older.has_more)
+
+    async def test_materialized_history_continues_beyond_twenty_thousand_minutes(
+        self,
+    ) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(20_130)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+
+        first = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="30m",
+            schedule=None,
+            page_size=671,
+        )
+        cold_read_calls = len(reader.calls)
+        second = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="30m",
+            schedule=None,
+            page_size=671,
+        )
+
+        self.assertEqual(len(first.items), 671)
+        self.assertFalse(first.has_more)
+        self.assertEqual(first, second)
+        self.assertGreater(cold_read_calls, 2)
+        self.assertLessEqual(max(count for _, count in reader.calls), 10_000)
+        self.assertEqual(len(reader.calls), cold_read_calls)
 
 
 if __name__ == "__main__":
