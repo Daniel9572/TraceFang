@@ -542,7 +542,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
 .market-chart { overflow: hidden; }
 .timeline-trading-days { position: absolute; z-index: 2; inset: 0 82px 0 0; overflow: hidden; pointer-events: none; }
 .timeline-trading-day-separator { position: absolute; top: 0; bottom: 28px; left: 0; width: 1px; background: #e1e6ee; }
-.timeline-trading-day-label { position: absolute; bottom: 2px; left: 0; display: flex; height: 20px; align-items: center; color: #657da8; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timeline-trading-day-label { position: absolute; bottom: 2px; left: 0; display: flex; height: 20px; align-items: center; color: #8f98a6; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 400; white-space: nowrap; }
 .timeline-session-gap-seam {
   position: absolute;
   top: 74px;

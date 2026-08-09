@@ -5,7 +5,6 @@ import { chartPeriodById } from "../src/chartPeriods.ts";
 import {
   historyBatchMinutes,
   historyWindowBefore,
-  MAX_HISTORY_BATCH_MINUTES,
   prependedPointCount,
   shouldRequestOlderHistory,
 } from "../src/historyLoading.ts";
@@ -20,11 +19,11 @@ test("requests older history only for a user gesture near the left edge", () => 
   assert.equal(shouldRequestOlderHistory(null, 100, false, true), false);
 });
 
-test("sizes history batches for every chart period without exceeding the API limit", () => {
-  assert.equal(historyBatchMinutes(chartPeriodById("timeline")), 2_880);
+test("sizes history batches by requested bars without a business-level minute cap", () => {
+  assert.equal(historyBatchMinutes(chartPeriodById("timeline")), 240);
   assert.equal(historyBatchMinutes(chartPeriodById("15m")), 3_600);
-  assert.equal(historyBatchMinutes(chartPeriodById("1h")), MAX_HISTORY_BATCH_MINUTES);
-  assert.equal(historyBatchMinutes(chartPeriodById("1w")), MAX_HISTORY_BATCH_MINUTES);
+  assert.equal(historyBatchMinutes(chartPeriodById("1h")), 14_400);
+  assert.equal(historyBatchMinutes(chartPeriodById("1w")), 10_080);
 });
 
 test("builds an exclusive older window ending at the current history cursor", () => {
@@ -33,10 +32,7 @@ test("builds an exclusive older window ending at the current history cursor", ()
     end: 1_800_000_000,
     count: 2_880,
   });
-  assert.equal(
-    historyWindowBefore(1_800_000_000, 99_999).count,
-    MAX_HISTORY_BATCH_MINUTES,
-  );
+  assert.equal(historyWindowBefore(1_800_000_000, 99_999).count, 99_999);
 });
 test("counts only points inserted before the previous first point", () => {
   assert.equal(prependedPointCount(20, 10, 1), 1);

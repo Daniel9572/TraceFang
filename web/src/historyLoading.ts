@@ -11,17 +11,27 @@ export interface VisibleLogicalRange {
   to: number;
 }
 
-const MIN_HISTORY_BATCH_MINUTES = 48 * 60;
-export const MAX_HISTORY_BATCH_MINUTES = 10_000;
 const TARGET_BARS_PER_BATCH = 240;
 
+function calendarPeriodMinutes(period: ChartPeriod): number {
+  if (period.aggregation.kind !== "calendar") return period.aggregation.minutes;
+  switch (period.aggregation.unit) {
+    case "day": return 24 * 60;
+    case "week": return 7 * 24 * 60;
+    case "month": return 31 * 24 * 60;
+    case "quarter": return 92 * 24 * 60;
+    case "year": return 366 * 24 * 60;
+  }
+}
+
 export function historyBatchMinutes(period: ChartPeriod): number {
-  if (period.aggregation.kind === "calendar") return MAX_HISTORY_BATCH_MINUTES;
-  return Math.min(
-    MAX_HISTORY_BATCH_MINUTES,
-    Math.max(
-      MIN_HISTORY_BATCH_MINUTES,
-      Math.ceil(period.aggregation.minutes * TARGET_BARS_PER_BATCH),
+  const periodMinutes = calendarPeriodMinutes(period);
+  return Math.max(
+    1,
+    Math.ceil(
+      period.aggregation.kind === "calendar"
+        ? periodMinutes
+        : periodMinutes * TARGET_BARS_PER_BATCH,
     ),
   );
 }
@@ -31,10 +41,7 @@ export function historyWindowBefore(
   countMinutes: number,
 ): HistoryWindow {
   const end = Math.floor(beforeEpochSeconds / 60) * 60;
-  const count = Math.min(
-    MAX_HISTORY_BATCH_MINUTES,
-    Math.max(1, Math.floor(countMinutes)),
-  );
+  const count = Math.max(1, Math.floor(countMinutes));
   return {
     start: end - count * 60,
     end,

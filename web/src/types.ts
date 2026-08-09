@@ -43,6 +43,7 @@ export interface MarketSchedule {
   time_zone: string;
   sessions: TradingSessionWindow[];
   reference: string;
+  trading_day_rule?: "session_start" | "session_end" | "shfe";
 }
 
 export type MarketPhase = "open" | "closed" | "unknown";
@@ -92,6 +93,10 @@ export interface Candle {
   close: number | string;
   volume: number | string | null;
   source: SourceMetadata;
+  evidence_channel_id: string;
+  state: "provisional_quote" | "provisional_authoritative" | "final";
+  revision: number;
+  finalized_at: string | null;
 }
 
 export interface SourceDescriptor {
@@ -148,11 +153,37 @@ export interface InstrumentSourceSelection {
 }
 
 export interface QuoteStreamEvent {
-  kind: "quote" | "status";
+  kind: "bar" | "quote" | "sample" | "status";
   state: "connecting" | "live" | "unavailable";
   emitted_at: string;
   quote: QuoteView | null;
+  sample: QuoteSample | null;
   error: string | null;
+}
+
+export interface ChartBarPage {
+  period_id: string;
+  items: Candle[];
+  next_before: string | null;
+  has_more: boolean;
+}
+
+export interface QuoteSample {
+  source_id: SourceId;
+  channel_id: string;
+  event_id: string;
+  instrument: Instrument;
+  provider_symbol: string;
+  observed_at: string;
+  received_at: string;
+  value: number | string;
+  storage_id: number | null;
+}
+
+export interface QuoteSamplePage {
+  items: QuoteSample[];
+  next_cursor: number | null;
+  has_more: boolean;
 }
 
 export interface HoverCandle {

@@ -8,12 +8,25 @@ export const DISPLAY_TIME_ZONE = "Asia/Shanghai";
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const SECONDS_PER_WEEK = 7 * SECONDS_PER_DAY;
+const CHINA_STANDARD_TIME_OFFSET_SECONDS = 8 * 60 * 60;
+export const DATE_ONLY_AXIS_THRESHOLD_SECONDS = 7 * SECONDS_PER_DAY;
 const MINUTES_PER_DAY = 24 * 60;
 const SUNDAY_1970_DAY_SERIAL = 3;
 
-/** Four fixed display slots per minute keep every trading day the same width. */
-export const TIMELINE_SLOT_SECONDS = 15;
-export const TIMELINE_SLOTS_PER_DAY = SECONDS_PER_DAY / TIMELINE_SLOT_SECONDS;
+const TIMELINE_TIME_EPSILON_SECONDS = 0.000_001;
+
+/**
+ * lightweight-charts classifies tick boundaries from UTC calendar fields.
+ * Shift only the chart coordinate so those fields match the China wall clock;
+ * the source epoch remains unchanged everywhere else.
+ */
+export function projectTimeForChinaAxis(actualTime: number): number {
+  return actualTime + CHINA_STANDARD_TIME_OFFSET_SECONDS;
+}
+
+export function actualTimeForChinaAxis(chartTime: number): number {
+  return chartTime - CHINA_STANDARD_TIME_OFFSET_SECONDS;
+}
 
 const WEEKDAY_INDEX: Record<string, number> = {
   Sun: 0,
@@ -56,7 +69,6 @@ export interface TimelineTradingDay {
 
 export interface TimelineLayout {
   days: TimelineTradingDay[];
-  spacingTimes: number[];
 }
 
 export interface ProjectedTimelinePoint {
@@ -167,6 +179,24 @@ function localDaySerial(parts: Pick<ZonedDateParts, "year" | "month" | "day">): 
   return Math.floor(Date.UTC(parts.year, parts.month - 1, parts.day) / (SECONDS_PER_DAY * 1_000));
 }
 
+function shiftedDateParts(
+  parts: Pick<ZonedDateParts, "year" | "month" | "day">,
+  days: number,
+  skipWeekend = false,
+): Pick<ZonedDateParts, "year" | "month" | "day"> {
+  const value = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+  if (skipWeekend) {
+    while (value.getUTCDay() === 0 || value.getUTCDay() === 6) {
+      value.setUTCDate(value.getUTCDate() + 1);
+    }
+  }
+  return {
+    year: value.getUTCFullYear(),
+    month: value.getUTCMonth() + 1,
+    day: value.getUTCDate(),
+  };
+}
+
 function calendarTradingDay(epochSeconds: number): TimelineTradingDay | null {
   const parts = zonedDateParts(epochSeconds, DISPLAY_TIME_ZONE);
   if (!parts) return null;
@@ -209,13 +239,20 @@ export function tradingDayAt(
     const startParts = zonedDateParts(actualStart, schedule.time_zone);
     const closeParts = zonedDateParts(actualStart + session.durationSeconds - 1, schedule.time_zone);
     if (!startParts || !closeParts) return null;
+    const tradingDateParts = schedule.trading_day_rule === "session_start"
+      ? startParts
+      : schedule.trading_day_rule === "shfe"
+        ? startParts.hour >= 18
+          ? shiftedDateParts(startParts, 1, true)
+          : startParts
+        : closeParts;
     const weekStartSerial = localDaySerial(startParts) - session.weekday;
     const weekIndex = Math.floor((weekStartSerial - SUNDAY_1970_DAY_SERIAL) / 7);
     const ordinal = weekIndex * sessions.length + session.position;
 
     return {
-      key: dateKey(closeParts),
-      label: dateLabel(closeParts),
+      key: dateKey(tradingDateParts),
+      label: dateLabel(tradingDateParts),
       ordinal,
       actualStart,
       actualEnd: actualStart + session.durationSeconds,
@@ -260,18 +297,10 @@ export function buildTimelineLayout(
     .sort((left, right) => left.chartStart - right.chartStart)
     .map((day, index) => ({
       ...day,
-      logicalStart: index * TIMELINE_SLOTS_PER_DAY,
-      logicalEnd: (index + 1) * TIMELINE_SLOTS_PER_DAY - 1,
+      logicalStart: index,
+      logicalEnd: index,
     }));
-  const spacingTimes = new Array<number>(days.length * TIMELINE_SLOTS_PER_DAY);
-  let cursor = 0;
-  for (const day of days) {
-    for (let slot = 0; slot < TIMELINE_SLOTS_PER_DAY; slot += 1) {
-      spacingTimes[cursor] = day.chartStart + slot * TIMELINE_SLOT_SECONDS;
-      cursor += 1;
-    }
-  }
-  return { days, spacingTimes };
+  return { days };
 }
 
 function dayForActualTime(layout: TimelineLayout, actualTime: number): TimelineTradingDay | null {
@@ -294,23 +323,39 @@ export function projectTimelineTime(layout: TimelineLayout, actualTime: number):
     0,
     Math.min(1 - Number.EPSILON, (actualTime - day.actualStart) / (day.actualEnd - day.actualStart)),
   );
-  const slot = Math.min(TIMELINE_SLOTS_PER_DAY - 1, Math.floor(progress * TIMELINE_SLOTS_PER_DAY));
-  return day.chartStart + slot * TIMELINE_SLOT_SECONDS;
+  return day.chartStart + progress * SECONDS_PER_DAY;
 }
 
 export function projectTimelineSeries(
   series: readonly TimelineSample[],
   layout: TimelineLayout,
 ): ProjectedTimelinePoint[] {
-  const rows = new Map<number, ProjectedTimelinePoint>();
-  for (const point of series) {
-    const actualTime = Number.isFinite(point.observedTime) ? Number(point.observedTime) : point.time;
-    if (!Number.isFinite(actualTime) || !Number.isFinite(point.value)) continue;
-    const time = projectTimelineTime(layout, actualTime);
-    if (time === null) continue;
-    rows.set(time, { time, actualTime, value: point.value });
+  const ordered = series
+    .map((point) => ({
+      point,
+      actualTime: Number.isFinite(point.observedTime) ? Number(point.observedTime) : point.time,
+    }))
+    .filter(({ point, actualTime }) => Number.isFinite(actualTime) && Number.isFinite(point.value))
+    .sort((left, right) => {
+      const observedDifference = left.actualTime - right.actualTime;
+      if (observedDifference !== 0) return observedDifference;
+      const receivedDifference = left.point.time - right.point.time;
+      if (receivedDifference !== 0) return receivedDifference;
+      return (left.point.eventId ?? "").localeCompare(right.point.eventId ?? "");
+    });
+
+  const rows: ProjectedTimelinePoint[] = [];
+  let previousChartTime = Number.NEGATIVE_INFINITY;
+  for (const { point, actualTime } of ordered) {
+    const projectedTime = projectTimelineTime(layout, actualTime);
+    if (projectedTime === null) continue;
+    const time = projectedTime > previousChartTime
+      ? projectedTime
+      : previousChartTime + TIMELINE_TIME_EPSILON_SECONDS;
+    rows.push({ time, actualTime, value: point.value });
+    previousChartTime = time;
   }
-  return [...rows.values()].sort((left, right) => left.time - right.time);
+  return rows;
 }
 
 const SESSION_BOUNDARY_TOLERANCE_SECONDS = 2 * SECONDS_PER_MINUTE;
@@ -370,7 +415,7 @@ export function buildTimelineSessionGaps(
 
     gaps.push({
       id: `${previous.key}:${next.key}`,
-      chartTime: next.chartStart,
+      chartTime: nextPoint?.time ?? next.chartStart,
       previousTradingDay: previous.key,
       nextTradingDay: next.key,
       closedAt: previous.actualEnd,
@@ -402,19 +447,6 @@ export function formatSessionGapDuration(totalSeconds: number, compact = false):
   return parts.join("");
 }
 
-export function timelineLogicalIndex(layout: TimelineLayout, chartTime: number): number | null {
-  const day = dayForChartTime(layout, chartTime);
-  if (!day) return null;
-  const slot = Math.max(
-    0,
-    Math.min(
-      TIMELINE_SLOTS_PER_DAY - 1,
-      Math.floor((chartTime - day.chartStart) / TIMELINE_SLOT_SECONDS),
-    ),
-  );
-  return day.logicalStart + slot;
-}
-
 export function dayForChartTime(
   layout: TimelineLayout,
   chartTime: number,
@@ -441,72 +473,73 @@ export function actualTimeForTimelineChartTime(
   return day.actualStart + progress * (day.actualEnd - day.actualStart);
 }
 
-const beijingDate = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: DISPLAY_TIME_ZONE,
-  month: "2-digit",
-  day: "2-digit",
-});
-const beijingMonth = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: DISPLAY_TIME_ZONE,
-  year: "numeric",
-  month: "2-digit",
-});
-const beijingYear = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: DISPLAY_TIME_ZONE,
-  year: "numeric",
-});
-const beijingMinute = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: DISPLAY_TIME_ZONE,
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-const beijingSecond = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: DISPLAY_TIME_ZONE,
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
-});
-const beijingCrosshair = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: DISPLAY_TIME_ZONE,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
-});
-const beijingDateMinute = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: DISPLAY_TIME_ZONE,
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
 
-function slashDate(formatter: Intl.DateTimeFormat, epochSeconds: number): string {
-  return formatter.format(new Date(epochSeconds * 1_000)).replaceAll("/", "/");
+function yearLabel(parts: ZonedDateParts): string {
+  return String(parts.year);
+}
+
+function monthLabel(parts: ZonedDateParts): string {
+  return `${parts.year}/${pad2(parts.month)}`;
+}
+
+function quarterLabel(parts: ZonedDateParts): string {
+  return `${parts.year} Q${Math.floor((parts.month - 1) / 3) + 1}`;
+}
+
+function shortDateLabel(parts: ZonedDateParts): string {
+  return `${pad2(parts.month)}/${pad2(parts.day)}`;
+}
+
+function fullDateLabel(parts: ZonedDateParts): string {
+  return `${parts.year}/${pad2(parts.month)}/${pad2(parts.day)}`;
+}
+
+function clockLabel(parts: ZonedDateParts, seconds: boolean): string {
+  const minute = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
+  return seconds ? `${minute}:${pad2(parts.second)}` : minute;
+}
+
+function beijingParts(epochSeconds: number): ZonedDateParts | null {
+  return zonedDateParts(epochSeconds, DISPLAY_TIME_ZONE);
 }
 
 export function formatChartTick(
-  chartTime: number,
+  actualTime: number,
   tickMarkType: TickMarkType,
   period: ChartPeriod,
+  visibleSpanSeconds = 0,
 ): string {
-  if (!Number.isFinite(chartTime)) return "";
-  const date = new Date(chartTime * 1_000);
-  if (tickMarkType === TickMarkType.Year) return beijingYear.format(date).replace("年", "");
-  if (tickMarkType === TickMarkType.Month) {
-    return period.aggregation.kind === "calendar"
-      ? beijingMonth.format(date).replace("年", "/").replace("月", "")
-      : `${String(Number(new Intl.DateTimeFormat("en", { timeZone: DISPLAY_TIME_ZONE, month: "2-digit" }).format(date))).padStart(2, "0")}月`;
+  if (!Number.isFinite(actualTime)) return "";
+  const parts = beijingParts(actualTime);
+  if (!parts) return "";
+
+  if (period.aggregation.kind === "calendar") {
+    switch (period.aggregation.unit) {
+      case "year":
+        return yearLabel(parts);
+      case "quarter":
+        return quarterLabel(parts);
+      case "month":
+        return tickMarkType === TickMarkType.Year ? yearLabel(parts) : monthLabel(parts);
+      case "day":
+      case "week":
+        if (tickMarkType === TickMarkType.Year) return yearLabel(parts);
+        if (tickMarkType === TickMarkType.Month) return monthLabel(parts);
+        return shortDateLabel(parts);
+    }
   }
-  if (tickMarkType === TickMarkType.DayOfMonth) return slashDate(beijingDate, chartTime);
-  if (tickMarkType === TickMarkType.TimeWithSeconds) return beijingSecond.format(date);
-  return beijingMinute.format(date);
+
+  if (
+    visibleSpanSeconds >= DATE_ONLY_AXIS_THRESHOLD_SECONDS
+    && (tickMarkType === TickMarkType.Time || tickMarkType === TickMarkType.TimeWithSeconds)
+  ) return "";
+  if (tickMarkType === TickMarkType.Year) return yearLabel(parts);
+  if (tickMarkType === TickMarkType.Month) return monthLabel(parts);
+  if (tickMarkType === TickMarkType.DayOfMonth) return shortDateLabel(parts);
+  return clockLabel(parts, tickMarkType === TickMarkType.TimeWithSeconds);
 }
 
 export function formatTimelineTick(
@@ -525,24 +558,60 @@ export function formatTimelineTick(
   ) return day.label;
   const actualTime = actualTimeForTimelineChartTime(layout, chartTime);
   if (actualTime === null) return "";
-  return tickMarkType === TickMarkType.TimeWithSeconds
-    ? beijingSecond.format(new Date(actualTime * 1_000))
-    : beijingMinute.format(new Date(actualTime * 1_000));
+  const parts = beijingParts(actualTime);
+  return parts ? clockLabel(parts, tickMarkType === TickMarkType.TimeWithSeconds) : "";
+}
+
+export function formatChartTimeLabel(
+  actualTime: number,
+  period: ChartPeriod,
+  timelineResolutionSeconds = 60,
+): string {
+  if (!Number.isFinite(actualTime)) return "--";
+  const parts = beijingParts(actualTime);
+  if (!parts) return "--";
+
+  if (period.mode === "timeline") {
+    return `${fullDateLabel(parts)} ${clockLabel(parts, timelineResolutionSeconds < 60)}`;
+  }
+  if (period.aggregation.kind === "fixed") {
+    return `${fullDateLabel(parts)} ${clockLabel(parts, false)}`;
+  }
+  switch (period.aggregation.unit) {
+    case "day":
+    case "week":
+      return fullDateLabel(parts);
+    case "month":
+      return monthLabel(parts);
+    case "quarter":
+      return quarterLabel(parts);
+    case "year":
+      return yearLabel(parts);
+  }
 }
 
 export function formatCrosshairTime(
   chartTime: number,
   period: ChartPeriod,
   layout: TimelineLayout,
+  timelineResolutionSeconds = 60,
+  exactTimelineActualTime?: number,
 ): string {
   const actualTime = period.mode === "timeline"
-    ? actualTimeForTimelineChartTime(layout, chartTime)
+    ? exactTimelineActualTime ?? actualTimeForTimelineChartTime(layout, chartTime)
     : chartTime;
   if (actualTime === null || !Number.isFinite(actualTime)) return "--";
-  return beijingCrosshair.format(new Date(actualTime * 1_000));
+  return formatChartTimeLabel(actualTime, period, timelineResolutionSeconds);
+}
+
+export function formatBeijingClock(epochSeconds: number, includeSeconds = true): string {
+  if (!Number.isFinite(epochSeconds)) return "--";
+  const parts = beijingParts(epochSeconds);
+  return parts ? clockLabel(parts, includeSeconds) : "--";
 }
 
 export function formatBeijingDateTime(epochSeconds: number): string {
   if (!Number.isFinite(epochSeconds)) return "--";
-  return beijingDateMinute.format(new Date(epochSeconds * 1_000));
+  const parts = beijingParts(epochSeconds);
+  return parts ? `${shortDateLabel(parts)} ${clockLabel(parts, false)}` : "--";
 }
