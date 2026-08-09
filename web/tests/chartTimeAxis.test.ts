@@ -6,7 +6,10 @@ import { TickMarkType } from "lightweight-charts";
 import { chartPeriodById } from "../src/chartPeriods.ts";
 import {
   actualTimeForChinaAxis,
+  buildOpenSessionDataGaps,
+  buildSeriesDataGaps,
   buildTimelineLayout,
+  buildTimelineLogicalDayRanges,
   buildTimelineSessionGaps,
   formatChartTick,
   formatChartTimeLabel,
@@ -15,6 +18,9 @@ import {
   formatSessionGapDuration,
   projectTimeForChinaAxis,
   projectTimelineSeries,
+  timelineDayWindowAtLogicalRange,
+  timelineGapSeparatorTime,
+  timelineLogicalViewport,
   tradingDayAt,
 } from "../src/chartTimeAxis.ts";
 import { SPOT_METALS_MARKET_SCHEDULE } from "../src/marketSession.ts";
@@ -24,17 +30,14 @@ const SHFE_SCHEDULE = {
   trading_day_rule: "shfe" as const,
   reference: "test",
   sessions: [
-    ...[1, 2, 3, 4, 5].map((weekday) => ({
-      weekday: weekday as 1 | 2 | 3 | 4 | 5,
-      open: "09:00",
-      close: "15:00",
-      close_day_offset: 0,
-    })),
-    ...[1, 2, 3, 4, 5].map((weekday) => ({
-      weekday: weekday as 1 | 2 | 3 | 4 | 5,
-      open: "21:00",
-      close: "02:30",
-      close_day_offset: 1,
+    ...[1, 2, 3, 4, 5].flatMap((weekday) => [
+      { weekday, open: "09:00", close: "10:15", close_day_offset: 0 },
+      { weekday, open: "10:30", close: "11:30", close_day_offset: 0 },
+      { weekday, open: "13:30", close: "15:00", close_day_offset: 0 },
+      { weekday, open: "21:00", close: "02:30", close_day_offset: 1 },
+    ]).map((session) => ({
+      ...session,
+      weekday: session.weekday as 1 | 2 | 3 | 4 | 5,
     })),
   ],
 };
@@ -56,11 +59,65 @@ test("compresses the weekend into adjacent fixed-width trading days", () => {
 });
 
 test("uses the session close date as the trading-day label", () => {
-  const sundayOpen = Date.parse("2026-08-09T22:05:00Z") / 1_000;
+  const sundayOpen = Date.parse("2026-08-09T22:00:00Z") / 1_000;
   const beforeSundayOpen = sundayOpen - 60;
 
   assert.equal(tradingDayAt(sundayOpen, SPOT_METALS_MARKET_SCHEDULE)?.label, "08/10");
   assert.equal(tradingDayAt(beforeSundayOpen, SPOT_METALS_MARKET_SCHEDULE), null);
+});
+
+test("builds exact one-day, two-day, and three-day timeline viewports", () => {
+  const starts = [
+    Date.parse("2026-08-06T22:00:00Z") / 1_000,
+    Date.parse("2026-08-09T22:00:00Z") / 1_000,
+    Date.parse("2026-08-10T22:00:00Z") / 1_000,
+  ];
+  const actualTimes = starts.flatMap((start) => [start, start + 60]);
+  const layout = buildTimelineLayout(actualTimes, SPOT_METALS_MARKET_SCHEDULE);
+  const projected = projectTimelineSeries(
+    actualTimes.map((time, index) => ({ time, value: 2_000 + index })),
+    layout,
+  );
+  const ranges = buildTimelineLogicalDayRanges(projected, [], layout);
+
+  assert.deepEqual(ranges.map((range) => range.key), ["2026-08-07", "2026-08-10", "2026-08-11"]);
+  assert.deepEqual(timelineLogicalViewport(ranges, 1), {
+    from: ranges[2].from,
+    to: ranges[2].to,
+    dayCount: 1,
+    firstKey: "2026-08-11",
+    lastKey: "2026-08-11",
+  });
+  assert.deepEqual(timelineLogicalViewport(ranges, 2), {
+    from: ranges[1].from,
+    to: ranges[2].to,
+    dayCount: 2,
+    firstKey: "2026-08-10",
+    lastKey: "2026-08-11",
+  });
+  assert.equal(timelineLogicalViewport(ranges, 3)?.dayCount, 3);
+  assert.deepEqual(
+    timelineDayWindowAtLogicalRange(ranges, timelineLogicalViewport(ranges, 1)),
+    { dayCount: 1, endKey: "2026-08-11" },
+  );
+});
+
+test("timeline viewport counts gap separators without dropping native points", () => {
+  const start = Date.parse("2026-08-09T22:00:00Z") / 1_000;
+  const layout = buildTimelineLayout([start, start + 600], SPOT_METALS_MARKET_SCHEDULE);
+  const projected = projectTimelineSeries([
+    { time: start, value: 2_000 },
+    { time: start + 600, value: 2_001 },
+  ], layout);
+  const ranges = buildTimelineLogicalDayRanges(projected, [{ nextIndex: 1 }], layout);
+
+  assert.equal(projected.length, 2);
+  assert.deepEqual(ranges, [{
+    key: "2026-08-10",
+    label: "08/10",
+    from: -0.5,
+    to: 2.5,
+  }]);
 });
 
 test("groups SHFE night and day sessions under the exchange trading date", () => {
@@ -89,6 +146,147 @@ test("projects every quote without changing or merging raw event timestamps", ()
   assert.ok(projected[1].time < projected[2].time);
 });
 
+test("marks one display-only gap instead of filling every missing open-session bucket", () => {
+  const first = Date.parse("2026-08-09T22:10:00Z") / 1_000;
+  const points = [
+    { actualTime: first, resolutionSeconds: 60 },
+    { actualTime: first + 60, resolutionSeconds: 60 },
+    { actualTime: first + 10 * 60, resolutionSeconds: 60 },
+  ];
+  const layout = buildTimelineLayout(
+    points.map((point) => point.actualTime),
+    SPOT_METALS_MARKET_SCHEDULE,
+  );
+
+  assert.deepEqual(buildOpenSessionDataGaps(points, 1, layout), [{
+    nextIndex: 2,
+    separatorTime: first + 2 * 60,
+    missingDurationSeconds: 8 * 60,
+  }]);
+});
+
+test("does not mistake a scheduled market closure for a missing-trade gap", () => {
+  const beforeClose = Date.parse("2026-08-06T20:58:00Z") / 1_000;
+  const nextOpen = Date.parse("2026-08-06T22:00:00Z") / 1_000;
+  const points = [
+    { actualTime: beforeClose },
+    { actualTime: nextOpen },
+  ];
+  const layout = buildTimelineLayout(
+    points.map((point) => point.actualTime),
+    SPOT_METALS_MARKET_SCHEDULE,
+  );
+
+  assert.deepEqual(buildOpenSessionDataGaps(points, 60, layout), []);
+});
+
+test("breaks every scheduled closure without inventing a market value", () => {
+  const cases = [
+    {
+      name: "spot daily maintenance",
+      schedule: SPOT_METALS_MARKET_SCHEDULE,
+      previous: "2026-08-06T20:58:00Z",
+      next: "2026-08-06T22:00:00Z",
+    },
+    {
+      name: "spot weekend",
+      schedule: SPOT_METALS_MARKET_SCHEDULE,
+      previous: "2026-08-07T20:58:00Z",
+      next: "2026-08-09T22:00:00Z",
+    },
+    {
+      name: "SHFE morning break",
+      schedule: SHFE_SCHEDULE,
+      previous: "2026-08-11T02:14:00Z",
+      next: "2026-08-11T02:30:00Z",
+    },
+    {
+      name: "SHFE lunch break",
+      schedule: SHFE_SCHEDULE,
+      previous: "2026-08-11T03:29:00Z",
+      next: "2026-08-11T05:30:00Z",
+    },
+  ];
+
+  for (const value of cases) {
+    const points = [value.previous, value.next].map((time) => ({
+      actualTime: Date.parse(time) / 1_000,
+      resolutionSeconds: 60,
+    }));
+    const layout = buildTimelineLayout(points.map((point) => point.actualTime), value.schedule);
+    const gaps = buildSeriesDataGaps(points, 60, layout);
+    assert.equal(gaps.length, 1, value.name);
+    assert.equal(gaps[0].kind, "session-boundary", value.name);
+    assert.equal(gaps[0].nextIndex, 1, value.name);
+    assert.equal(Object.hasOwn(gaps[0], "value"), false, value.name);
+
+    const coarseGaps = buildSeriesDataGaps(
+      points.map((point) => ({ actualTime: point.actualTime })),
+      4 * 60 * 60,
+      layout,
+    );
+    assert.equal(coarseGaps[0]?.kind, "session-boundary", `${value.name} at 4h`);
+  }
+});
+
+test("projects a closed-session separator between adjacent real timeline observations", () => {
+  const previous = Date.parse("2026-08-07T20:58:00Z") / 1_000;
+  const next = Date.parse("2026-08-09T22:00:00Z") / 1_000;
+  const layout = buildTimelineLayout([previous, next], SPOT_METALS_MARKET_SCHEDULE);
+  const projected = projectTimelineSeries([
+    { time: previous, value: 100 },
+    { time: next, value: 104 },
+  ], layout);
+  const [gap] = buildSeriesDataGaps(projected, 60, layout);
+  const separator = timelineGapSeparatorTime(gap, projected, layout);
+
+  assert.ok(separator !== null);
+  assert.ok(separator > projected[0].time);
+  assert.ok(separator < projected[1].time);
+});
+
+test("retains every provider observation from the first minute of the spot session", () => {
+  const first = Date.parse("2026-08-02T22:00:00Z") / 1_000;
+  const input = Array.from({ length: 5 }, (_, index) => ({
+    time: first + index * 60,
+    value: 4_082.82 - index,
+  }));
+  const layout = buildTimelineLayout(input.map((point) => point.time), SPOT_METALS_MARKET_SCHEDULE);
+  const projected = projectTimelineSeries(input, layout);
+
+  assert.equal(projected.length, 5);
+  assert.deepEqual(projected.map((point) => point.actualTime), input.map((point) => point.time));
+});
+
+test("retains a native close marker and still breaks the following closed session", () => {
+  const beforeClose = Date.parse("2026-08-11T06:59:00Z") / 1_000;
+  const closeMarker = Date.parse("2026-08-11T07:00:00Z") / 1_000;
+  const nextOpen = Date.parse("2026-08-11T13:00:00Z") / 1_000;
+  const input = [beforeClose, closeMarker, nextOpen].map((time, index) => ({
+    time,
+    value: 900 + index,
+    resolutionSeconds: 60,
+  }));
+  const layout = buildTimelineLayout(input.map((point) => point.time), SHFE_SCHEDULE);
+  const projected = projectTimelineSeries(input, layout);
+  const gaps = buildSeriesDataGaps(projected, 60, layout);
+
+  assert.deepEqual(projected.map((point) => point.actualTime), input.map((point) => point.time));
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0].kind, "session-boundary");
+  assert.equal(gaps[0].nextIndex, 2);
+  assert.ok(projected[1].time < projected[2].time);
+});
+
+test("does not infer an open-session gap without a market schedule", () => {
+  const first = Date.parse("2026-08-09T22:10:00Z") / 1_000;
+
+  assert.deepEqual(buildOpenSessionDataGaps([
+    { actualTime: first },
+    { actualTime: first + 10 * 60 },
+  ], 60, null), []);
+});
+
 test("assigns distinct chart coordinates to events with the same source timestamp", () => {
   const actualTime = Date.parse("2026-08-09T22:05:01Z") / 1_000;
   const layout = buildTimelineLayout([actualTime], SPOT_METALS_MARKET_SCHEDULE);
@@ -104,7 +302,7 @@ test("assigns distinct chart coordinates to events with the same source timestam
 
 test("describes the daily closed session and calculates a verified opening gap", () => {
   const beforeClose = Date.parse("2026-08-06T20:58:00Z") / 1_000;
-  const nextOpen = Date.parse("2026-08-06T22:05:00Z") / 1_000;
+  const nextOpen = Date.parse("2026-08-06T22:00:00Z") / 1_000;
   const layout = buildTimelineLayout([beforeClose, nextOpen], SPOT_METALS_MARKET_SCHEDULE);
   const projected = projectTimelineSeries([
     { time: beforeClose, value: 100 },
@@ -114,18 +312,18 @@ test("describes the daily closed session and calculates a verified opening gap",
 
   assert.ok(gap);
   assert.equal(gap.kind, "session");
-  assert.equal(gap.durationSeconds, 66 * 60);
+  assert.equal(gap.durationSeconds, 60 * 60);
   assert.equal(gap.boundaryState, "complete");
   assert.equal(gap.direction, "up");
   assert.equal(gap.priceDifference, 1);
   assert.equal(gap.pricePercent, 1);
-  assert.equal(formatSessionGapDuration(gap.durationSeconds), "1小时06分");
-  assert.equal(formatSessionGapDuration(gap.durationSeconds, true), "1时06分");
+  assert.equal(formatSessionGapDuration(gap.durationSeconds), "1小时");
+  assert.equal(formatSessionGapDuration(gap.durationSeconds, true), "1时");
 });
 
 test("labels the weekend closure without expanding it on the chart", () => {
   const fridayClose = Date.parse("2026-08-07T20:58:00Z") / 1_000;
-  const sundayOpen = Date.parse("2026-08-09T22:05:00Z") / 1_000;
+  const sundayOpen = Date.parse("2026-08-09T22:00:00Z") / 1_000;
   const layout = buildTimelineLayout([fridayClose, sundayOpen], SPOT_METALS_MARKET_SCHEDULE);
   const projected = projectTimelineSeries([
     { time: fridayClose, value: 100 },
@@ -135,10 +333,10 @@ test("labels the weekend closure without expanding it on the chart", () => {
 
   assert.ok(gap);
   assert.equal(gap.kind, "weekend");
-  assert.equal(gap.durationSeconds, 49 * 60 * 60 + 6 * 60);
+  assert.equal(gap.durationSeconds, 49 * 60 * 60);
   assert.equal(gap.boundaryState, "complete");
   assert.equal(gap.direction, "down");
-  assert.equal(formatSessionGapDuration(gap.durationSeconds), "2天1小时06分");
+  assert.equal(formatSessionGapDuration(gap.durationSeconds), "2天1小时");
 });
 
 test("does not infer an opening price gap when a session boundary is incomplete", () => {

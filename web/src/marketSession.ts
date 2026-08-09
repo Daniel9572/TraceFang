@@ -15,11 +15,11 @@ const MARKET_CLOCK_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
 
 export const SPOT_METALS_MARKET_SCHEDULE: MarketSchedule = {
   time_zone: "America/New_York",
-  reference: "OTC 贵金属常规交易时段",
+  reference: "OTC 贵金属来源校验交易时段",
   sessions: [0, 1, 2, 3, 4].map((weekday) => ({
     weekday: weekday as 0 | 1 | 2 | 3 | 4,
-    open: "18:05",
-    close: "16:59",
+    open: "18:00",
+    close: "17:00",
     close_day_offset: 1,
   })),
 };

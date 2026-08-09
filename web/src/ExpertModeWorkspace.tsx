@@ -25,12 +25,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { marketApi } from "./api";
 import {
   buildExpertAnalysisAt,
+  buildExpertIndicatorSeriesAt,
   createExpertBacktestRunner,
   DEFAULT_EXPERT_STRATEGIES,
   EXPERT_INDICATOR_HISTORY_VERSION,
   EXPERT_STRATEGIES,
 } from "./expertAnalysis";
 import { EXPERT_GOLD_EVENTS_2026 } from "./expertEvents";
+import { ChartLayerManager } from "./ChartLayerManager";
 import {
   candleReplayCutoff,
   nextReplayIndex,
@@ -43,13 +45,28 @@ import {
   optionPositioningLabel,
   resolveExpertOptionExpiry,
 } from "./expertOptions";
+import {
+  activeDrawingLayer,
+  addDrawingLayer,
+  appendDrawingToActiveLayer,
+  buildChartLayers,
+  clearActiveDrawingLayer,
+  deleteDrawingLayer,
+  moveChartLayer,
+  renameDrawingLayer,
+  resizeIndicatorLayer,
+  setActiveDrawingLayer,
+  setChartLayerVisibility,
+  type ChartLayerWorkspace,
+  undoActiveDrawing,
+} from "./chartLayers";
 import { buildExpertSessionBandsForRange } from "./expertSessions";
 import type {
   ExpertAiAnalysis,
   ExpertAiStatus,
-  ExpertDrawing,
   ExpertDrawingSnapMode,
   ExpertDrawingTool,
+  ExpertIndicatorSeriesView,
   ExpertOptionContract,
   ExpertOptionsStatus,
   ExpertStrategyId,
@@ -81,6 +98,11 @@ interface ExpertModeWorkspaceProps {
   marketSchedule: MarketSchedule | null | undefined;
   sourceLabel: string;
   sourceState: "connecting" | "live" | "waiting" | "unavailable";
+  liveIndicatorSeries: ExpertIndicatorSeriesView;
+  layerWorkspace: ChartLayerWorkspace;
+  onLayerWorkspaceChange: (
+    update: (current: ChartLayerWorkspace) => ChartLayerWorkspace,
+  ) => void;
   historyLoading: boolean;
   loading: boolean;
   error: string | null;
@@ -96,7 +118,6 @@ const TIME_ZONES = [
 ] as const;
 
 const STRATEGY_STORAGE_KEY = "market-expert-strategies-v1";
-const DRAWING_STORAGE_KEY = "market-expert-drawings-v1";
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const OPTION_QUANTITY_FORMATTER = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 
@@ -110,24 +131,6 @@ function readStrategies(): ExpertStrategyId[] {
     return values.length > 0 ? values : DEFAULT_EXPERT_STRATEGIES;
   } catch {
     return DEFAULT_EXPERT_STRATEGIES;
-  }
-}
-
-function readDrawings(): ExpertDrawing[] {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(DRAWING_STORAGE_KEY) ?? "[]");
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((value): value is ExpertDrawing => Boolean(
-      value
-      && typeof value.id === "string"
-      && (value.type === "trend" || value.type === "horizontal")
-      && Number.isFinite(value.start?.time)
-      && Number.isFinite(value.start?.price)
-      && Number.isFinite(value.end?.time)
-      && Number.isFinite(value.end?.price),
-    ));
-  } catch {
-    return [];
   }
 }
 
@@ -211,6 +214,9 @@ export function ExpertModeWorkspace({
   marketSchedule,
   sourceLabel,
   sourceState,
+  liveIndicatorSeries,
+  layerWorkspace,
+  onLayerWorkspaceChange,
   historyLoading,
   loading,
   error,
@@ -221,9 +227,9 @@ export function ExpertModeWorkspace({
   const period = chartPeriodById(periodId);
   const [displayTimeZone, setDisplayTimeZone] = useState("Asia/Shanghai");
   const [enabledStrategies, setEnabledStrategies] = useState<ExpertStrategyId[]>(readStrategies);
-  const [drawings, setDrawings] = useState<ExpertDrawing[]>(readDrawings);
+  const setLayerWorkspace = onLayerWorkspaceChange;
+  const [layerManagerOpen, setLayerManagerOpen] = useState(true);
   const [drawingTool, setDrawingTool] = useState<ExpertDrawingTool | null>(null);
-  const [drawingsVisible, setDrawingsVisible] = useState(true);
   const [drawingSnapMode, setDrawingSnapMode] = useState<ExpertDrawingSnapMode>("weak");
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [replayEnabled, setReplayEnabled] = useState(false);
@@ -241,6 +247,7 @@ export function ExpertModeWorkspace({
   const [aiAnalysis, setAiAnalysis] = useState<ExpertAiAnalysis | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const currentDrawingLayer = activeDrawingLayer(layerWorkspace);
 
   useEffect(() => {
     try {
@@ -249,14 +256,6 @@ export function ExpertModeWorkspace({
       // Strategy selection remains usable when local persistence is unavailable.
     }
   }, [enabledStrategies]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(DRAWING_STORAGE_KEY, JSON.stringify(drawings));
-    } catch {
-      // Drawing tools remain usable when local persistence is unavailable.
-    }
-  }, [drawings]);
 
   useEffect(() => {
     let disposed = false;
@@ -349,6 +348,12 @@ export function ExpertModeWorkspace({
   const analysis = useMemo(
     () => buildExpertAnalysisAt(candles, enabledStrategies, analysisIndex, indicatorHistoryKey),
     [analysisIndex, candles, enabledStrategies, indicatorHistoryKey],
+  );
+  const indicatorSeries = useMemo(
+    () => replayEnabled
+      ? buildExpertIndicatorSeriesAt(candles, analysisIndex, indicatorHistoryKey)
+      : liveIndicatorSeries,
+    [analysisIndex, candles, indicatorHistoryKey, liveIndicatorSeries, replayEnabled],
   );
   const enabledStrategyKey = [...enabledStrategies].sort().join(":");
   const backtestLastIndex = replayEnabled
@@ -526,6 +531,16 @@ export function ExpertModeWorkspace({
   const visibleEvents = replayEnabled && replayBoundary !== null
     ? EXPERT_GOLD_EVENTS_2026.filter((event) => event.time <= replayBoundary)
     : EXPERT_GOLD_EVENTS_2026;
+  const chartLayers = useMemo(
+    () => buildChartLayers(layerWorkspace, {
+      indicatorSeries,
+      sessionBands,
+      eventMarkers: visibleEvents,
+      priceLevels: analysis.levels,
+      valueZones: analysis.valueZones,
+    }),
+    [analysis.levels, analysis.valueZones, indicatorSeries, layerWorkspace, sessionBands, visibleEvents],
+  );
 
   return (
     <div className="expert-workspace" data-replay={replayEnabled ? "active" : "live"}>
@@ -586,9 +601,18 @@ export function ExpertModeWorkspace({
         </button>
         <button
           type="button"
+          className={layerManagerOpen ? "is-active" : ""}
+          aria-pressed={layerManagerOpen}
+          onClick={() => setLayerManagerOpen((current) => !current)}
+          title={layerManagerOpen ? "关闭图层管理" : "打开图层管理"}
+        >
+          <Layers3 size={18} /><span>图层</span>
+        </button>
+        <button
+          type="button"
           className={drawingTool === "trend" ? "is-active" : ""}
           onClick={() => {
-            setDrawingsVisible(true);
+            setLayerWorkspace((current) => setChartLayerVisibility(current, current.activeDrawingLayerId, true));
             setDrawingTool("trend");
           }}
           title="趋势线"
@@ -599,7 +623,7 @@ export function ExpertModeWorkspace({
           type="button"
           className={drawingTool === "horizontal" ? "is-active" : ""}
           onClick={() => {
-            setDrawingsVisible(true);
+            setLayerWorkspace((current) => setChartLayerVisibility(current, current.activeDrawingLayerId, true));
             setDrawingTool("horizontal");
           }}
           title="水平线"
@@ -617,23 +641,25 @@ export function ExpertModeWorkspace({
         </button>
         <button
           type="button"
-          className={!drawingsVisible ? "is-active" : ""}
-          aria-pressed={!drawingsVisible}
-          disabled={drawings.length === 0}
+          className={!currentDrawingLayer.visible ? "is-active" : ""}
+          aria-pressed={!currentDrawingLayer.visible}
           onClick={() => {
             setDrawingTool(null);
-            setDrawingsVisible((current) => !current);
+            setLayerWorkspace((current) => {
+              const active = activeDrawingLayer(current);
+              return setChartLayerVisibility(current, active.id, !active.visible);
+            });
           }}
-          title={drawingsVisible ? "隐藏全部用户画线" : "显示全部用户画线"}
+          title={`${currentDrawingLayer.visible ? "隐藏" : "显示"}${currentDrawingLayer.name}`}
         >
-          {drawingsVisible ? <EyeOff size={17} /> : <Eye size={17} />}
-          <span>{drawingsVisible ? "隐藏" : "显示"}</span>
+          {currentDrawingLayer.visible ? <EyeOff size={17} /> : <Eye size={17} />}
+          <span>层显隐</span>
         </button>
         <div className="expert-tool-separator" />
-        <button type="button" disabled={drawings.length === 0} onClick={() => setDrawings((current) => current.slice(0, -1))} title="撤销最后一条线">
+        <button type="button" disabled={currentDrawingLayer.drawings.length === 0} onClick={() => setLayerWorkspace(undoActiveDrawing)} title={`撤销${currentDrawingLayer.name}最后一条线`}>
           <Undo2 size={17} /><span>撤销</span>
         </button>
-        <button type="button" disabled={drawings.length === 0} onClick={() => setDrawings([])} title="清空画线">
+        <button type="button" disabled={currentDrawingLayer.drawings.length === 0} onClick={() => setLayerWorkspace(clearActiveDrawingLayer)} title={`清空${currentDrawingLayer.name}`}>
           <Trash2 size={17} /><span>清空</span>
         </button>
         <div className="expert-session-key" aria-label="主导交易时段图例">
@@ -659,6 +685,35 @@ export function ExpertModeWorkspace({
             <span>{formatSigned(analysis.compositeScore * 100, 0)}</span>
           </div>
         </div>
+        {layerManagerOpen ? (
+          <ChartLayerManager
+            workspace={layerWorkspace}
+            onClose={() => setLayerManagerOpen(false)}
+            onAddDrawingLayer={() => {
+              setLayerWorkspace((current) => addDrawingLayer(
+                current,
+                `layer:drawing:${Date.now()}`,
+              ));
+            }}
+            onSelectDrawingLayer={(layerId) => setLayerWorkspace((current) => setActiveDrawingLayer(current, layerId))}
+            onToggleLayer={(layerId, visible) => {
+              if (layerId === layerWorkspace.activeDrawingLayerId && !visible) setDrawingTool(null);
+              setLayerWorkspace((current) => setChartLayerVisibility(current, layerId, visible));
+            }}
+            onRenameDrawingLayer={(layerId, name) => setLayerWorkspace((current) => renameDrawingLayer(current, layerId, name))}
+            onDeleteDrawingLayer={(layerId) => {
+              const layer = layerWorkspace.layers.find((candidate) => candidate.id === layerId);
+              if (layer?.kind === "drawing" && layer.drawings.length > 0) {
+                const confirmed = window.confirm(`删除“${layer.name}”及其中 ${layer.drawings.length} 条画线？`);
+                if (!confirmed) return;
+              }
+              if (layerId === layerWorkspace.activeDrawingLayerId) setDrawingTool(null);
+              setLayerWorkspace((current) => deleteDrawingLayer(current, layerId));
+            }}
+            onMoveLayer={(layerId, targetLayerId) => setLayerWorkspace((current) => moveChartLayer(current, layerId, targetLayerId))}
+            onResizeIndicatorLayer={(layerId, height) => setLayerWorkspace((current) => resizeIndicatorLayer(current, layerId, height))}
+          />
+        ) : null}
         <MarketChart
           candles={candles}
           period={period}
@@ -678,24 +733,22 @@ export function ExpertModeWorkspace({
           onHover={setHover}
           appearance="expert"
           displayTimeZone={displayTimeZone}
-          sessionBands={sessionBands}
-          eventMarkers={visibleEvents}
-          drawings={drawings}
-          strategyLevels={analysis.levels}
-          valueZones={analysis.valueZones}
+          layers={chartLayers}
           drawingTool={drawingTool}
-          drawingsVisible={drawingsVisible}
           drawingSnapMode={drawingSnapMode}
           onDrawingCommit={(drawing) => {
-            setDrawings((current) => [...current, drawing]);
+            setLayerWorkspace((current) => appendDrawingToActiveLayer(current, drawing));
             setDrawingTool(null);
+          }}
+          onIndicatorPaneResize={(layerId, height) => {
+            setLayerWorkspace((current) => resizeIndicatorLayer(current, layerId, height));
           }}
         />
         {loading && candles.length === 0 ? <div className="expert-chart-message"><RotateCcw className="spin" size={18} />正在读取现货黄金</div> : null}
         {error ? <div className="expert-chart-message is-error">{error}</div> : null}
         {drawingTool ? (
           <div className="expert-drawing-hint">
-            {drawingTool === "trend" ? "在图上拖动两个锚点" : "点击目标价格位置"}
+            {currentDrawingLayer.name} · {drawingTool === "trend" ? "在图上拖动两个锚点" : "点击目标价格位置"}
             {drawingSnapMode === "weak" ? " · 靠近 O/H/L/C 自动弱吸附" : ""} · Esc 取消
           </div>
         ) : null}

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildExpertAnalysis,
   buildExpertAnalysisAt,
+  buildExpertIndicatorSeriesAt,
   clearExpertIndicatorHistory,
   createExpertBacktestRunner,
   DEFAULT_EXPERT_STRATEGIES,
@@ -175,6 +176,25 @@ test("keeps indicator history beyond twenty thousand bars without truncation", (
   const candles = Array.from({ length: 20_050 }, (_, index) => candle(index, 2400 + index * 0.001));
   buildExpertAnalysis(candles, ["macd"], historyKey);
   assert.equal(expertIndicatorHistoryStats(historyKey)?.barCount, candles.length);
+  const series = buildExpertIndicatorSeriesAt(candles, candles.length - 1, historyKey);
+  assert.equal(series.visibleLength, candles.length);
+  assert.equal(series.macd.histogram.length, candles.length);
+  assert.equal(series.kdj.j.length, candles.length);
+});
+
+test("exposes causal indicator curves at the replay index without copying or truncating history", () => {
+  const historyKey = "test:XAUUSD:jin10_client:5m:series-view";
+  clearExpertIndicatorHistory(historyKey);
+  const candles = Array.from({ length: 140 }, (_, index) => candle(index, 2390 + Math.sin(index / 7) * 8));
+  const first = buildExpertIndicatorSeriesAt(candles, 59, historyKey);
+  const second = buildExpertIndicatorSeriesAt(candles, 99, historyKey);
+
+  assert.equal(first.visibleLength, 60);
+  assert.equal(second.visibleLength, 100);
+  assert.strictEqual(first.bars, second.bars);
+  assert.strictEqual(first.kdj.k, second.kdj.k);
+  assert.strictEqual(first.macd.value, second.macd.value);
+  assert.equal(second.bars[second.offset + 99].time, Date.parse(candles[99].open_time) / 1_000);
 });
 
 test("builds explainable indicators and price levels from real bars", () => {

@@ -1,6 +1,7 @@
 import type {
   ExpertAnalysisSnapshot,
   ExpertBacktestResult,
+  ExpertIndicatorSeriesView,
   ExpertSignal,
   ExpertStrategyDefinition,
   ExpertStrategyId,
@@ -46,6 +47,7 @@ interface StrategyHistoryEntry {
   seriesPointCalculations: number;
   snapshotCalculations: number;
   revision: number;
+  lastSeriesChangeIndex: number;
 }
 
 interface StrategyHistoryView {
@@ -441,6 +443,7 @@ function createStrategyHistoryEntry(
     seriesPointCalculations: calculated,
     snapshotCalculations: 0,
     revision: 1,
+    lastSeriesChangeIndex: 0,
   };
 }
 
@@ -469,6 +472,7 @@ function updateStrategyHistoryEntry(
   entry.snapshots.length = bars.length;
   entry.backtestRunners.clear();
   entry.revision += 1;
+  entry.lastSeriesChangeIndex = startIndex;
 }
 
 function strategyHistoryView(
@@ -823,6 +827,40 @@ export function buildExpertAnalysisAt(
     new Set(enabledStrategies),
     view.offset + Math.min(requestedIndex, view.length - 1),
   );
+}
+
+export function buildExpertIndicatorSeriesAt(
+  candles: readonly Candle[],
+  requestedIndex: number,
+  historyKey?: string,
+): ExpertIndicatorSeriesView {
+  const view = strategyHistoryView(candles, historyKey);
+  const visibleLength = Math.min(
+    view.length,
+    Math.max(0, Math.floor(requestedIndex) + 1),
+  );
+  return {
+    historyKey: view.entry.key,
+    revision: view.entry.revision,
+    offset: view.offset,
+    length: view.length,
+    visibleLength,
+    changedFrom: Math.min(
+      view.length,
+      Math.max(0, view.entry.lastSeriesChangeIndex - view.offset),
+    ),
+    bars: view.entry.context.bars,
+    macd: {
+      value: view.entry.context.macd.value,
+      signal: view.entry.context.macd.signal,
+      histogram: view.entry.context.macd.histogram,
+    },
+    kdj: {
+      k: view.entry.context.kdj.k,
+      d: view.entry.context.kdj.d,
+      j: view.entry.context.kdj.j,
+    },
+  };
 }
 
 const BACKTEST_CAVEAT = "实验回测与实时信号共用逐 Bar evaluator，按信号柱收盘换仓并计入 0.02% 单边摩擦；交易数和胜率仅统计已平仓持仓，期末持仓按末价计入收益但不计胜负；未包含真实点差、滑点和 as-of 修订快照。";

@@ -199,4 +199,5 @@ export interface TimelineSample {
   value: number;
   observedTime?: number;
   eventId?: string;
+  resolutionSeconds?: number;
 }

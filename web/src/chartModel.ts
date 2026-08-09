@@ -31,9 +31,11 @@ export function appendTimelineSample(
   sample: TimelineSample,
 ): TimelineSample[] {
   if (!Number.isFinite(sample.time) || !Number.isFinite(sample.value)) return samples;
-  if (sample.eventId && samples.some((item) => item.eventId === sample.eventId)) return samples;
   const latest = samples.at(-1);
-  if (!latest || compareTimelineSamples(latest, sample) <= 0) return [...samples, sample];
+  if (!latest) return [sample];
+  if (compareTimelineSamples(latest, sample) <= 0) {
+    return sameBusinessSample(latest, sample) ? samples : [...samples, sample];
+  }
   let low = 0;
   let high = samples.length;
   while (low < high) {
@@ -41,7 +43,21 @@ export function appendTimelineSample(
     if (compareTimelineSamples(samples[middle], sample) <= 0) low = middle + 1;
     else high = middle;
   }
+  if (
+    (low > 0 && sameBusinessSample(samples[low - 1], sample))
+    || (low < samples.length && sameBusinessSample(samples[low], sample))
+  ) return samples;
   return [...samples.slice(0, low), sample, ...samples.slice(low)];
+}
+
+function sameMarketObservation(left: TimelineSample, right: TimelineSample): boolean {
+  return (left.observedTime ?? left.time) === (right.observedTime ?? right.time)
+    && left.value === right.value;
+}
+
+function sameBusinessSample(left: TimelineSample, right: TimelineSample): boolean {
+  return Boolean(left.eventId && right.eventId && left.eventId === right.eventId)
+    || sameMarketObservation(left, right);
 }
 
 function compareTimelineSamples(left: TimelineSample, right: TimelineSample): number {
@@ -73,6 +89,7 @@ export function mergeTimelineSamples(...pages: readonly TimelineSample[][]): Tim
         );
         const sample = takeLeft ? left[leftIndex++] : right[rightIndex++];
         if (sample.eventId && eventIds.has(sample.eventId)) continue;
+        if (rows.length > 0 && sameMarketObservation(rows[rows.length - 1], sample)) continue;
         if (sample.eventId) eventIds.add(sample.eventId);
         rows.push(sample);
       }
@@ -89,7 +106,18 @@ export function mergeTimelineSamples(...pages: readonly TimelineSample[][]): Tim
       rows.push(sample);
     }
   }
-  return rows.sort(compareTimelineSamples);
+  rows.sort(compareTimelineSamples);
+  const canonical: TimelineSample[] = [];
+  const canonicalEventIds = new Set<string>();
+  for (const sample of rows) {
+    if (sample.eventId && canonicalEventIds.has(sample.eventId)) continue;
+    if (canonical.length > 0 && sameMarketObservation(canonical[canonical.length - 1], sample)) {
+      continue;
+    }
+    if (sample.eventId) canonicalEventIds.add(sample.eventId);
+    canonical.push(sample);
+  }
+  return canonical;
 }
 
 export function buildTimelineSeries(
@@ -118,6 +146,7 @@ export function buildTimelineSeries(
         observedTime: time,
         value,
         eventId: `bar:${candle.source.provider}:${candle.open_time}:${candle.revision}`,
+        resolutionSeconds: Number(candle.interval),
       });
     }
   }

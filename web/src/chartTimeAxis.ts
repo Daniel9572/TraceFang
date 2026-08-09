@@ -14,6 +14,7 @@ const MINUTES_PER_DAY = 24 * 60;
 const SUNDAY_1970_DAY_SERIAL = 3;
 
 const TIMELINE_TIME_EPSILON_SECONDS = 0.000_001;
+const TIMELINE_CLOSE_POINT_PADDING_SECONDS = 0.001;
 
 /**
  * lightweight-charts classifies tick boundaries from UTC calendar fields.
@@ -71,10 +72,44 @@ export interface TimelineLayout {
   days: TimelineTradingDay[];
 }
 
+export interface TimelineLogicalDayRange {
+  key: string;
+  label: string;
+  from: number;
+  to: number;
+}
+
+export interface TimelineLogicalViewport {
+  from: number;
+  to: number;
+  dayCount: number;
+  firstKey: string;
+  lastKey: string;
+}
+
 export interface ProjectedTimelinePoint {
   time: number;
   actualTime: number;
   value: number;
+  resolutionSeconds?: number;
+}
+
+export interface DataGapPoint {
+  actualTime: number;
+  resolutionSeconds?: number;
+}
+
+export interface OpenSessionDataGap {
+  nextIndex: number;
+  separatorTime: number;
+  missingDurationSeconds: number;
+}
+
+export type SeriesDataGapKind = "missing-trade" | "session-boundary";
+
+/** A render-only discontinuity; it never represents a market value or row. */
+export interface SeriesDataGap extends OpenSessionDataGap {
+  kind: SeriesDataGapKind;
 }
 
 export type SessionGapDirection = "up" | "down" | "flat" | "unknown";
@@ -265,6 +300,26 @@ export function tradingDayAt(
   return null;
 }
 
+/**
+ * Some native feeds timestamp the final real observation at the session close
+ * itself (for example 15:00 or 02:30). The schedule remains end-exclusive for
+ * market-state decisions, but a real close marker belongs to the session that
+ * ended at that exact instant. This changes only chart ownership; it never
+ * shifts the source timestamp or creates a sample.
+ */
+function tradingDayForSeriesPoint(
+  epochSeconds: number,
+  schedule: MarketSchedule | null | undefined,
+): TimelineTradingDay | null {
+  const active = tradingDayAt(epochSeconds, schedule);
+  if (active !== null || !schedule || schedule.sessions.length === 0) return active;
+  const previous = tradingDayAt(epochSeconds - TIMELINE_TIME_EPSILON_SECONDS, schedule);
+  return previous !== null
+    && Math.abs(previous.actualEnd - epochSeconds) <= TIMELINE_TIME_EPSILON_SECONDS * 2
+    ? previous
+    : null;
+}
+
 export function tradingDayIdentity(
   epochSeconds: number | null,
   schedule: MarketSchedule | null | undefined,
@@ -288,7 +343,7 @@ export function buildTimelineLayout(
   let index = 0;
   while (index < sortedTimes.length) {
     const actualTime = sortedTimes[index];
-    const activeDay = tradingDayAt(actualTime, schedule);
+    const activeDay = tradingDayForSeriesPoint(actualTime, schedule);
     if (!activeDay) {
       index += 1;
       continue;
@@ -314,6 +369,83 @@ export function buildTimelineLayout(
   return { days };
 }
 
+/** Maps complete trading days to logical indexes without changing any sample. */
+export function buildTimelineLogicalDayRanges(
+  points: readonly { time: number }[],
+  gaps: readonly { nextIndex: number }[],
+  layout: TimelineLayout,
+  requestedPointCount = points.length,
+): TimelineLogicalDayRange[] {
+  const pointCount = Math.min(
+    points.length,
+    Math.max(0, Math.floor(Number.isFinite(requestedPointCount) ? requestedPointCount : 0)),
+  );
+  if (pointCount === 0 || layout.days.length === 0) return [];
+  const ranges = new Map<string, TimelineLogicalDayRange>();
+  let dayIndex = 0;
+  let gapIndex = 0;
+  let insertedGapCount = 0;
+  for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
+    while (gapIndex < gaps.length && gaps[gapIndex].nextIndex <= pointIndex) {
+      insertedGapCount += 1;
+      gapIndex += 1;
+    }
+    const time = points[pointIndex].time;
+    if (!Number.isFinite(time)) continue;
+    while (dayIndex < layout.days.length && time >= layout.days[dayIndex].chartEnd) dayIndex += 1;
+    const day = layout.days[dayIndex];
+    if (!day || time < day.chartStart) continue;
+    const logicalIndex = pointIndex + insertedGapCount;
+    const current = ranges.get(day.key);
+    if (current) {
+      current.from = Math.min(current.from, logicalIndex - 0.5);
+      current.to = Math.max(current.to, logicalIndex + 0.5);
+    } else {
+      ranges.set(day.key, {
+        key: day.key,
+        label: day.label,
+        from: logicalIndex - 0.5,
+        to: logicalIndex + 0.5,
+      });
+    }
+  }
+  return [...ranges.values()];
+}
+
+export function timelineLogicalViewport(
+  ranges: readonly TimelineLogicalDayRange[],
+  requestedDayCount: number,
+  endKey?: string | null,
+): TimelineLogicalViewport | null {
+  if (ranges.length === 0) return null;
+  const normalizedDayCount = Math.max(
+    1,
+    Math.floor(Number.isFinite(requestedDayCount) ? requestedDayCount : 1),
+  );
+  const requestedEndIndex = endKey ? ranges.findIndex((range) => range.key === endKey) : -1;
+  const endIndex = requestedEndIndex >= 0 ? requestedEndIndex : ranges.length - 1;
+  const startIndex = Math.max(0, endIndex - normalizedDayCount + 1);
+  return {
+    from: ranges[startIndex].from,
+    to: ranges[endIndex].to,
+    dayCount: endIndex - startIndex + 1,
+    firstKey: ranges[startIndex].key,
+    lastKey: ranges[endIndex].key,
+  };
+}
+
+export function timelineDayWindowAtLogicalRange(
+  ranges: readonly TimelineLogicalDayRange[],
+  visibleRange: { from: number; to: number } | null,
+): { dayCount: number; endKey: string } | null {
+  if (!visibleRange || ranges.length === 0) return null;
+  const visibleDays = ranges.filter((range) => (
+    range.to > visibleRange.from && range.from < visibleRange.to
+  ));
+  if (visibleDays.length === 0) return null;
+  return { dayCount: visibleDays.length, endKey: visibleDays[visibleDays.length - 1].key };
+}
+
 function dayForActualTime(layout: TimelineLayout, actualTime: number): TimelineTradingDay | null {
   let low = 0;
   let high = layout.days.length - 1;
@@ -327,9 +459,22 @@ function dayForActualTime(layout: TimelineLayout, actualTime: number): TimelineT
   return null;
 }
 
+function dayForSeriesPoint(layout: TimelineLayout, actualTime: number): TimelineTradingDay | null {
+  const active = dayForActualTime(layout, actualTime);
+  if (active !== null) return active;
+  const previous = dayForActualTime(layout, actualTime - TIMELINE_TIME_EPSILON_SECONDS);
+  return previous !== null
+    && Math.abs(previous.actualEnd - actualTime) <= TIMELINE_TIME_EPSILON_SECONDS * 2
+    ? previous
+    : null;
+}
+
 export function projectTimelineTime(layout: TimelineLayout, actualTime: number): number | null {
-  const day = dayForActualTime(layout, actualTime);
+  const day = dayForSeriesPoint(layout, actualTime);
   if (!day) return null;
+  if (Math.abs(day.actualEnd - actualTime) <= TIMELINE_TIME_EPSILON_SECONDS * 2) {
+    return day.chartEnd - TIMELINE_CLOSE_POINT_PADDING_SECONDS;
+  }
   const progress = Math.max(
     0,
     Math.min(1 - Number.EPSILON, (actualTime - day.actualStart) / (day.actualEnd - day.actualStart)),
@@ -382,7 +527,12 @@ export function projectTimelineSeries(
     const time = projectedTime > previousChartTime
       ? projectedTime
       : previousChartTime + TIMELINE_TIME_EPSILON_SECONDS;
-    rows.push({ time, actualTime, value: point.value });
+    rows.push({
+      time,
+      actualTime,
+      value: point.value,
+      resolutionSeconds: point.resolutionSeconds,
+    });
     previousChartTime = time;
   };
   if (ordered) {
@@ -391,6 +541,144 @@ export function projectTimelineSeries(
     for (const point of series) appendProjectedPoint(point, actualTimeOf(point));
   }
   return rows;
+}
+
+/**
+ * Finds missing native samples inside one open market session.
+ *
+ * A gap produces one display-only separator regardless of its duration. The
+ * caller can therefore break a line or reserve one empty candle slot without
+ * manufacturing a price, an OHLC row, or one placeholder per missing bucket.
+ */
+export function buildOpenSessionDataGaps(
+  points: readonly DataGapPoint[],
+  fallbackResolutionSeconds: number,
+  layout: TimelineLayout | null,
+): OpenSessionDataGap[] {
+  if (
+    layout === null
+    || !Number.isFinite(fallbackResolutionSeconds)
+    || fallbackResolutionSeconds <= 0
+  ) return [];
+
+  const gaps: OpenSessionDataGap[] = [];
+  for (let nextIndex = 1; nextIndex < points.length; nextIndex += 1) {
+    const previous = points[nextIndex - 1];
+    const next = points[nextIndex];
+    if (!Number.isFinite(previous.actualTime) || !Number.isFinite(next.actualTime)) continue;
+
+    const resolution = Number.isFinite(previous.resolutionSeconds)
+      && Number(previous.resolutionSeconds) > 0
+      ? Number(previous.resolutionSeconds)
+      : fallbackResolutionSeconds;
+    const elapsed = next.actualTime - previous.actualTime;
+    const tolerance = Math.max(TIMELINE_TIME_EPSILON_SECONDS, resolution * 1e-9);
+    if (elapsed <= resolution + tolerance) continue;
+
+    const previousSession = dayForSeriesPoint(layout, previous.actualTime);
+    const nextSession = dayForSeriesPoint(layout, next.actualTime);
+    if (
+      previousSession === null
+      || nextSession === null
+      || previousSession.ordinal !== nextSession.ordinal
+      || previousSession.actualStart !== nextSession.actualStart
+      || previousSession.actualEnd !== nextSession.actualEnd
+    ) {
+      continue;
+    }
+
+    gaps.push({
+      nextIndex,
+      separatorTime: previous.actualTime + resolution,
+      missingDurationSeconds: elapsed - resolution,
+    });
+  }
+  return gaps;
+}
+
+/**
+ * Builds the complete discontinuity mask for a market-derived line.
+ *
+ * Missing observations inside an open session and scheduled closures remain
+ * different semantics, but both must break rendered price and indicator
+ * lines. Neither case manufactures a price, OHLC row, or persisted sample.
+ */
+export function buildSeriesDataGaps(
+  points: readonly DataGapPoint[],
+  fallbackResolutionSeconds: number,
+  layout: TimelineLayout | null,
+): SeriesDataGap[] {
+  if (
+    layout === null
+    || !Number.isFinite(fallbackResolutionSeconds)
+    || fallbackResolutionSeconds <= 0
+  ) return [];
+
+  const gaps: SeriesDataGap[] = [];
+  for (let nextIndex = 1; nextIndex < points.length; nextIndex += 1) {
+    const previous = points[nextIndex - 1];
+    const next = points[nextIndex];
+    if (!Number.isFinite(previous.actualTime) || !Number.isFinite(next.actualTime)) continue;
+
+    const resolution = Number.isFinite(previous.resolutionSeconds)
+      && Number(previous.resolutionSeconds) > 0
+      ? Number(previous.resolutionSeconds)
+      : fallbackResolutionSeconds;
+    const elapsed = next.actualTime - previous.actualTime;
+    const tolerance = Math.max(TIMELINE_TIME_EPSILON_SECONDS, resolution * 1e-9);
+    if (elapsed <= tolerance) continue;
+
+    const previousSession = dayForSeriesPoint(layout, previous.actualTime);
+    const nextSession = dayForSeriesPoint(layout, next.actualTime);
+    if (previousSession === null || nextSession === null) continue;
+
+    const sameSession = previousSession.ordinal === nextSession.ordinal
+      && previousSession.actualStart === nextSession.actualStart
+      && previousSession.actualEnd === nextSession.actualEnd;
+    if (!sameSession) {
+      const scheduledClosureSeconds = nextSession.actualStart - previousSession.actualEnd;
+      if (scheduledClosureSeconds <= tolerance) continue;
+      gaps.push({
+        kind: "session-boundary",
+        nextIndex,
+        separatorTime: previous.actualTime + elapsed / 2,
+        missingDurationSeconds: scheduledClosureSeconds,
+      });
+      continue;
+    }
+
+    if (elapsed <= resolution + tolerance) continue;
+
+    gaps.push({
+      kind: "missing-trade",
+      nextIndex,
+      separatorTime: previous.actualTime + resolution,
+      missingDurationSeconds: elapsed - resolution,
+    });
+  }
+  return gaps;
+}
+
+/**
+ * Resolves a render-only gap onto the compressed timeline axis. Closed-market
+ * timestamps belong to no session, so boundaries use the midpoint between the
+ * adjacent real observations instead of projecting a nonexistent trade time.
+ */
+export function timelineGapSeparatorTime(
+  gap: SeriesDataGap,
+  series: readonly ProjectedTimelinePoint[],
+  layout: TimelineLayout,
+): number | null {
+  if (gap.kind === "missing-trade") {
+    return projectTimelineTime(layout, gap.separatorTime);
+  }
+  const previous = series[gap.nextIndex - 1];
+  const next = series[gap.nextIndex];
+  if (!previous || !next || !Number.isFinite(previous.time) || !Number.isFinite(next.time)) {
+    return null;
+  }
+  const separator = previous.time + (next.time - previous.time) / 2;
+  return separator > previous.time && separator < next.time ? separator : null;
 }
 
 const SESSION_BOUNDARY_TOLERANCE_SECONDS = 2 * SECONDS_PER_MINUTE;
@@ -405,7 +693,7 @@ export function buildTimelineSessionGaps(
     last: ProjectedTimelinePoint;
   }>();
   for (const point of series) {
-    const day = dayForActualTime(layout, point.actualTime);
+    const day = dayForSeriesPoint(layout, point.actualTime);
     if (!day) continue;
     const boundary = pointsByOrdinal.get(day.ordinal);
     if (boundary) boundary.last = point;

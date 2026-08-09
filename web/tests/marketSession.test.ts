@@ -12,7 +12,7 @@ test("spot metals are closed over the weekend", () => {
 
 test("spot metals follow the New York session across daylight saving time", () => {
   assert.equal(
-    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-07T16:58:00-04:00")).phase,
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-07T16:59:59-04:00")).phase,
     "open",
   );
   assert.equal(
@@ -20,12 +20,31 @@ test("spot metals follow the New York session across daylight saving time", () =
     "closed",
   );
   assert.equal(
-    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-09T18:04:00-04:00")).phase,
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-09T17:59:00-04:00")).phase,
     "closed",
   );
   assert.equal(
-    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-09T18:05:00-04:00")).phase,
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-09T18:00:00-04:00")).phase,
     "open",
+  );
+});
+
+test("spot metals map to the expected Beijing business day across US daylight saving", () => {
+  assert.equal(
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-10T06:00:00+08:00")).phase,
+    "open",
+  );
+  assert.equal(
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-10T05:00:00+08:00")).phase,
+    "closed",
+  );
+  assert.equal(
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-12-07T07:00:00+08:00")).phase,
+    "open",
+  );
+  assert.equal(
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-12-07T06:00:00+08:00")).phase,
+    "closed",
   );
 });
 
@@ -35,7 +54,7 @@ test("spot metals report the normal daily maintenance break as closed", () => {
     "closed",
   );
   assert.equal(
-    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-10T18:05:00-04:00")).phase,
+    marketSessionAt(SPOT_METALS_MARKET_SCHEDULE, new Date("2026-08-10T18:00:00-04:00")).phase,
     "open",
   );
 });

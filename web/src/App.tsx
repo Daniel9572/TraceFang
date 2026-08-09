@@ -24,8 +24,24 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 
 import { marketApi, mergeCandleRows } from "./api";
 import { appendTimelineSample, barsFromCandles, mergeTimelineSamples } from "./chartModel";
+import {
+  buildChartLayers,
+  chartLayerStorageKey,
+  createDefaultChartLayerWorkspace,
+  LEGACY_DRAWING_STORAGE_KEY,
+  LEGACY_EXPERT_LAYER_STORAGE_KEY,
+  readChartLayerWorkspace,
+  resizeIndicatorLayer,
+  type ChartLayerWorkspace,
+} from "./chartLayers";
 import { chartPeriodById, type ChartPeriodId } from "./chartPeriods";
-import { formatBeijingClock, formatChartTimeLabel } from "./chartTimeAxis";
+import { formatBeijingClock, formatChartTimeLabel, tradingDayIdentity } from "./chartTimeAxis";
+import {
+  buildExpertIndicatorSeriesAt,
+  EXPERT_INDICATOR_HISTORY_VERSION,
+} from "./expertAnalysis";
+import { EXPERT_GOLD_EVENTS_2026 } from "./expertEvents";
+import { buildExpertSessionBandsForRange } from "./expertSessions";
 import { historyBatchMinutes } from "./historyLoading";
 import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
 import { ExpertModeWorkspace } from "./ExpertModeWorkspace";
@@ -229,10 +245,28 @@ function LiveClock() {
   return `${pad(current.getMonth() + 1)}/${pad(current.getDate())} ${pad(current.getHours())}:${pad(current.getMinutes())}:${pad(current.getSeconds())}`;
 }
 
+function readSharedLayerWorkspace(code: string): ChartLayerWorkspace {
+  try {
+    const scoped = window.localStorage.getItem(chartLayerStorageKey(code));
+    const legacyExpert = code === "XAUUSD"
+      ? window.localStorage.getItem(LEGACY_EXPERT_LAYER_STORAGE_KEY)
+      : null;
+    const legacyDrawings = code === "XAUUSD"
+      ? window.localStorage.getItem(LEGACY_DRAWING_STORAGE_KEY)
+      : null;
+    return readChartLayerWorkspace(scoped ?? legacyExpert, legacyDrawings);
+  } catch {
+    return createDefaultChartLayerWorkspace();
+  }
+}
+
 export default function App() {
   const [catalog, setCatalog] = useState(defaultInstruments);
   const [instruments, setInstruments] = useState(defaultInstruments);
   const [selectedCode, setSelectedCode] = useState("XAUUSD");
+  const [layerWorkspaces, setLayerWorkspaces] = useState<Record<string, ChartLayerWorkspace>>(
+    () => ({ XAUUSD: readSharedLayerWorkspace("XAUUSD") }),
+  );
   const selectedCodeRef = useRef(selectedCode);
   selectedCodeRef.current = selectedCode;
   const [instrumentSources, setInstrumentSources] = useState<Record<string, SourceId>>({});
@@ -282,6 +316,37 @@ export default function App() {
     catalog.find((instrument) => instrument.provider_code === selectedCode)
     ?? instruments.find((instrument) => instrument.provider_code === selectedCode)
     ?? defaultInstruments[0];
+  const layerWorkspace = useMemo(
+    () => layerWorkspaces[selectedCode] ?? readSharedLayerWorkspace(selectedCode),
+    [layerWorkspaces, selectedCode],
+  );
+  const updateLayerWorkspace = useCallback(
+    (update: (current: ChartLayerWorkspace) => ChartLayerWorkspace) => {
+      setLayerWorkspaces((current) => {
+        const existing = current[selectedCode] ?? readSharedLayerWorkspace(selectedCode);
+        const next = update(existing);
+        return next === existing ? current : { ...current, [selectedCode]: next };
+      });
+    },
+    [selectedCode],
+  );
+  useEffect(() => {
+    setLayerWorkspaces((current) => current[selectedCode]
+      ? current
+      : { ...current, [selectedCode]: readSharedLayerWorkspace(selectedCode) });
+  }, [selectedCode]);
+  const persistedLayerWorkspace = layerWorkspaces[selectedCode];
+  useEffect(() => {
+    if (!persistedLayerWorkspace) return;
+    try {
+      window.localStorage.setItem(
+        chartLayerStorageKey(selectedCode),
+        JSON.stringify(persistedLayerWorkspace),
+      );
+    } catch {
+      // The shared workspace remains usable when local persistence is unavailable.
+    }
+  }, [persistedLayerWorkspace, selectedCode]);
   const selectedSource = instrumentSources[selectedCode] ?? "jin10_client";
   const selectedPeriod = chartPeriodById(periodId);
   const sourceById = useMemo(
@@ -732,7 +797,17 @@ export default function App() {
     void (async () => {
       let cursor: number | undefined;
       const seenCursors = new Set<number>();
-      const historyPages: TimelineSample[][] = [];
+      let firstPage = true;
+      let frontierDayKey: string | null = null;
+      let pendingPages: TimelineSample[][] = [];
+      const publishPendingPages = () => {
+        if (pendingPages.length === 0) return;
+        const batch = mergeTimelineSamples(...pendingPages);
+        pendingPages = [];
+        startTransition(() => {
+          setTimelineSamples((current) => mergeTimelineSamples(batch, current));
+        });
+      };
       while (!disposed) {
         const page = await marketApi.timelineSamplePage(selectedCode, selectedSource, cursor);
         if (disposed || selectedCodeRef.current !== selectedCode) return;
@@ -746,9 +821,25 @@ export default function App() {
           && Number.isFinite(item.observedTime)
           && Number.isFinite(item.value)
         ));
-        historyPages.push(samples);
-        if (historyPages.length === 1) {
+        let oldestObservedTime = Number.POSITIVE_INFINITY;
+        for (const sample of samples) {
+          oldestObservedTime = Math.min(oldestObservedTime, sample.observedTime ?? sample.time);
+        }
+        const oldestDayKey = Number.isFinite(oldestObservedTime)
+          ? tradingDayIdentity(oldestObservedTime, selectedInstrument.market_schedule)
+          : "";
+        if (firstPage) {
           setTimelineSamples((current) => mergeTimelineSamples(samples, current));
+          firstPage = false;
+          frontierDayKey = oldestDayKey || null;
+        } else {
+          pendingPages.push(samples);
+          if (oldestDayKey && frontierDayKey && oldestDayKey !== frontierDayKey) {
+            publishPendingPages();
+            frontierDayKey = oldestDayKey;
+          } else if (oldestDayKey && !frontierDayKey) {
+            frontierDayKey = oldestDayKey;
+          }
         }
         if (!page.has_more || page.next_cursor === null) break;
         if (seenCursors.has(page.next_cursor)) {
@@ -758,9 +849,8 @@ export default function App() {
         cursor = page.next_cursor;
       }
       if (disposed || selectedCodeRef.current !== selectedCode) return;
-      const completeHistory = mergeTimelineSamples(...historyPages);
+      publishPendingPages();
       startTransition(() => {
-        setTimelineSamples((current) => mergeTimelineSamples(completeHistory, current));
         setTimelineHistorySyncing(false);
       });
     })().catch(() => {
@@ -770,7 +860,7 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [selectedCode, selectedPeriod.mode, selectedSource]);
+  }, [selectedCode, selectedInstrument.market_schedule, selectedPeriod.mode, selectedSource]);
 
   useEffect(() => {
     let disposed = false;
@@ -991,6 +1081,67 @@ export default function App() {
         ? `${Math.round(timelineSamplingSeconds)}秒`
         : "分钟级";
 
+  const sharedIndicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${selectedCode}:${candles.at(-1)?.source.provider ?? selectedSource}:${selectedPeriod.id}`;
+  const sharedIndicatorSeries = useMemo(
+    () => buildExpertIndicatorSeriesAt(
+      candles,
+      candles.length - 1,
+      sharedIndicatorHistoryKey,
+    ),
+    [candles, sharedIndicatorHistoryKey],
+  );
+  const sharedLayerRange = useMemo(() => {
+    const values: number[] = [];
+    const appendIso = (value: string | undefined) => {
+      if (!value) return;
+      const epoch = Date.parse(value) / 1_000;
+      if (Number.isFinite(epoch)) values.push(epoch);
+    };
+    appendIso(candles[0]?.open_time);
+    appendIso(candles.at(-1)?.open_time);
+    if (selectedPeriod.mode === "timeline") {
+      const first = timelineSamples[0];
+      const last = timelineSamples.at(-1);
+      if (first) values.push(first.observedTime ?? first.time);
+      if (last) values.push(last.observedTime ?? last.time);
+    }
+    const finite = values.filter(Number.isFinite);
+    if (finite.length === 0) return null;
+    const secondsPerDay = 24 * 60 * 60;
+    const minimum = Math.min(...finite);
+    const maximum = Math.max(...finite);
+    return {
+      start: Math.floor(minimum / secondsPerDay) * secondsPerDay,
+      end: (Math.floor(maximum / secondsPerDay) + 1) * secondsPerDay,
+    };
+  }, [candles, selectedPeriod.mode, timelineSamples]);
+  const sharedLayerStart = sharedLayerRange?.start ?? null;
+  const sharedLayerEnd = sharedLayerRange?.end ?? null;
+  const sharedSessionBands = useMemo(
+    () => sharedLayerStart === null || sharedLayerEnd === null
+      ? []
+      : buildExpertSessionBandsForRange(
+        sharedLayerStart,
+        sharedLayerEnd,
+        selectedInstrument.market_schedule,
+      ),
+    [selectedInstrument.market_schedule, sharedLayerEnd, sharedLayerStart],
+  );
+  const sharedEventMarkers = useMemo(
+    () => selectedCode === "XAUUSD" ? EXPERT_GOLD_EVENTS_2026 : [],
+    [selectedCode],
+  );
+  const normalChartLayers = useMemo(
+    () => buildChartLayers(layerWorkspace, {
+      indicatorSeries: sharedIndicatorSeries,
+      sessionBands: sharedSessionBands,
+      eventMarkers: sharedEventMarkers,
+      priceLevels: [],
+      valueZones: [],
+    }),
+    [layerWorkspace, sharedEventMarkers, sharedIndicatorSeries, sharedSessionBands],
+  );
+
   const quoteTrend = priceQuote
     ? trendClass(priceQuote)
     : latestCandle && numeric(latestCandle.close) !== null && numeric(latestCandle.open) !== null
@@ -1024,6 +1175,9 @@ export default function App() {
         marketSchedule={selectedInstrument.market_schedule}
         sourceLabel={selectedSourceDescriptor?.display_name ?? sourceLabels[selectedSource] ?? selectedSource}
         sourceState={quoteStreamState}
+        liveIndicatorSeries={sharedIndicatorSeries}
+        layerWorkspace={layerWorkspace}
+        onLayerWorkspaceChange={updateLayerWorkspace}
         historyLoading={historySyncing || timelineHistorySyncing}
         loading={loadingQuote || loadingCandles}
         error={quoteError ?? candleError}
@@ -1411,6 +1565,10 @@ export default function App() {
             historyLoading={historySyncing || timelineHistorySyncing}
             onRequestOlderHistory={loadOlderCandles}
             onHover={setHover}
+            layers={normalChartLayers}
+            onIndicatorPaneResize={(layerId, height) => {
+              updateLayerWorkspace((current) => resizeIndicatorLayer(current, layerId, height));
+            }}
           />
           {historySyncing || timelineHistorySyncing ? (
             <div

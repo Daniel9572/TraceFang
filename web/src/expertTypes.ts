@@ -94,6 +94,32 @@ export interface ExpertIndicatorSnapshot {
   volumePriceState: "confirming" | "diverging" | "unavailable";
 }
 
+export type ExpertIndicatorId = "kdj" | "macd";
+
+export interface ExpertIndicatorBarReference {
+  readonly time: number;
+}
+
+export interface ExpertIndicatorSeriesView {
+  readonly historyKey: string | null;
+  readonly revision: number;
+  readonly offset: number;
+  readonly length: number;
+  readonly visibleLength: number;
+  readonly changedFrom: number;
+  readonly bars: readonly ExpertIndicatorBarReference[];
+  readonly macd: {
+    readonly value: readonly number[];
+    readonly signal: readonly number[];
+    readonly histogram: readonly number[];
+  };
+  readonly kdj: {
+    readonly k: readonly number[];
+    readonly d: readonly number[];
+    readonly j: readonly number[];
+  };
+}
+
 export interface ExpertAnalysisSnapshot {
   asOf: number | null;
   signals: ExpertSignal[];

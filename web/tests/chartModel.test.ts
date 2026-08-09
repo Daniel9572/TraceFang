@@ -57,7 +57,18 @@ test("uses native quote samples instead of a synthetic minute close for the same
   assert.deepEqual(series.map((point) => point.value), [101.25, 101.5]);
 });
 
-test("preserves multiple quote events received inside the same source second", () => {
+test("retains an authoritative bar's native coverage for timeline gap detection", () => {
+  const [point] = buildTimelineSeries(
+    [candle("2026-08-06T01:47:00Z", 100, 102, 99, 101)],
+    [],
+    null,
+    null,
+  );
+
+  assert.equal(point.resolutionSeconds, 60);
+});
+
+test("preserves every distinct price revision inside the same source second", () => {
   const sourceSecond = Date.parse("2026-08-06T01:47:02Z") / 1_000;
   const first = appendTimelineSample([], {
     time: sourceSecond + 0.125,
@@ -77,6 +88,46 @@ test("preserves multiple quote events received inside the same source second", (
   assert.equal(second[1].value, 99.75);
   assert.equal(second[0].time, sourceSecond + 0.125);
   assert.equal(second[1].time, sourceSecond + 0.125);
+});
+
+test("drops a repeated poll when only the local receipt time changed", () => {
+  const observed = Date.parse("2026-08-06T01:47:02Z") / 1_000;
+  const first = appendTimelineSample([], {
+    time: observed + 0.1,
+    observedTime: observed,
+    value: 101.25,
+    eventId: "poll-1",
+  });
+  const duplicate = appendTimelineSample(first, {
+    time: observed + 5.1,
+    observedTime: observed,
+    value: 101.25,
+    eventId: "poll-2",
+  });
+
+  assert.equal(duplicate, first);
+});
+
+test("keeps a repeated price after an intervening same-second revision", () => {
+  const observed = Date.parse("2026-08-06T01:47:02Z") / 1_000;
+  const samples = mergeTimelineSamples([
+    { time: observed + 0.1, observedTime: observed, value: 100, eventId: "one" },
+    { time: observed + 0.2, observedTime: observed, value: 101, eventId: "two" },
+    { time: observed + 0.3, observedTime: observed, value: 100, eventId: "three" },
+  ]);
+
+  assert.deepEqual(samples.map((sample) => sample.value), [100, 101, 100]);
+});
+
+test("collapses received-only duplicates across history page boundaries", () => {
+  const observed = Date.parse("2026-08-06T01:47:02Z") / 1_000;
+  const merged = mergeTimelineSamples(
+    [{ time: observed + 0.1, observedTime: observed, value: 100, eventId: "older" }],
+    [{ time: observed + 0.2, observedTime: observed, value: 100, eventId: "newer" }],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].eventId, "older");
 });
 
 test("does not truncate the timeline after twenty thousand events", () => {
