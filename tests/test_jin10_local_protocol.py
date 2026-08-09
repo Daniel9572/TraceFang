@@ -108,9 +108,7 @@ class Jin10LocalProtocolTests(unittest.TestCase):
 
     def test_parses_first_kline_snapshot_at_micro_price_precision(self) -> None:
         payload = (
-            encode_string("XAUUSD.GOODS")
-            + struct.pack("<bi", 1, 1)
-            + wire_candle(1_786_027_380)
+            encode_string("XAUUSD.GOODS") + struct.pack("<bi", 1, 1) + wire_candle(1_786_027_380)
         )
         snapshot = parse_kline_snapshot(payload)
         self.assertEqual(snapshot.provider_code, "XAUUSD.GOODS")
@@ -132,8 +130,7 @@ class Jin10LocalProtocolTests(unittest.TestCase):
 
         rows = parse_kline_history_file(
             gzip.compress(
-                wire_candle(1_786_027_380)
-                + wire_candle(1_786_027_440, close_micros=4_251_500_000)
+                wire_candle(1_786_027_380) + wire_candle(1_786_027_440, close_micros=4_251_500_000)
             )
         )
         self.assertEqual(len(rows), 2)

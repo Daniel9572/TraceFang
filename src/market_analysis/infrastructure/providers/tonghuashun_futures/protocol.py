@@ -72,9 +72,7 @@ def _decimal(value: object, field: str) -> Decimal:
     try:
         parsed = Decimal(str(value))
     except (InvalidOperation, ValueError) as error:
-        raise ProviderDataError(
-            f"Tonghuashun futures field {field} is not numeric"
-        ) from error
+        raise ProviderDataError(f"Tonghuashun futures field {field} is not numeric") from error
     if not parsed.is_finite():
         raise ProviderDataError(f"Tonghuashun futures field {field} is not finite")
     return parsed
@@ -262,9 +260,7 @@ def parse_line_payload(
         if len(fields) < 7 or _MINUTE.fullmatch(fields[0]) is None:
             raise ProviderDataError("Tonghuashun futures minute row is truncated")
         try:
-            open_time = datetime.strptime(fields[0], "%Y%m%d%H%M").replace(
-                tzinfo=time_zone
-            )
+            open_time = datetime.strptime(fields[0], "%Y%m%d%H%M").replace(tzinfo=time_zone)
         except ValueError as error:
             raise ProviderDataError("Tonghuashun futures minute timestamp is invalid") from error
         open_price = _decimal(fields[1], "minute.open")

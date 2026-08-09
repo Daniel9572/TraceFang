@@ -68,9 +68,7 @@ class TonghuashunFuturesSymbolMapper:
             SSE_COMPOSITE: "trade_date",
             NASDAQ_COMPOSITE: "trade_date",
         }
-        self._from_provider = {
-            value.lower(): key for key, value in self._to_provider.items()
-        }
+        self._from_provider = {value.lower(): key for key, value in self._to_provider.items()}
 
     @property
     def provider_codes(self) -> tuple[str, ...]:

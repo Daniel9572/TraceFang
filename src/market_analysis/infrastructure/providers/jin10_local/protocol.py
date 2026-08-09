@@ -225,12 +225,15 @@ def _parse_wire_candle(payload: bytes, offset: int) -> tuple[Jin10WireCandle, in
 def _validate_wire_candle(candle: Jin10WireCandle) -> None:
     if candle.timestamp <= 0:
         raise ProviderDataError("Jin10 Kline timestamp must be positive")
-    if min(
-        candle.high_micros,
-        candle.open_micros,
-        candle.low_micros,
-        candle.close_micros,
-    ) <= 0:
+    if (
+        min(
+            candle.high_micros,
+            candle.open_micros,
+            candle.low_micros,
+            candle.close_micros,
+        )
+        <= 0
+    ):
         raise ProviderDataError("Jin10 Kline prices must be positive")
     if not candle.low_micros <= candle.open_micros <= candle.high_micros:
         raise ProviderDataError("Jin10 Kline open is outside low/high")

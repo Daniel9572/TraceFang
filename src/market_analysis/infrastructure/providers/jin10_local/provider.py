@@ -391,9 +391,7 @@ class Jin10LocalProvider:
                                 protocol=protocol,
                             )
                         elif protocol == KLINE_HISTORY_PROTOCOL:
-                            self._resolve_history_manifest(
-                                parse_kline_history_manifest(payload)
-                            )
+                            self._resolve_history_manifest(parse_kline_history_manifest(payload))
                     except (InstrumentNotSupportedError, ProviderDataError):
                         continue
             finally:

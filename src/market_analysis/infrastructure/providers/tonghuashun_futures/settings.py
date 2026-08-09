@@ -4,12 +4,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-DEFAULT_TIME_ENDPOINT_TEMPLATE = (
-    "https://d.10jqka.com.cn/v6/time/{provider_code}/last.js"
-)
-DEFAULT_LINE_ENDPOINT_TEMPLATE = (
-    "https://d.10jqka.com.cn/v6/line/{provider_code}/{period}/{file}"
-)
+DEFAULT_TIME_ENDPOINT_TEMPLATE = "https://d.10jqka.com.cn/v6/time/{provider_code}/last.js"
+DEFAULT_LINE_ENDPOINT_TEMPLATE = "https://d.10jqka.com.cn/v6/line/{provider_code}/{period}/{file}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,27 +34,15 @@ class TonghuashunFuturesSettings:
             "TONGHUASHUN_FUTURES_LINE_URL_TEMPLATE",
             DEFAULT_LINE_ENDPOINT_TEMPLATE,
         ).strip()
-        request_timeout = float(
-            values.get("TONGHUASHUN_FUTURES_REQUEST_TIMEOUT_SECONDS", "12")
-        )
-        poll_interval = float(
-            values.get("TONGHUASHUN_FUTURES_POLL_INTERVAL_SECONDS", "2")
-        )
-        stale_after = float(
-            values.get("TONGHUASHUN_FUTURES_STALE_AFTER_SECONDS", "30")
-        )
-        daily_cache = float(
-            values.get("TONGHUASHUN_FUTURES_DAILY_CACHE_SECONDS", "15")
-        )
-        history_cache = float(
-            values.get("TONGHUASHUN_FUTURES_HISTORY_CACHE_SECONDS", "30")
-        )
+        request_timeout = float(values.get("TONGHUASHUN_FUTURES_REQUEST_TIMEOUT_SECONDS", "12"))
+        poll_interval = float(values.get("TONGHUASHUN_FUTURES_POLL_INTERVAL_SECONDS", "2"))
+        stale_after = float(values.get("TONGHUASHUN_FUTURES_STALE_AFTER_SECONDS", "30"))
+        daily_cache = float(values.get("TONGHUASHUN_FUTURES_DAILY_CACHE_SECONDS", "15"))
+        history_cache = float(values.get("TONGHUASHUN_FUTURES_HISTORY_CACHE_SECONDS", "30"))
         if not time_template.startswith("https://"):
             raise ValueError("TONGHUASHUN_FUTURES_TIME_URL_TEMPLATE must use HTTPS")
         if "{provider_code}" not in time_template:
-            raise ValueError(
-                "TONGHUASHUN_FUTURES_TIME_URL_TEMPLATE must contain {provider_code}"
-            )
+            raise ValueError("TONGHUASHUN_FUTURES_TIME_URL_TEMPLATE must contain {provider_code}")
         if not line_template.startswith("https://"):
             raise ValueError("TONGHUASHUN_FUTURES_LINE_URL_TEMPLATE must use HTTPS")
         if any(
@@ -69,13 +53,16 @@ class TonghuashunFuturesSettings:
                 "TONGHUASHUN_FUTURES_LINE_URL_TEMPLATE must contain "
                 "{provider_code}, {period}, and {file}"
             )
-        if min(
-            request_timeout,
-            poll_interval,
-            stale_after,
-            daily_cache,
-            history_cache,
-        ) <= 0:
+        if (
+            min(
+                request_timeout,
+                poll_interval,
+                stale_after,
+                daily_cache,
+                history_cache,
+            )
+            <= 0
+        ):
             raise ValueError("Tonghuashun futures timeout and cache values must be positive")
         return cls(
             time_endpoint_template=time_template,

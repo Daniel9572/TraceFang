@@ -104,14 +104,17 @@ class Jin10LocalSettings:
             raise ValueError("JIN10_LOCAL_QUOTE_FREQUENCY_MS must be between 250 and 60000")
         if not 250 <= kline_frequency_ms <= 60_000:
             raise ValueError("JIN10_LOCAL_KLINE_FREQUENCY_MS must be between 250 and 60000")
-        if min(
-            wait_timeout,
-            kline_wait_timeout,
-            kline_download_timeout,
-            stale_after,
-            connect_timeout,
-            heartbeat,
-        ) <= 0:
+        if (
+            min(
+                wait_timeout,
+                kline_wait_timeout,
+                kline_download_timeout,
+                stale_after,
+                connect_timeout,
+                heartbeat,
+            )
+            <= 0
+        ):
             raise ValueError("Jin10 local timeout values must be positive")
         if vip_type not in {0, 1, 3}:
             raise ValueError("JIN10_LOCAL_VIP_TYPE must be 0, 1, or 3")
@@ -122,7 +125,9 @@ class Jin10LocalSettings:
             kline_file_endpoint=values.get(
                 "JIN10_LOCAL_KLINE_FILE_URL",
                 DEFAULT_JIN10_KLINE_FILE_URL,
-            ).strip().rstrip("/"),
+            )
+            .strip()
+            .rstrip("/"),
             quote_frequency_ms=frequency_ms,
             kline_frequency_ms=kline_frequency_ms,
             quote_wait_timeout_seconds=wait_timeout,

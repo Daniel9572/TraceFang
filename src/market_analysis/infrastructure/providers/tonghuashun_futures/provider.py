@@ -107,9 +107,9 @@ class TonghuashunFuturesProvider:
             )
         received_at = datetime.now(UTC)
         change = wire.last - wire.previous_settlement
-        change_percent = (
-            change / wire.previous_settlement * Decimal("100")
-        ).quantize(Decimal("0.01"))
+        change_percent = (change / wire.previous_settlement * Decimal("100")).quantize(
+            Decimal("0.01")
+        )
         return QuoteSnapshot(
             instrument=instrument,
             last=wire.last,
@@ -195,12 +195,7 @@ class TonghuashunFuturesProvider:
                 for year in range(first_year, last_year + 1)
             )
         )
-        rows = tuple(
-            row
-            for batch in batches
-            for row in batch
-            if start <= row.open_time < end
-        )
+        rows = tuple(row for batch in batches for row in batch if start <= row.open_time < end)
         return self._to_candles(
             instrument,
             provider_code,
@@ -339,9 +334,7 @@ class TonghuashunFuturesProvider:
         try:
             response = await self._http.get(endpoint)
         except httpx.HTTPError as error:
-            raise ProviderUnavailableError(
-                f"同花顺公开行情{capability}请求失败"
-            ) from error
+            raise ProviderUnavailableError(f"同花顺公开行情{capability}请求失败") from error
         if response.status_code == 429:
             raise ProviderRateLimitError("同花顺公开行情接口暂时限流")
         if response.is_error:
@@ -353,6 +346,4 @@ class TonghuashunFuturesProvider:
         except ProviderDataError:
             raise
         except ValueError as error:
-            raise ProviderDataError(
-                f"同花顺公开行情{capability}接口返回了无效数据"
-            ) from error
+            raise ProviderDataError(f"同花顺公开行情{capability}接口返回了无效数据") from error

@@ -152,5 +152,6 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
             boundary_timestamp=boundary,
         )
 
+
 if __name__ == "__main__":
     unittest.main()
