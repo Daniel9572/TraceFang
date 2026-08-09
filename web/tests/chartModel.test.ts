@@ -95,6 +95,26 @@ test("does not truncate the timeline after twenty thousand events", () => {
   assert.equal(mergeTimelineSamples(result).length, 20_001);
 });
 
+test("linearly merges sorted history pages without dropping their boundary event", () => {
+  const older = Array.from({ length: 10_000 }, (_, index) => ({
+    time: index,
+    observedTime: index,
+    value: index,
+    eventId: `event-${index}`,
+  }));
+  const newer = Array.from({ length: 10_001 }, (_, index) => ({
+    time: 9_999 + index,
+    observedTime: 9_999 + index,
+    value: 9_999 + index,
+    eventId: `event-${9_999 + index}`,
+  }));
+  const merged = mergeTimelineSamples(older, newer);
+
+  assert.equal(merged.length, 20_000);
+  assert.equal(merged[9_999].eventId, "event-9999");
+  assert.equal(merged.at(-1)?.eventId, "event-19999");
+});
+
 test("merges backend Bar revisions without letting an older page overwrite a correction", () => {
   const original = candle("2026-08-06T01:47:00Z", 100, 102, 99, 101);
   const corrected = {
@@ -109,4 +129,14 @@ test("merges backend Bar revisions without letting an older page overwrite a cor
 
   assert.equal(result.revision, 2);
   assert.equal(result.close, 103);
+});
+
+test("keeps the current candle array when a refresh contains no revision", () => {
+  const current = [candle("2026-08-06T01:47:00Z", 100, 102, 99, 101)];
+  const unchangedRefresh = [{
+    ...current[0],
+    source: { ...current[0].source },
+  }];
+
+  assert.equal(mergeCandleRows(current, unchangedRefresh), current);
 });

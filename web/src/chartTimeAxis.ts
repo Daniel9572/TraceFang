@@ -278,19 +278,30 @@ export function buildTimelineLayout(
   schedule: MarketSchedule | null | undefined,
 ): TimelineLayout {
   const daysByOrdinal = new Map<number, TimelineTradingDay>();
-  let activeDay: TimelineTradingDay | null = null;
-  const sortedTimes = actualTimes.filter(Number.isFinite).sort((left, right) => left - right);
+  const inputIsFiniteAndSorted = actualTimes.every((value, index) => (
+    Number.isFinite(value) && (index === 0 || actualTimes[index - 1] <= value)
+  ));
+  const sortedTimes = inputIsFiniteAndSorted
+    ? actualTimes
+    : actualTimes.filter(Number.isFinite).sort((left, right) => left - right);
 
-  for (const actualTime of sortedTimes) {
-    if (
-      activeDay
-      && actualTime >= activeDay.actualStart
-      && actualTime < activeDay.actualEnd
-    ) {
+  let index = 0;
+  while (index < sortedTimes.length) {
+    const actualTime = sortedTimes[index];
+    const activeDay = tradingDayAt(actualTime, schedule);
+    if (!activeDay) {
+      index += 1;
       continue;
     }
-    activeDay = tradingDayAt(actualTime, schedule);
-    if (activeDay) daysByOrdinal.set(activeDay.ordinal, activeDay);
+    daysByOrdinal.set(activeDay.ordinal, activeDay);
+    let low = index + 1;
+    let high = sortedTimes.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (sortedTimes[middle] < activeDay.actualEnd) low = middle + 1;
+      else high = middle;
+    }
+    index = Math.max(index + 1, low);
   }
 
   const days = [...daysByOrdinal.values()]
@@ -330,30 +341,54 @@ export function projectTimelineSeries(
   series: readonly TimelineSample[],
   layout: TimelineLayout,
 ): ProjectedTimelinePoint[] {
-  const ordered = series
-    .map((point) => ({
-      point,
-      actualTime: Number.isFinite(point.observedTime) ? Number(point.observedTime) : point.time,
-    }))
-    .filter(({ point, actualTime }) => Number.isFinite(actualTime) && Number.isFinite(point.value))
-    .sort((left, right) => {
-      const observedDifference = left.actualTime - right.actualTime;
-      if (observedDifference !== 0) return observedDifference;
-      const receivedDifference = left.point.time - right.point.time;
-      if (receivedDifference !== 0) return receivedDifference;
-      return (left.point.eventId ?? "").localeCompare(right.point.eventId ?? "");
-    });
+  type PreparedPoint = { point: TimelineSample; actualTime: number };
+  const actualTimeOf = (point: TimelineSample) => (
+    Number.isFinite(point.observedTime) ? Number(point.observedTime) : point.time
+  );
+  const compareProjected = (left: PreparedPoint, right: PreparedPoint) => {
+    const observedDifference = left.actualTime - right.actualTime;
+    if (observedDifference !== 0) return observedDifference;
+    const receivedDifference = left.point.time - right.point.time;
+    if (receivedDifference !== 0) return receivedDifference;
+    return (left.point.eventId ?? "").localeCompare(right.point.eventId ?? "");
+  };
+  let orderedInput = true;
+  let previous: PreparedPoint | null = null;
+  for (const point of series) {
+    const actualTime = actualTimeOf(point);
+    if (!Number.isFinite(actualTime) || !Number.isFinite(point.value)) {
+      orderedInput = false;
+      break;
+    }
+    const current = { point, actualTime };
+    if (previous && compareProjected(previous, current) > 0) {
+      orderedInput = false;
+      break;
+    }
+    previous = current;
+  }
+  const ordered = orderedInput
+    ? null
+    : series
+      .map((point) => ({ point, actualTime: actualTimeOf(point) }))
+      .filter(({ point, actualTime }) => Number.isFinite(actualTime) && Number.isFinite(point.value))
+      .sort(compareProjected);
 
   const rows: ProjectedTimelinePoint[] = [];
   let previousChartTime = Number.NEGATIVE_INFINITY;
-  for (const { point, actualTime } of ordered) {
+  const appendProjectedPoint = (point: TimelineSample, actualTime: number) => {
     const projectedTime = projectTimelineTime(layout, actualTime);
-    if (projectedTime === null) continue;
+    if (projectedTime === null) return;
     const time = projectedTime > previousChartTime
       ? projectedTime
       : previousChartTime + TIMELINE_TIME_EPSILON_SECONDS;
     rows.push({ time, actualTime, value: point.value });
     previousChartTime = time;
+  };
+  if (ordered) {
+    for (const { point, actualTime } of ordered) appendProjectedPoint(point, actualTime);
+  } else {
+    for (const point of series) appendProjectedPoint(point, actualTimeOf(point));
   }
   return rows;
 }
@@ -365,13 +400,16 @@ export function buildTimelineSessionGaps(
   series: readonly ProjectedTimelinePoint[],
   priceDigits: number,
 ): TimelineSessionGap[] {
-  const pointsByOrdinal = new Map<number, ProjectedTimelinePoint[]>();
+  const pointsByOrdinal = new Map<number, {
+    first: ProjectedTimelinePoint;
+    last: ProjectedTimelinePoint;
+  }>();
   for (const point of series) {
     const day = dayForActualTime(layout, point.actualTime);
     if (!day) continue;
-    const points = pointsByOrdinal.get(day.ordinal) ?? [];
-    points.push(point);
-    pointsByOrdinal.set(day.ordinal, points);
+    const boundary = pointsByOrdinal.get(day.ordinal);
+    if (boundary) boundary.last = point;
+    else pointsByOrdinal.set(day.ordinal, { first: point, last: point });
   }
 
   const gaps: TimelineSessionGap[] = [];
@@ -381,10 +419,8 @@ export function buildTimelineSessionGaps(
     const durationSeconds = Math.max(0, next.actualStart - previous.actualEnd);
     if (durationSeconds <= 0) continue;
 
-    const previousPoints = pointsByOrdinal.get(previous.ordinal) ?? [];
-    const nextPoints = pointsByOrdinal.get(next.ordinal) ?? [];
-    const previousPoint = previousPoints.at(-1) ?? null;
-    const nextPoint = nextPoints.at(0) ?? null;
+    const previousPoint = pointsByOrdinal.get(previous.ordinal)?.last ?? null;
+    const nextPoint = pointsByOrdinal.get(next.ordinal)?.first ?? null;
     const closeComplete = previousPoint !== null
       && previous.actualEnd - previousPoint.actualTime <= SESSION_BOUNDARY_TOLERANCE_SECONDS;
     const openComplete = nextPoint !== null
@@ -502,8 +538,15 @@ function clockLabel(parts: ZonedDateParts, seconds: boolean): string {
   return seconds ? `${minute}:${pad2(parts.second)}` : minute;
 }
 
+function displayParts(
+  epochSeconds: number,
+  timeZone = DISPLAY_TIME_ZONE,
+): ZonedDateParts | null {
+  return zonedDateParts(epochSeconds, timeZone);
+}
+
 function beijingParts(epochSeconds: number): ZonedDateParts | null {
-  return zonedDateParts(epochSeconds, DISPLAY_TIME_ZONE);
+  return displayParts(epochSeconds);
 }
 
 export function formatChartTick(
@@ -511,9 +554,10 @@ export function formatChartTick(
   tickMarkType: TickMarkType,
   period: ChartPeriod,
   visibleSpanSeconds = 0,
+  displayTimeZone = DISPLAY_TIME_ZONE,
 ): string {
   if (!Number.isFinite(actualTime)) return "";
-  const parts = beijingParts(actualTime);
+  const parts = displayParts(actualTime, displayTimeZone);
   if (!parts) return "";
 
   if (period.aggregation.kind === "calendar") {
@@ -547,6 +591,7 @@ export function formatTimelineTick(
   tickMarkType: TickMarkType,
   layout: TimelineLayout,
   intraday: boolean,
+  displayTimeZone = DISPLAY_TIME_ZONE,
 ): string {
   const day = dayForChartTime(layout, chartTime);
   if (!day) return "";
@@ -558,7 +603,7 @@ export function formatTimelineTick(
   ) return day.label;
   const actualTime = actualTimeForTimelineChartTime(layout, chartTime);
   if (actualTime === null) return "";
-  const parts = beijingParts(actualTime);
+  const parts = displayParts(actualTime, displayTimeZone);
   return parts ? clockLabel(parts, tickMarkType === TickMarkType.TimeWithSeconds) : "";
 }
 
@@ -566,9 +611,10 @@ export function formatChartTimeLabel(
   actualTime: number,
   period: ChartPeriod,
   timelineResolutionSeconds = 60,
+  displayTimeZone = DISPLAY_TIME_ZONE,
 ): string {
   if (!Number.isFinite(actualTime)) return "--";
-  const parts = beijingParts(actualTime);
+  const parts = displayParts(actualTime, displayTimeZone);
   if (!parts) return "--";
 
   if (period.mode === "timeline") {
@@ -596,12 +642,35 @@ export function formatCrosshairTime(
   layout: TimelineLayout,
   timelineResolutionSeconds = 60,
   exactTimelineActualTime?: number,
+  displayTimeZone = DISPLAY_TIME_ZONE,
 ): string {
   const actualTime = period.mode === "timeline"
     ? exactTimelineActualTime ?? actualTimeForTimelineChartTime(layout, chartTime)
     : chartTime;
   if (actualTime === null || !Number.isFinite(actualTime)) return "--";
-  return formatChartTimeLabel(actualTime, period, timelineResolutionSeconds);
+  return formatChartTimeLabel(actualTime, period, timelineResolutionSeconds, displayTimeZone);
+}
+
+export function formatClockInTimeZone(
+  epochSeconds: number,
+  timeZone: string,
+  includeSeconds = true,
+): string {
+  if (!Number.isFinite(epochSeconds)) return "--";
+  const parts = displayParts(epochSeconds, timeZone);
+  return parts ? clockLabel(parts, includeSeconds) : "--";
+}
+
+export function formatDateTimeInTimeZone(epochSeconds: number, timeZone: string): string {
+  if (!Number.isFinite(epochSeconds)) return "--";
+  const parts = displayParts(epochSeconds, timeZone);
+  return parts ? `${fullDateLabel(parts)} ${clockLabel(parts, false)}` : "--";
+}
+
+export function formatDateInTimeZone(epochSeconds: number, timeZone: string): string {
+  if (!Number.isFinite(epochSeconds)) return "--";
+  const parts = displayParts(epochSeconds, timeZone);
+  return parts ? fullDateLabel(parts) : "--";
 }
 
 export function formatBeijingClock(epochSeconds: number, includeSeconds = true): string {

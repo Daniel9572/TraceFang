@@ -1,0 +1,61 @@
+import type { ExpertMarketEvent } from "./expertTypes";
+
+const epoch = (value: string) => Date.parse(value) / 1_000;
+
+export const EXPERT_GOLD_EVENTS_2026: ExpertMarketEvent[] = [
+  {
+    id: "wgc-central-bank-gold-2026-07",
+    time: epoch("2026-07-02T12:00:00Z"),
+    title: "全球央行 5 月净购金 41 吨",
+    category: "central-bank-gold",
+    importance: "medium",
+    source: "World Gold Council",
+    sourceUrl: "https://www.gold.org/goldhub/gold-focus/2026/07/central-bank-gold-statistics-central-banks-remain-committed-gold",
+    timing: "released",
+    timePrecision: "date",
+  },
+  {
+    id: "bls-nfp-2026-08",
+    time: epoch("2026-08-07T12:30:00Z"),
+    title: "美国非农就业",
+    category: "employment",
+    importance: "high",
+    source: "U.S. BLS",
+    sourceUrl: "https://www.bls.gov/schedule/news_release/empsit.htm",
+    timing: "released",
+    timePrecision: "instant",
+  },
+  {
+    id: "fomc-minutes-2026-08",
+    time: epoch("2026-08-19T18:00:00Z"),
+    title: "FOMC 会议纪要",
+    category: "fomc",
+    importance: "high",
+    source: "Federal Reserve",
+    sourceUrl: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+    timing: "scheduled",
+    timePrecision: "instant",
+  },
+  {
+    id: "bls-nfp-2026-09",
+    time: epoch("2026-09-04T12:30:00Z"),
+    title: "美国非农就业",
+    category: "employment",
+    importance: "high",
+    source: "U.S. BLS",
+    sourceUrl: "https://www.bls.gov/schedule/news_release/empsit.htm",
+    timing: "scheduled",
+    timePrecision: "instant",
+  },
+  {
+    id: "fomc-2026-09",
+    time: epoch("2026-09-16T18:00:00Z"),
+    title: "FOMC 利率决议",
+    category: "fomc",
+    importance: "high",
+    source: "Federal Reserve",
+    sourceUrl: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+    timing: "scheduled",
+    timePrecision: "instant",
+  },
+];

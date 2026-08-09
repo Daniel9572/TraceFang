@@ -11,6 +11,7 @@ const WEEKDAY_INDEX: Record<string, number> = {
   Fri: 5,
   Sat: 6,
 };
+const MARKET_CLOCK_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
 
 export const SPOT_METALS_MARKET_SCHEDULE: MarketSchedule = {
   time_zone: "America/New_York",
@@ -39,14 +40,19 @@ function parseClock(value: string): number | null {
 
 function marketWeekMinute(now: Date, timeZone: string): number | null {
   try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      weekday: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(now);
+    let formatter = MARKET_CLOCK_FORMATTERS.get(timeZone);
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      });
+      MARKET_CLOCK_FORMATTERS.set(timeZone, formatter);
+    }
+    const parts = formatter.formatToParts(now);
     const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
     const weekday = WEEKDAY_INDEX[values.weekday];
     const hour = Number(values.hour);

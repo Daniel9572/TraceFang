@@ -11,6 +11,7 @@ import {
   formatChartTick,
   formatChartTimeLabel,
   formatCrosshairTime,
+  formatDateTimeInTimeZone,
   formatSessionGapDuration,
   projectTimeForChinaAxis,
   projectTimelineSeries,
@@ -37,6 +38,13 @@ const SHFE_SCHEDULE = {
     })),
   ],
 };
+
+test("renders the same market instant in selectable desk time zones", () => {
+  const instant = Date.parse("2026-08-07T20:56:00Z") / 1_000;
+  assert.equal(formatDateTimeInTimeZone(instant, "Asia/Shanghai"), "2026/08/08 04:56");
+  assert.equal(formatDateTimeInTimeZone(instant, "America/New_York"), "2026/08/07 16:56");
+  assert.equal(formatDateTimeInTimeZone(instant, "Europe/London"), "2026/08/07 21:56");
+});
 
 test("compresses the weekend into adjacent fixed-width trading days", () => {
   const friday = Date.parse("2026-08-07T20:58:00Z") / 1_000;

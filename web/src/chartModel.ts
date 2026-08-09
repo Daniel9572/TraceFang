@@ -11,7 +11,7 @@ function epochSeconds(value: string | null): number | null {
 }
 
 export function barsFromCandles(candles: Candle[]): HoverCandle[] {
-  return candles.flatMap((candle) => {
+  const rows = candles.flatMap((candle) => {
     const time = epochSeconds(candle.open_time);
     const open = numberOf(candle.open);
     const high = numberOf(candle.high);
@@ -20,7 +20,10 @@ export function barsFromCandles(candles: Candle[]): HoverCandle[] {
     return time !== null && [open, high, low, close].every(Number.isFinite)
       ? [{ time, open, high, low, close }]
       : [];
-  }).sort((left, right) => left.time - right.time);
+  });
+  return rows.every((row, index) => index === 0 || rows[index - 1].time <= row.time)
+    ? rows
+    : rows.sort((left, right) => left.time - right.time);
 }
 
 export function appendTimelineSample(
@@ -50,6 +53,32 @@ function compareTimelineSamples(left: TimelineSample, right: TimelineSample): nu
 }
 
 export function mergeTimelineSamples(...pages: readonly TimelineSample[][]): TimelineSample[] {
+  if (pages.length > 0 && pages.length <= 2) {
+    const left = pages[0];
+    const right = pages[1] ?? [];
+    const validAndSorted = (page: readonly TimelineSample[]) => page.every((sample, index) => (
+      Number.isFinite(sample.time)
+      && Number.isFinite(sample.value)
+      && (index === 0 || compareTimelineSamples(page[index - 1], sample) <= 0)
+    ));
+    if (validAndSorted(left) && validAndSorted(right)) {
+      const rows: TimelineSample[] = [];
+      const eventIds = new Set<string>();
+      let leftIndex = 0;
+      let rightIndex = 0;
+      while (leftIndex < left.length || rightIndex < right.length) {
+        const takeLeft = rightIndex >= right.length || (
+          leftIndex < left.length
+          && compareTimelineSamples(left[leftIndex], right[rightIndex]) <= 0
+        );
+        const sample = takeLeft ? left[leftIndex++] : right[rightIndex++];
+        if (sample.eventId && eventIds.has(sample.eventId)) continue;
+        if (sample.eventId) eventIds.add(sample.eventId);
+        rows.push(sample);
+      }
+      return rows;
+    }
+  }
   const rows: TimelineSample[] = [];
   const eventIds = new Set<string>();
   for (const page of pages) {
@@ -109,7 +138,10 @@ export function buildTimelineSeries(
       });
     }
   }
-  return mergeTimelineSamples(candleRows, samples, snapshotRows);
+  const historicalRows = mergeTimelineSamples(candleRows, samples);
+  return snapshotRows.length > 0
+    ? mergeTimelineSamples(historicalRows, snapshotRows)
+    : historicalRows;
 }
 
 export function formatBarCountdown(totalSeconds: number): string {

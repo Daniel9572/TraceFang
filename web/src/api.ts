@@ -10,6 +10,7 @@ import type {
   SourceDescriptor,
   SourceId,
 } from "./types";
+import type { ExpertAiAnalysis, ExpertAiStatus, ExpertOptionsStatus } from "./expertTypes";
 import { historyWindowBefore, type HistoryWindow } from "./historyLoading.ts";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -49,6 +50,24 @@ interface CandleHistoryBackfill {
 
 const candleBackfillRequests = new Map<string, Promise<CandleHistoryBackfill>>();
 
+function sameCandleVersion(left: Candle, right: Candle): boolean {
+  return left === right || (
+    left.open_time === right.open_time
+    && left.revision === right.revision
+    && left.state === right.state
+    && left.open === right.open
+    && left.high === right.high
+    && left.low === right.low
+    && left.close === right.close
+    && left.volume === right.volume
+    && left.finalized_at === right.finalized_at
+    && left.source.provider === right.source.provider
+    && left.source.observed_at === right.source.observed_at
+    && left.source.received_at === right.source.received_at
+    && left.source.raw_payload?.bucket_end === right.source.raw_payload?.bucket_end
+  );
+}
+
 export function mergeCandleRows(...pages: Candle[][]): Candle[] {
   const rows = new Map<string, Candle>();
   for (const page of pages) {
@@ -72,9 +91,27 @@ export function mergeCandleRows(...pages: Candle[][]): Candle[] {
       if (incomingWins) rows.set(candle.open_time, candle);
     }
   }
-  return [...rows.values()].sort(
+  const merged = [...rows.values()].sort(
     (left, right) => new Date(left.open_time).getTime() - new Date(right.open_time).getTime(),
   );
+  for (const candidate of pages) {
+    if (
+      candidate.length === merged.length
+      && candidate.every((candle, candleIndex) => candle === merged[candleIndex])
+    ) {
+      return candidate;
+    }
+  }
+  for (let index = pages.length - 1; index >= 0; index -= 1) {
+    const candidate = pages[index];
+    if (
+      candidate.length === merged.length
+      && candidate.every((candle, candleIndex) => sameCandleVersion(candle, merged[candleIndex]))
+    ) {
+      return candidate;
+    }
+  }
+  return merged;
 }
 
 function fetchCandles(
@@ -159,6 +196,12 @@ function loadOlderCandleHistory(
   );
 }
 
+export interface ExpertAiAnalysisRequest {
+  code: string;
+  period: string;
+  enabled_strategies: string[];
+}
+
 export const marketApi = {
   instruments: () => request<InstrumentEntry[]>("/api/instruments"),
   watchlist: () => request<InstrumentEntry[]>("/api/watchlist"),
@@ -190,8 +233,9 @@ export const marketApi = {
     sourceId: SourceId,
     periodId: string,
     before?: number,
+    pageSize = 500,
   ) => {
-    const params = new URLSearchParams({ period: periodId });
+    const params = new URLSearchParams({ period: periodId, page_size: String(pageSize) });
     if (before !== undefined) params.set("before", String(before));
     return request<ChartBarPage>(`/api/bars/${encodeURIComponent(code)}?${params}`).then((page) => {
       if (page.items.some((item) => item.source.provider !== sourceId)) {
@@ -202,10 +246,10 @@ export const marketApi = {
   },
   olderCandleHistory: loadOlderCandleHistory,
   timelineSamplePage: (code: string, sourceId: SourceId, cursor?: number) => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ page_size: "20000" });
     if (cursor !== undefined) params.set("cursor", String(cursor));
     return request<QuoteSamplePage>(
-      `/api/timeline/${encodeURIComponent(code)}${params.size > 0 ? `?${params}` : ""}`,
+      `/api/timeline/${encodeURIComponent(code)}?${params}`,
     ).then((page) => {
       if (page.items.some((item) => item.source_id !== sourceId)) {
         throw new Error("合约实时数据源已变化，请重新读取分时事件");
@@ -223,4 +267,11 @@ export const marketApi = {
       `/api/sources/${sourceId}/test?code=${encodeURIComponent(code)}`,
       { method: "POST" },
     ),
+  expertAiStatus: () => request<ExpertAiStatus>("/api/expert/ai/status"),
+  expertAiAnalyze: (payload: ExpertAiAnalysisRequest) =>
+    request<ExpertAiAnalysis>("/api/expert/ai/analyze", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  expertGoldOptions: () => request<ExpertOptionsStatus>("/api/expert/options/gold"),
 };

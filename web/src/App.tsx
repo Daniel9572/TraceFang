@@ -20,7 +20,7 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { marketApi, mergeCandleRows } from "./api";
 import { appendTimelineSample, barsFromCandles, mergeTimelineSamples } from "./chartModel";
@@ -28,6 +28,7 @@ import { chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import { formatBeijingClock, formatChartTimeLabel } from "./chartTimeAxis";
 import { historyBatchMinutes } from "./historyLoading";
 import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
+import { ExpertModeWorkspace } from "./ExpertModeWorkspace";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
 import { SourcePicker, type SourceTestFeedback } from "./SourcePicker";
@@ -232,6 +233,8 @@ export default function App() {
   const [catalog, setCatalog] = useState(defaultInstruments);
   const [instruments, setInstruments] = useState(defaultInstruments);
   const [selectedCode, setSelectedCode] = useState("XAUUSD");
+  const selectedCodeRef = useRef(selectedCode);
+  selectedCodeRef.current = selectedCode;
   const [instrumentSources, setInstrumentSources] = useState<Record<string, SourceId>>({});
   const [instrumentSourcesLoaded, setInstrumentSourcesLoaded] = useState(false);
   const [quote, setQuote] = useState<QuoteView | null>(null);
@@ -249,6 +252,7 @@ export default function App() {
   const [watchlistBusyCode, setWatchlistBusyCode] = useState<string | null>(null);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [periodId, setPeriodId] = useState<ChartPeriodId>("1m");
+  const [expertMode, setExpertMode] = useState(false);
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [candleError, setCandleError] = useState<string | null>(null);
@@ -261,6 +265,7 @@ export default function App() {
   const [loadingQuote, setLoadingQuote] = useState(true);
   const [loadingCandles, setLoadingCandles] = useState(true);
   const [historySyncing, setHistorySyncing] = useState(false);
+  const [timelineHistorySyncing, setTimelineHistorySyncing] = useState(false);
   const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "waiting" | "unavailable">("connecting");
   const candleRequestRef = useRef(0);
   const candlesRef = useRef<Candle[]>([]);
@@ -348,6 +353,7 @@ export default function App() {
         let page = recent;
         let cursor = firstCursor;
         const seen = new Set<number>();
+        const historyPages: Candle[][] = [];
         try {
           while (page.has_more && requestId === candleRequestRef.current) {
             if (seen.has(cursor)) throw new Error("周期 Bar 游标未前进");
@@ -357,12 +363,13 @@ export default function App() {
               selectedSource,
               selectedPeriod.id,
               cursor,
+              5_000,
             );
             if (requestId !== candleRequestRef.current) return;
-            setCandles((current) => mergeCandleRows(page.items, current));
-            if (page.next_before === null) return;
+            historyPages.push(page.items);
+            if (page.next_before === null) break;
             const nextCursor = Math.floor(Date.parse(page.next_before) / 1_000);
-            if (!Number.isFinite(nextCursor)) return;
+            if (!Number.isFinite(nextCursor)) break;
             cursor = nextCursor;
             historyCursorRef.current = nextCursor;
           }
@@ -370,6 +377,12 @@ export default function App() {
           // Keep the newest page usable; the left-edge gesture can resume from the last cursor.
         } finally {
           if (requestId === candleRequestRef.current) {
+            if (historyPages.length > 0) {
+              const completeHistory = mergeCandleRows(...historyPages, recent.items);
+              startTransition(() => {
+                setCandles((current) => mergeCandleRows(completeHistory, current));
+              });
+            }
             historyLoadInFlightRef.current = false;
             setHistorySyncing(false);
           }
@@ -551,16 +564,17 @@ export default function App() {
     }
 
     const connect = () => {
-      if (disposed) return;
+      if (disposed || selectedCodeRef.current !== selectedCode) return;
       socket = marketApi.openQuoteStream(selectedCode);
       socket.onopen = () => {
+        if (disposed || selectedCodeRef.current !== selectedCode) return;
         retryCount = 0;
         const marketClosed = marketPhaseRef.current === "closed";
         setQuoteStreamState(marketClosed ? "waiting" : "connecting");
         if (marketClosed) setLoadingQuote(false);
       };
       socket.onmessage = (message) => {
-        if (disposed) return;
+        if (disposed || selectedCodeRef.current !== selectedCode) return;
         const event = JSON.parse(String(message.data)) as QuoteStreamEvent;
         const marketClosed = marketPhaseRef.current === "closed";
         if (event.kind === "bar") {
@@ -601,7 +615,7 @@ export default function App() {
       };
       socket.onerror = () => socket?.close();
       socket.onclose = () => {
-        if (disposed) return;
+        if (disposed || selectedCodeRef.current !== selectedCode) return;
         setQuoteStreamState("unavailable");
         setQuoteError("实时报价连接已断开，正在重连");
         setLoadingQuote(false);
@@ -630,7 +644,7 @@ export default function App() {
 
   useEffect(() => {
     const activeStreams = watchlistQuoteStreamsRef.current;
-    const targets = instrumentSourcesLoaded && sourcesLoaded
+    const targets = !expertMode && instrumentSourcesLoaded && sourcesLoaded
       ? watchlistQuoteStreamTargets(instruments, selectedCode, instrumentSources, sourceById)
       : [];
     const targetByCode = new Map(targets.map((target) => [target.code, target]));
@@ -655,7 +669,7 @@ export default function App() {
         }),
       });
     }
-  }, [instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded]);
+  }, [expertMode, instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded]);
 
   useEffect(() => () => {
     const activeStreams = watchlistQuoteStreamsRef.current;
@@ -673,7 +687,11 @@ export default function App() {
     }
     let disposed = false;
     void marketApi.lastQuote(selectedCode).then((lastView) => {
-      if (disposed || lastView.source_id !== selectedSource) return;
+      if (
+        disposed
+        || selectedCodeRef.current !== selectedCode
+        || lastView.source_id !== selectedSource
+      ) return;
       setQuote((current) => {
         if (!current) return lastView;
         const currentTime = new Date(current.quote.source.received_at).getTime();
@@ -704,12 +722,20 @@ export default function App() {
   useEffect(() => {
     let disposed = false;
     setTimelineSamples([]);
+    if (selectedPeriod.mode !== "timeline") {
+      setTimelineHistorySyncing(false);
+      return () => {
+        disposed = true;
+      };
+    }
+    setTimelineHistorySyncing(true);
     void (async () => {
       let cursor: number | undefined;
       const seenCursors = new Set<number>();
+      const historyPages: TimelineSample[][] = [];
       while (!disposed) {
         const page = await marketApi.timelineSamplePage(selectedCode, selectedSource, cursor);
-        if (disposed) return;
+        if (disposed || selectedCodeRef.current !== selectedCode) return;
         const samples = page.items.map((item) => ({
           time: Date.parse(item.received_at) / 1_000,
           observedTime: Date.parse(item.observed_at) / 1_000,
@@ -720,21 +746,31 @@ export default function App() {
           && Number.isFinite(item.observedTime)
           && Number.isFinite(item.value)
         ));
-        setTimelineSamples((current) => mergeTimelineSamples(samples, current));
-        if (!page.has_more || page.next_cursor === null) return;
+        historyPages.push(samples);
+        if (historyPages.length === 1) {
+          setTimelineSamples((current) => mergeTimelineSamples(samples, current));
+        }
+        if (!page.has_more || page.next_cursor === null) break;
         if (seenCursors.has(page.next_cursor)) {
           throw new Error("分时事件游标未前进");
         }
         seenCursors.add(page.next_cursor);
         cursor = page.next_cursor;
       }
+      if (disposed || selectedCodeRef.current !== selectedCode) return;
+      const completeHistory = mergeTimelineSamples(...historyPages);
+      startTransition(() => {
+        setTimelineSamples((current) => mergeTimelineSamples(completeHistory, current));
+        setTimelineHistorySyncing(false);
+      });
     })().catch(() => {
       // Persisted samples enrich the timeline; the live raw-event stream remains independent.
+      if (!disposed) setTimelineHistorySyncing(false);
     });
     return () => {
       disposed = true;
     };
-  }, [selectedCode, selectedSource]);
+  }, [selectedCode, selectedPeriod.mode, selectedSource]);
 
   useEffect(() => {
     let disposed = false;
@@ -968,6 +1004,36 @@ export default function App() {
       ? "部分聚合字段缺失"
       : null;
 
+  if (expertMode) {
+    return (
+      <ExpertModeWorkspace
+        code={selectedCode}
+        instrumentName={selectedInstrument.name}
+        unit={unitFor(selectedCode, selectedInstrument) || "美元/盎司"}
+        candles={candles}
+        timelineSamples={timelineSamples}
+        periodId={periodId}
+        livePrice={livePrice}
+        change={numeric(priceQuote?.change)}
+        changePercent={numeric(priceQuote?.change_percent)}
+        observedAt={quoteObservedAt}
+        referencePrice={timelineReferencePrice}
+        timelineResolutionSeconds={timelineSamplingSeconds}
+        priceDigits={digitsFor(selectedCode, selectedInstrument)}
+        marketPhase={marketSession.phase}
+        marketSchedule={selectedInstrument.market_schedule}
+        sourceLabel={selectedSourceDescriptor?.display_name ?? sourceLabels[selectedSource] ?? selectedSource}
+        sourceState={quoteStreamState}
+        historyLoading={historySyncing || timelineHistorySyncing}
+        loading={loadingQuote || loadingCandles}
+        error={quoteError ?? candleError}
+        onPeriodChange={setPeriodId}
+        onRequestOlderHistory={loadOlderCandles}
+        onExit={() => setExpertMode(false)}
+      />
+    );
+  }
+
   return (
     <div
       className={`terminal-shell ${watchOpen && watchPinned ? "is-watch-docked" : ""}`}
@@ -993,7 +1059,31 @@ export default function App() {
           <button type="button">头条</button>
           <button type="button">研报</button>
           <button type="button">指标库</button>
-          <button type="button" className="accent"><Sparkles size={14} />分析器</button>
+          <button
+            type="button"
+            className="accent"
+            onClick={() => {
+              if (selectedCode !== "XAUUSD") {
+                selectedCodeRef.current = "XAUUSD";
+                candleRequestRef.current += 1;
+                historyCursorRef.current = null;
+                historyLoadInFlightRef.current = false;
+                setQuote(null);
+                setCandles([]);
+                setTimelineSamples([]);
+                setQuoteError(null);
+                setCandleError(null);
+                setHistorySyncing(false);
+                setLoadingQuote(true);
+                setLoadingCandles(true);
+              }
+              setSelectedCode("XAUUSD");
+              setHover(null);
+              setExpertMode(true);
+            }}
+          >
+            <Sparkles size={14} />专家模式
+          </button>
         </div>
         <div className="utility-cluster">
           <div className="search-box"><Search size={16} /><span>搜索品种、资讯或指标</span></div>
@@ -1318,16 +1408,16 @@ export default function App() {
             priceDigits={digitsFor(selectedCode, selectedInstrument)}
             marketPhase={marketSession.phase}
             marketSchedule={selectedInstrument.market_schedule}
-            historyLoading={historySyncing}
+            historyLoading={historySyncing || timelineHistorySyncing}
             onRequestOlderHistory={loadOlderCandles}
             onHover={setHover}
           />
-          {historySyncing ? (
+          {historySyncing || timelineHistorySyncing ? (
             <div
               className="history-loading-indicator"
               role="status"
               aria-live="polite"
-              title="正在从当前实时数据源补齐历史行情"
+              title="正在从当前实时数据源无上限补齐完整历史行情"
             >
               <LoaderCircle size={12} aria-hidden="true" />
               <span>加载中...</span>
