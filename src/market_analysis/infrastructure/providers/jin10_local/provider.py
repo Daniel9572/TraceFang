@@ -5,7 +5,9 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import quote as quote_url
 
+import httpx
 from websockets.asyncio.client import ClientConnection, connect
 
 from market_analysis.domain.errors import (
@@ -16,13 +18,26 @@ from market_analysis.domain.errors import (
 from market_analysis.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
 from market_analysis.infrastructure.providers.jin10_local.protocol import (
     ADVANCED_QUOTE_PUSH_PROTOCOL,
+    KLINE_HISTORY_PROTOCOL,
+    KLINE_SNAPSHOT_PROTOCOL,
+    KLINE_UPDATE_PROTOCOL,
     QUOTE_PUSH_PROTOCOL,
     RELOGIN_REQUEST_PROTOCOL,
+    Jin10KlineHistoryFile,
+    Jin10KlineHistoryManifest,
+    Jin10KlineSnapshot,
+    Jin10WireCandle,
     Jin10WireQuote,
     decode_message,
     derive_session_key,
+    encode_kline_history_request,
+    encode_kline_subscription,
     encode_login,
     encode_quote_subscription,
+    parse_kline_history_file,
+    parse_kline_history_manifest,
+    parse_kline_snapshot,
+    parse_kline_update,
     parse_quote,
     xor_cipher,
 )
@@ -34,6 +49,9 @@ _QUOTE_PROTOCOLS = frozenset({QUOTE_PUSH_PROTOCOL, ADVANCED_QUOTE_PUSH_PROTOCOL}
 _RECONNECT_MIN_SECONDS = 0.1
 _RECONNECT_MAX_SECONDS = 1.0
 _MAX_MINUTE_CANDLES_PER_SYMBOL = 43_200
+_KLINE_TIME_TYPE = 1
+_MAX_HISTORY_PAGES = 64
+_MAX_HISTORY_FILE_CACHE = 32
 QuoteListener = Callable[[QuoteSnapshot], None]
 
 
@@ -59,6 +77,15 @@ class Jin10LocalProvider:
         self._last_error: str | None = None
         self._quote_listeners: set[QuoteListener] = set()
         self._connection_had_quote = False
+        self._connection_ready = asyncio.Event()
+        self._active_socket: ClientConnection | None = None
+        self._active_session_key: str | None = None
+        self._send_lock = asyncio.Lock()
+        self._history_request_lock = asyncio.Lock()
+        self._history_waiters: dict[
+            tuple[str, int, int], asyncio.Future[Jin10KlineHistoryManifest]
+        ] = {}
+        self._history_file_cache: dict[tuple[str, int, str], tuple[Candle, ...]] = {}
 
     async def __aenter__(self) -> Jin10LocalProvider:
         await self.open()
@@ -93,10 +120,17 @@ class Jin10LocalProvider:
     def subscribed_provider_codes(self) -> tuple[str, ...]:
         return self._subscriptions
 
+    def provider_symbol(self, instrument: Instrument) -> str:
+        return self.symbol_mapper.to_provider_code(instrument)
+
     async def close(self) -> None:
         task = self._task
         self._task = None
         self._connected = False
+        self._connection_ready.clear()
+        self._active_socket = None
+        self._active_session_key = None
+        self._fail_history_waiters(ProviderUnavailableError("Jin10 local connection closed"))
         if task is None:
             return
         task.cancel()
@@ -166,8 +200,8 @@ class Jin10LocalProvider:
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]:
-        if not 1 <= count <= 100:
-            raise ValueError("count must be between 1 and 100")
+        if not 1 <= count <= 10_000:
+            raise ValueError("count must be between 1 and 10000")
         if start is not None and (start.tzinfo is None or start.utcoffset() is None):
             raise ValueError("start must be timezone-aware")
         provider_code = self.symbol_mapper.to_provider_code(instrument)
@@ -178,6 +212,89 @@ class Jin10LocalProvider:
         if start is not None:
             return tuple(candle for candle in rows if candle.open_time >= start)[:count]
         return tuple(rows[-count:])
+
+    async def fetch_historical_candles(
+        self,
+        instrument: Instrument,
+        *,
+        start: datetime,
+        count: int,
+    ) -> tuple[Candle, ...]:
+        """Fetches one exact historical window from this channel's own Kline protocol."""
+
+        if start.tzinfo is None or start.utcoffset() is None:
+            raise ValueError("start must be timezone-aware")
+        if not 1 <= count <= 10_000:
+            raise ValueError("count must be between 1 and 10000")
+        provider_code = self.symbol_mapper.to_provider_code(instrument)
+        if provider_code not in self._subscriptions:
+            raise ProviderUnavailableError(
+                f"{instrument.symbol} is not subscribed on the Jin10 local channel"
+            )
+        await self.open()
+        try:
+            await asyncio.wait_for(
+                self._connection_ready.wait(),
+                self.settings.kline_wait_timeout_seconds,
+            )
+        except TimeoutError as error:
+            raise ProviderUnavailableError(
+                self._last_error or "等待金十同源 K 线连接超时"
+            ) from error
+
+        range_start = start.astimezone(UTC).replace(microsecond=0)
+        range_end = range_start + timedelta(minutes=count)
+        collected: dict[datetime, Candle] = {}
+        # Protocol 10006 accepts a target boundary and returns files immediately before it.
+        boundary = int(range_end.timestamp())
+        seen_boundaries: set[int] = set()
+        seen_files: set[str] = set()
+
+        async with self._history_request_lock:
+            for _ in range(_MAX_HISTORY_PAGES):
+                if boundary in seen_boundaries:
+                    raise ProviderDataError("Jin10 Kline history pagination did not advance")
+                seen_boundaries.add(boundary)
+                manifest = await self._request_history_manifest(
+                    provider_code,
+                    time_type=_KLINE_TIME_TYPE,
+                    boundary_timestamp=boundary,
+                )
+                new_files = tuple(
+                    item for item in manifest.files if item.file_name not in seen_files
+                )
+                if not new_files:
+                    break
+                seen_files.update(item.file_name for item in new_files)
+                downloaded = await self._download_history_files(
+                    instrument,
+                    provider_code,
+                    manifest.time_type,
+                    new_files,
+                )
+                for candle in downloaded:
+                    if range_start <= candle.open_time < range_end:
+                        collected[candle.open_time] = candle
+                oldest = min(
+                    (
+                        item.start_timestamp
+                        for item in new_files
+                        if item.start_timestamp is not None
+                    ),
+                    default=None,
+                )
+                if oldest is None and downloaded:
+                    oldest = int(min(item.open_time for item in downloaded).timestamp())
+                if oldest is None or oldest <= int(range_start.timestamp()):
+                    break
+                boundary = oldest
+            else:
+                raise ProviderUnavailableError("金十同源 K 线回补超过安全分页上限")
+
+        for candle in self._minute_candles.get(provider_code, {}).values():
+            if range_start <= candle.open_time < range_end:
+                collected[candle.open_time] = candle
+        return tuple(collected[key] for key in sorted(collected))
 
     def seed_candles(self, candles: tuple[Candle, ...]) -> None:
         for candle in candles:
@@ -231,11 +348,21 @@ class Jin10LocalProvider:
             self._connected = True
             self._last_error = None
             await self._send_login(socket, key)
-            subscription = encode_quote_subscription(
+            quote_subscription = encode_quote_subscription(
                 provider_codes=self._subscriptions,
                 frequency_ms=self.settings.quote_frequency_ms,
             )
-            await socket.send(xor_cipher(subscription, key))
+            kline_subscription = encode_kline_subscription(
+                provider_codes=self._subscriptions,
+                time_type=_KLINE_TIME_TYPE,
+                frequency_ms=self.settings.kline_frequency_ms,
+            )
+            async with self._send_lock:
+                await socket.send(xor_cipher(quote_subscription, key))
+                await socket.send(xor_cipher(kline_subscription, key))
+            self._active_socket = socket
+            self._active_session_key = key
+            self._connection_ready.set()
             heartbeat = asyncio.create_task(self._heartbeat(socket), name="jin10-local-heartbeat")
             try:
                 async for message in socket:
@@ -245,14 +372,38 @@ class Jin10LocalProvider:
                     if protocol == RELOGIN_REQUEST_PROTOCOL:
                         await self._send_login(socket, key)
                         continue
-                    if protocol not in _QUOTE_PROTOCOLS:
+                    if protocol in _QUOTE_PROTOCOLS:
+                        try:
+                            wire_quote = parse_quote(payload)
+                            self._store_quote(wire_quote, protocol=protocol)
+                        except (InstrumentNotSupportedError, ProviderDataError):
+                            continue
                         continue
                     try:
-                        wire_quote = parse_quote(payload)
-                        self._store_quote(wire_quote, protocol=protocol)
+                        if protocol == KLINE_SNAPSHOT_PROTOCOL:
+                            self._store_kline_snapshot(
+                                parse_kline_snapshot(payload),
+                                protocol=protocol,
+                            )
+                        elif protocol == KLINE_UPDATE_PROTOCOL:
+                            self._store_kline_snapshot(
+                                parse_kline_update(payload),
+                                protocol=protocol,
+                            )
+                        elif protocol == KLINE_HISTORY_PROTOCOL:
+                            self._resolve_history_manifest(
+                                parse_kline_history_manifest(payload)
+                            )
                     except (InstrumentNotSupportedError, ProviderDataError):
                         continue
             finally:
+                if self._active_socket is socket:
+                    self._connection_ready.clear()
+                    self._active_socket = None
+                    self._active_session_key = None
+                    self._fail_history_waiters(
+                        ProviderUnavailableError("Jin10 local connection was interrupted")
+                    )
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
 
@@ -262,12 +413,191 @@ class Jin10LocalProvider:
             session_token=self.settings.session_token,
             vip_type=self.settings.vip_type,
         )
-        await socket.send(xor_cipher(packet, key))
+        async with self._send_lock:
+            await socket.send(xor_cipher(packet, key))
 
     async def _heartbeat(self, socket: ClientConnection) -> None:
         while True:
             await asyncio.sleep(self.settings.heartbeat_seconds)
-            await socket.send("")
+            async with self._send_lock:
+                await socket.send("")
+
+    async def _request_history_manifest(
+        self,
+        provider_code: str,
+        *,
+        time_type: int,
+        boundary_timestamp: int,
+    ) -> Jin10KlineHistoryManifest:
+        socket = self._active_socket
+        key = self._active_session_key
+        if socket is None or key is None or not self._connection_ready.is_set():
+            raise ProviderUnavailableError("金十同源 K 线连接尚未就绪")
+        request_key = (provider_code, time_type, boundary_timestamp)
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[Jin10KlineHistoryManifest] = loop.create_future()
+        self._history_waiters[request_key] = waiter
+        packet = encode_kline_history_request(
+            provider_code=provider_code,
+            time_type=time_type,
+            boundary_timestamp=boundary_timestamp,
+        )
+        try:
+            async with self._send_lock:
+                await socket.send(xor_cipher(packet, key))
+            return await asyncio.wait_for(waiter, self.settings.kline_wait_timeout_seconds)
+        except TimeoutError as error:
+            raise ProviderUnavailableError("等待金十同源历史 K 线目录超时") from error
+        finally:
+            self._history_waiters.pop(request_key, None)
+
+    def _resolve_history_manifest(self, manifest: Jin10KlineHistoryManifest) -> None:
+        request_key = (
+            manifest.provider_code,
+            manifest.time_type,
+            manifest.boundary_timestamp,
+        )
+        waiter = self._history_waiters.get(request_key)
+        if waiter is None:
+            candidates = [
+                value
+                for (code, time_type, _), value in self._history_waiters.items()
+                if code == manifest.provider_code and time_type == manifest.time_type
+            ]
+            waiter = candidates[0] if len(candidates) == 1 else None
+        if waiter is not None and not waiter.done():
+            waiter.set_result(manifest)
+
+    def _fail_history_waiters(self, error: Exception) -> None:
+        for waiter in tuple(self._history_waiters.values()):
+            if not waiter.done():
+                waiter.set_exception(error)
+        self._history_waiters.clear()
+
+    async def _download_history_files(
+        self,
+        instrument: Instrument,
+        provider_code: str,
+        time_type: int,
+        files: tuple[Jin10KlineHistoryFile, ...],
+    ) -> tuple[Candle, ...]:
+        async with httpx.AsyncClient(
+            timeout=self.settings.kline_download_timeout_seconds,
+            follow_redirects=True,
+        ) as client:
+            pages = await asyncio.gather(
+                *(
+                    self._download_history_file(
+                        client,
+                        instrument,
+                        provider_code,
+                        time_type,
+                        item,
+                    )
+                    for item in files
+                )
+            )
+        return tuple(candle for page in pages for candle in page)
+
+    async def _download_history_file(
+        self,
+        client: httpx.AsyncClient,
+        instrument: Instrument,
+        provider_code: str,
+        time_type: int,
+        item: Jin10KlineHistoryFile,
+    ) -> tuple[Candle, ...]:
+        cache_key = (provider_code, time_type, item.file_name)
+        cached = self._history_file_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        url = "/".join(
+            (
+                self.settings.kline_file_endpoint,
+                quote_url(provider_code, safe=""),
+                str(time_type),
+                quote_url(item.file_name, safe=""),
+            )
+        )
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as error:
+            raise ProviderUnavailableError("下载金十同源历史 K 线文件失败") from error
+        wire_rows = parse_kline_history_file(response.content)
+        if item.record_count is not None and len(wire_rows) != item.record_count:
+            raise ProviderDataError("Jin10 Kline history file row count does not match manifest")
+        rows = self._store_wire_candles(
+            instrument,
+            provider_code,
+            wire_rows,
+            protocol=KLINE_HISTORY_PROTOCOL,
+            time_type=time_type,
+            file_name=item.file_name,
+        )
+        self._history_file_cache[cache_key] = rows
+        while len(self._history_file_cache) > _MAX_HISTORY_FILE_CACHE:
+            del self._history_file_cache[next(iter(self._history_file_cache))]
+        return rows
+
+    def _store_kline_snapshot(self, value: Jin10KlineSnapshot, *, protocol: int) -> None:
+        if value.time_type != _KLINE_TIME_TYPE:
+            return
+        instrument = self.symbol_mapper.from_provider_code(value.provider_code)
+        self._store_wire_candles(
+            instrument,
+            value.provider_code,
+            value.candles,
+            protocol=protocol,
+            time_type=value.time_type,
+        )
+
+    def _store_wire_candles(
+        self,
+        instrument: Instrument,
+        provider_code: str,
+        wire_rows: tuple[Jin10WireCandle, ...],
+        *,
+        protocol: int,
+        time_type: int,
+        file_name: str | None = None,
+    ) -> tuple[Candle, ...]:
+        received_at = datetime.now(UTC)
+        target = self._minute_candles.setdefault(provider_code, {})
+        rows: list[Candle] = []
+        for wire in wire_rows:
+            try:
+                open_time = datetime.fromtimestamp(wire.timestamp, tz=UTC)
+            except (OSError, OverflowError, ValueError) as error:
+                raise ProviderDataError("Jin10 Kline timestamp is invalid") from error
+            candle = Candle(
+                instrument=instrument,
+                interval=timedelta(minutes=1),
+                open_time=open_time,
+                open=self._price(wire.open_micros),
+                high=self._price(wire.high_micros),
+                low=self._price(wire.low_micros),
+                close=self._price(wire.close_micros),
+                volume=Decimal(wire.volume),
+                source=SourceMetadata(
+                    provider=self.name,
+                    provider_symbol=provider_code,
+                    observed_at=open_time,
+                    received_at=received_at,
+                    raw_payload={
+                        "protocol": protocol,
+                        "time_type": time_type,
+                        "price_scale": 1_000_000,
+                        "history_file": file_name,
+                    },
+                ),
+            )
+            current = target.get(open_time)
+            if current is None or candle.source.received_at >= current.source.received_at:
+                target[open_time] = candle
+            rows.append(candle)
+        self._trim_candles(target)
+        return tuple(rows)
 
     def _store_quote(self, wire: Jin10WireQuote, *, protocol: int) -> None:
         instrument = self.symbol_mapper.from_provider_code(wire.provider_code)

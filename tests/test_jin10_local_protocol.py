@@ -1,24 +1,49 @@
 from __future__ import annotations
 
+import gzip
 import struct
 import unittest
 
 from market_analysis.infrastructure.providers.jin10_local.protocol import (
     ADVANCED_QUOTE_REQUEST_PROTOCOL,
+    KLINE_HISTORY_PROTOCOL,
+    KLINE_SUBSCRIPTION_PROTOCOL,
     LOGIN_PROTOCOL,
     decode_message,
     derive_session_key,
+    encode_kline_history_request,
+    encode_kline_subscription,
     encode_login,
     encode_quote_subscription,
+    parse_kline_history_file,
+    parse_kline_history_manifest,
+    parse_kline_snapshot,
     parse_quote,
     xor_cipher,
 )
+
+
+def encode_string(value: str) -> bytes:
+    encoded = value.encode()
+    return struct.pack("<H", len(encoded)) + encoded
 
 
 def read_string(packet: bytes, offset: int) -> tuple[str, int]:
     length = struct.unpack_from("<H", packet, offset)[0]
     offset += 2
     return packet[offset : offset + length].decode(), offset + length
+
+
+def wire_candle(timestamp: int, close_micros: int = 4_251_000_000) -> bytes:
+    return struct.pack(
+        "<qqqqqq",
+        timestamp,
+        4_252_000_000,
+        4_250_000_000,
+        4_249_000_000,
+        close_micros,
+        10,
+    )
 
 
 class Jin10LocalProtocolTests(unittest.TestCase):
@@ -53,6 +78,68 @@ class Jin10LocalProtocolTests(unittest.TestCase):
         self.assertEqual(frequency, 3000)
         self.assertEqual(count, 2)
 
+    def test_encodes_kline_subscription_with_per_symbol_time_type(self) -> None:
+        packet = encode_kline_subscription(
+            provider_codes=("XAUUSD.GOODS", "XAGUSD.GOODS"),
+            frequency_ms=3000,
+            time_type=1,
+        )
+        protocol, frequency, count = struct.unpack_from("<hih", packet)
+        self.assertEqual(protocol, KLINE_SUBSCRIPTION_PROTOCOL)
+        self.assertEqual(frequency, 3000)
+        self.assertEqual(count, 2)
+        first, offset = read_string(packet, 8)
+        self.assertEqual(first, "XAUUSD.GOODS")
+        self.assertEqual(struct.unpack_from("<h", packet, offset)[0], 1)
+
+    def test_encodes_backward_history_request(self) -> None:
+        packet = encode_kline_history_request(
+            provider_code="XAUUSD.GOODS",
+            time_type=1,
+            boundary_timestamp=1_786_000_000,
+        )
+        self.assertEqual(struct.unpack_from("<h", packet)[0], KLINE_HISTORY_PROTOCOL)
+        code, offset = read_string(packet, 2)
+        self.assertEqual(code, "XAUUSD.GOODS")
+        self.assertEqual(
+            struct.unpack_from("<bqhb", packet, offset),
+            (1, 1_786_000_000, 1, -1),
+        )
+
+    def test_parses_first_kline_snapshot_at_micro_price_precision(self) -> None:
+        payload = (
+            encode_string("XAUUSD.GOODS")
+            + struct.pack("<bi", 1, 1)
+            + wire_candle(1_786_027_380)
+        )
+        snapshot = parse_kline_snapshot(payload)
+        self.assertEqual(snapshot.provider_code, "XAUUSD.GOODS")
+        self.assertEqual(snapshot.time_type, 1)
+        self.assertEqual(snapshot.candles[0].open_micros, 4_250_000_000)
+        self.assertEqual(snapshot.candles[0].close_micros, 4_251_000_000)
+
+    def test_parses_history_manifest_and_gzip_records(self) -> None:
+        file_name = "25b57cce844256b11025c73a947753b4.2.1786027380.1786027440"
+        payload = (
+            encode_string("XAUUSD.GOODS")
+            + struct.pack("<hbbqb", 0, 0, 1, -1, 1)
+            + encode_string(file_name)
+        )
+        manifest = parse_kline_history_manifest(payload)
+        self.assertEqual(manifest.boundary_timestamp, -1)
+        self.assertEqual(manifest.files[0].record_count, 2)
+        self.assertEqual(manifest.files[0].start_timestamp, 1_786_027_380)
+
+        rows = parse_kline_history_file(
+            gzip.compress(
+                wire_candle(1_786_027_380)
+                + wire_candle(1_786_027_440, close_micros=4_251_500_000)
+            )
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1].timestamp, 1_786_027_440)
+        self.assertEqual(rows[1].close_micros, 4_251_500_000)
+
     def test_parses_observed_legacy_quote_frame(self) -> None:
         code = b"XAUUSD.GOODS"
         payload = (
@@ -80,6 +167,23 @@ class Jin10LocalProtocolTests(unittest.TestCase):
 
     def test_decodes_message_protocol_and_payload(self) -> None:
         self.assertEqual(decode_message(struct.pack("<h", 10005) + b"quote"), (10005, b"quote"))
+
+    def test_snapshot_rejects_invalid_ohlc_invariant(self) -> None:
+        payload = (
+            encode_string("XAUUSD.GOODS")
+            + struct.pack("<bi", 1, 1)
+            + struct.pack(
+                "<qqqqqq",
+                1_786_027_380,
+                4_249_000_000,
+                4_250_000_000,
+                4_248_000_000,
+                4_251_000_000,
+                10,
+            )
+        )
+        with self.assertRaisesRegex(Exception, "outside low/high"):
+            parse_kline_snapshot(payload)
 
 
 if __name__ == "__main__":
