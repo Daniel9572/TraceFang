@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -20,12 +20,18 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from market_analysis.application.acquisition import QuoteAcquisitionRouter
 from market_analysis.application.expert_ai import (
     EXPERT_AI_MAX_BARS,
+    EXPERT_STRATEGY_COUNT,
     CodexExpertAnalysisService,
     ExpertStrategyId,
 )
 from market_analysis.application.gold_events import gold_event_catalog_snapshot
+from market_analysis.application.multi_timeframe import (
+    MultiTimeframeTrendService,
+    multi_timeframe_payload,
+)
 from market_analysis.application.options import GoldOptionsService
 from market_analysis.application.period_bars import PERIOD_DEFINITIONS, PeriodBarService
+from market_analysis.application.provider_frames import ProviderFrame
 from market_analysis.application.quotes import (
     JIN10_CLIENT_SOURCE,
     JIN10_LOCAL_CHANNEL,
@@ -39,6 +45,7 @@ from market_analysis.application.realtime_bars import (
     RealtimeBarContract,
     RealtimeBarService,
 )
+from market_analysis.application.replay import FrameDecoder, MarketReplayProjector
 from market_analysis.application.sources import (
     MarketSourceManager,
     ProviderProbe,
@@ -57,12 +64,25 @@ from market_analysis.domain.errors import (
     ProviderRateLimitError,
     ProviderUnavailableError,
 )
+from market_analysis.domain.market_context import (
+    FuturesPositioningContext,
+    VolatilityIndexEodContext,
+)
 from market_analysis.domain.models import Instrument
 from market_analysis.environment import load_project_environment
+from market_analysis.infrastructure.jetstream import (
+    FrameStore,
+    JetStreamRawFrameSink,
+    JetStreamSettings,
+)
 from market_analysis.infrastructure.postgres import (
     BufferedMarketDataWriter,
     PostgresMarketDataStore,
     PostgresSettings,
+)
+from market_analysis.infrastructure.providers.cboe_volatility import (
+    CboeVolatilityProvider,
+    CboeVolatilitySettings,
 )
 from market_analysis.infrastructure.providers.jin10_local import (
     Jin10LocalProvider,
@@ -75,6 +95,10 @@ from market_analysis.infrastructure.providers.jin10_web import (
 from market_analysis.infrastructure.providers.shfe_options import (
     ShfeGoldOptionsProvider,
     ShfeGoldOptionsSettings,
+)
+from market_analysis.infrastructure.providers.shfe_positioning import (
+    ShfePositioningProvider,
+    ShfePositioningSettings,
 )
 from market_analysis.infrastructure.providers.tonghuashun_futures import (
     TonghuashunFuturesProvider,
@@ -114,6 +138,12 @@ class Runtime:
         self.period_bars: PeriodBarService | None = None
         self.expert_ai: CodexExpertAnalysisService | None = None
         self.gold_options: GoldOptionsService | None = None
+        self.cboe_volatility: CboeVolatilityProvider | None = None
+        self.shfe_positioning: ShfePositioningProvider | None = None
+        self.frame_store: FrameStore | None = None
+        self.frame_store_setup_error: str | None = None
+        self.replay_decoder: FrameDecoder | None = None
+        self.bar_contracts: tuple[RealtimeBarContract, ...] = ()
         self.instrument_sources: dict[str, str] = {}
         self.watchlist_codes: list[str] = list(DEFAULT_WATCHLIST_CODES)
         self.catalog_cache: AsyncTtlCache[Any] = AsyncTtlCache()
@@ -123,6 +153,16 @@ class Runtime:
 
 
 runtime = Runtime()
+
+
+async def _close_expert_context_providers() -> None:
+    providers = (runtime.cboe_volatility, runtime.shfe_positioning)
+    runtime.cboe_volatility = None
+    runtime.shfe_positioning = None
+    for provider in providers:
+        if provider is not None:
+            with suppress(Exception):
+                await provider.aclose()
 
 
 _SPOT_METALS_MARKET_SCHEDULE: dict[str, Any] = {
@@ -291,12 +331,17 @@ _ExpertPeriod = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=16),
 ]
+
+
 class ExpertAiAnalyzeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: _ExpertCode = "XAUUSD"
     period: _ExpertPeriod = "15m"
-    enabled_strategies: list[ExpertStrategyId] = Field(default_factory=list, max_length=7)
+    enabled_strategies: list[ExpertStrategyId] = Field(
+        default_factory=list,
+        max_length=EXPERT_STRATEGY_COUNT,
+    )
 
 
 def _source_store_path() -> Path:
@@ -306,12 +351,32 @@ def _source_store_path() -> Path:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    frame_store: FrameStore | None = None
+    frame_sink: JetStreamRawFrameSink | None = None
+    runtime.frame_store_setup_error = None
+    try:
+        frame_settings = JetStreamSettings.from_env()
+        if frame_settings is None:
+            runtime.frame_store_setup_error = "MARKET_ANALYSIS_NATS_URL is not configured"
+        else:
+            frame_store = FrameStore(frame_settings)
+            await frame_store.connect()
+            frame_sink = JetStreamRawFrameSink(frame_store)
+    except Exception as error:
+        runtime.frame_store_setup_error = str(error) or type(error).__name__
+        if frame_store is not None:
+            with suppress(Exception):
+                await frame_store.close()
+        frame_store = None
+        frame_sink = None
+    runtime.frame_store = frame_store
+
     local_provider: Jin10LocalProvider | None = None
     local_settings: Jin10LocalSettings | None = None
     local_setup_error: str | None = None
     try:
         local_settings = Jin10LocalSettings.from_env()
-        local_provider = Jin10LocalProvider(local_settings)
+        local_provider = Jin10LocalProvider(local_settings, frame_sink=frame_sink)
     except (ValueError, ProviderError) as error:
         local_setup_error = str(error)
         if local_provider is not None:
@@ -323,7 +388,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     web_setup_error: str | None = None
     try:
         web_settings = Jin10WebSettings.from_env()
-        web_provider = Jin10WebProvider(web_settings)
+        web_provider = Jin10WebProvider(web_settings, frame_sink=frame_sink)
     except (ValueError, ProviderError) as error:
         web_setup_error = str(error)
         if web_provider is not None:
@@ -582,7 +647,26 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         contracts=bar_contracts,
         writer=runtime.persistence,
     )
+    runtime.bar_contracts = bar_contracts
     runtime.period_bars = PeriodBarService(runtime.realtime_bars, store=kline_store)
+
+    async def decode_replay_frame(frame: ProviderFrame):
+        values = []
+        if frame.channel == JIN10_WEB_CHANNEL and web_provider is not None:
+            await web_provider.ingest_frame(frame, on_quote=values.append)
+            return tuple(values)
+        if frame.channel == JIN10_LOCAL_CHANNEL and local_provider is not None:
+            await local_provider.ingest_frame(
+                frame,
+                on_quote=values.append,
+                on_candle=values.append,
+            )
+            return tuple(values)
+        raise ProviderUnavailableError(
+            f"recorded frame channel {frame.channel!r} has no active decoder"
+        )
+
+    runtime.replay_decoder = decode_replay_frame
 
     async def load_latest_quote(instrument, source_id):
         store = runtime.database_store
@@ -758,8 +842,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                     schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
                 )
     await runtime.acquisition.start(initial_routes)
+    runtime.cboe_volatility = CboeVolatilityProvider(CboeVolatilitySettings())
+    runtime.shfe_positioning = ShfePositioningProvider(ShfePositioningSettings())
     runtime.clear_caches()
-    yield
+    try:
+        yield
+    finally:
+        await _close_expert_context_providers()
     if runtime.acquisition is not None:
         await runtime.acquisition.stop()
     if local_provider is not None and local_quote_listener is not None:
@@ -782,6 +871,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await runtime.tonghuashun_futures_provider.close()
     if runtime.gold_options is not None:
         await runtime.gold_options.close()
+    if runtime.frame_store is not None:
+        await runtime.frame_store.close()
     runtime.local_provider = None
     runtime.web_provider = None
     runtime.tonghuashun_futures_provider = None
@@ -796,6 +887,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     runtime.period_bars = None
     runtime.expert_ai = None
     runtime.gold_options = None
+    runtime.cboe_volatility = None
+    runtime.shfe_positioning = None
+    runtime.frame_store = None
+    runtime.frame_store_setup_error = None
+    runtime.replay_decoder = None
+    runtime.bar_contracts = ()
     runtime.instrument_sources.clear()
     runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
     runtime.clear_caches()
@@ -847,6 +944,21 @@ def _period_bars() -> PeriodBarService:
     return runtime.period_bars
 
 
+def _frame_store() -> FrameStore:
+    if runtime.frame_store is None or not runtime.frame_store.is_connected:
+        raise HTTPException(
+            status_code=503,
+            detail=runtime.frame_store_setup_error or "raw frame store is unavailable",
+        )
+    return runtime.frame_store
+
+
+def _replay_decoder() -> FrameDecoder:
+    if runtime.replay_decoder is None:
+        raise HTTPException(status_code=503, detail="provider frame decoder is unavailable")
+    return runtime.replay_decoder
+
+
 def _expert_ai() -> CodexExpertAnalysisService:
     if runtime.expert_ai is None:
         raise HTTPException(status_code=503, detail="local Codex analysis runtime is unavailable")
@@ -857,6 +969,107 @@ def _gold_options() -> GoldOptionsService:
     if runtime.gold_options is None:
         raise HTTPException(status_code=503, detail="gold option runtime is unavailable")
     return runtime.gold_options
+
+
+def _cboe_volatility() -> CboeVolatilityProvider:
+    if runtime.cboe_volatility is None:
+        raise HTTPException(status_code=503, detail="volatility context runtime is unavailable")
+    return runtime.cboe_volatility
+
+
+def _shfe_positioning() -> ShfePositioningProvider:
+    if runtime.shfe_positioning is None:
+        raise HTTPException(status_code=503, detail="SHFE positioning runtime is unavailable")
+    return runtime.shfe_positioning
+
+
+def _volatility_eod_payload(value: VolatilityIndexEodContext) -> dict[str, Any]:
+    return {
+        "index_code": value.index_code,
+        "underlying": value.underlying,
+        "value": float(value.value),
+        "as_of": value.source.as_of.isoformat(),
+        "trailing_percentile_252": (
+            float(value.trailing_percentile_252)
+            if value.trailing_percentile_252 is not None
+            else None
+        ),
+        "history_sample_size": value.history_sample_size,
+        "history_start": value.history_start.isoformat() if value.history_start else None,
+        "history_end": value.history_end.isoformat() if value.history_end else None,
+        "expected_horizon_days": value.expected_horizon_days,
+        "directional": value.directional,
+        "source": {
+            "provider_id": value.source.provider_id,
+            "dataset_id": value.source.dataset_id,
+            "source_url": value.source.source_url,
+            "frequency": value.source.frequency,
+            "received_at": value.source.received_at.isoformat(),
+        },
+    }
+
+
+def _shfe_positioning_payload(
+    value: FuturesPositioningContext,
+    *,
+    refresh_after_seconds: int,
+) -> dict[str, Any]:
+    declared_delay = value.source.declared_delay
+    return {
+        "contract_version": "shfe-positioning-context-v1",
+        "state": "ready",
+        "mode": "delayed_snapshot",
+        "refresh_after_seconds": refresh_after_seconds,
+        "as_of": value.source.observed_at.isoformat(),
+        "delayed": value.source.delayed,
+        "declared_delay_seconds": (
+            int(declared_delay.total_seconds()) if declared_delay is not None else None
+        ),
+        "product_code": value.product_code,
+        "contract_count": value.contract_count,
+        "volume": value.volume,
+        "open_interest": value.open_interest,
+        "open_interest_change": value.open_interest_change,
+        "open_interest_change_contracts": value.open_interest_change_contracts,
+        "unit": value.unit,
+        "counting_method": value.counting_method.value,
+        "directional_inference": value.directional_inference.value,
+        "derived_aggregate": True,
+        "contracts": [
+            {
+                "product_code": item.product_code,
+                "contract_code": item.contract_code,
+                "volume": item.volume,
+                "open_interest": item.open_interest,
+                "open_interest_change": item.open_interest_change,
+                "last_price": float(item.last_price) if item.last_price is not None else None,
+                "observed_at": item.observed_at.isoformat(),
+            }
+            for item in value.contracts
+        ],
+        "source": {
+            "provider_id": value.source.provider_id,
+            "dataset_id": value.source.dataset_id,
+            "source_url": value.source.source_url,
+            "observed_at": value.source.observed_at.isoformat(),
+            "received_at": value.source.received_at.isoformat(),
+            "published_at": (
+                value.source.published_at.isoformat()
+                if value.source.published_at is not None
+                else None
+            ),
+            "delayed": value.source.delayed,
+            "declared_delay_seconds": (
+                int(declared_delay.total_seconds()) if declared_delay is not None else None
+            ),
+        },
+        "limitations": [
+            "官方页面声明延迟 30 分钟; as_of 来自真实合约行中最新的更新时间。",
+            "成交量与持仓量按单边手数统计; 当前值是合约聚合, 不是交易所发布的加权指数。",
+            "总持仓量不能辨别多空方向; 缺任一合约 ΔOI 时聚合变化保持 null。",
+            "中国交易日包含前一晚夜盘, 不能按自然日拆解量仓。",
+        ],
+    }
 
 
 def _public_source(value: Any) -> dict[str, Any]:
@@ -1257,6 +1470,56 @@ async def expert_gold_events(
     return jsonable_encoder(asdict(snapshot))
 
 
+@app.get("/api/expert/context/volatility")
+async def expert_volatility_context() -> dict[str, Any]:
+    provider = _cboe_volatility()
+    indices = [await provider.get_eod_context(code) for code in ("VIX", "GVZ")]
+    return {
+        "contract_version": "volatility-eod-context-v1",
+        "state": "ready",
+        "mode": "eod",
+        "refresh_after_seconds": int(provider.settings.history_cache_ttl_seconds),
+        "directional": False,
+        "indices": [_volatility_eod_payload(value) for value in indices],
+        "limitations": [
+            "仅使用 Cboe 官方日频历史 CSV 的最近已发布值, 不是实时或盘中报价。",
+            "滚动分位使用含最近值在内的最多 252 个已发布日值, 不提供价格方向预测。",
+            "CSV 不提供精确发布时间; as_of 是交易日, received_at 是本服务获取时间。",
+        ],
+    }
+
+
+@app.get("/api/expert/context/shfe-positioning/{product_code}")
+async def expert_shfe_positioning(
+    product_code: Literal["au", "ag"],
+) -> dict[str, Any]:
+    provider = _shfe_positioning()
+    value = await provider.get_context(product_code)
+    return _shfe_positioning_payload(
+        value,
+        refresh_after_seconds=int(provider.settings.cache_ttl_seconds),
+    )
+
+
+@app.get("/api/expert/context/multi-timeframe/{code}")
+async def expert_multi_timeframe_trend(
+    code: str,
+    as_of: Annotated[datetime | None, Query()] = None,
+) -> dict[str, Any]:
+    decision_as_of = as_of or datetime.now(UTC)
+    if decision_as_of.tzinfo is None or decision_as_of.utcoffset() is None:
+        raise HTTPException(status_code=422, detail="as_of must be timezone-aware")
+    normalized_code, instrument, source_id = await _instrument_source(code)
+    definition = instrument_definition(normalized_code)
+    context = await MultiTimeframeTrendService(_period_bars()).snapshot(
+        instrument,
+        source_id=source_id,
+        schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
+        decision_as_of=decision_as_of,
+    )
+    return multi_timeframe_payload(context, code=normalized_code)
+
+
 @app.post("/api/expert/ai/analyze")
 async def expert_ai_analyze(request: ExpertAiAnalyzeRequest) -> dict[str, Any]:
     if request.period not in PERIOD_DEFINITIONS:
@@ -1389,6 +1652,152 @@ async def timeline_samples(
         page_size=page_size,
     )
     return asdict(page)
+
+
+@app.get("/api/replay/frames")
+async def replay_frame_bounds() -> dict[str, Any]:
+    store = runtime.frame_store
+    if store is None or not store.is_connected:
+        return {
+            "state": "unavailable",
+            "first_sequence": None,
+            "last_sequence": None,
+            "message_count": 0,
+            "first_received_at": None,
+            "last_received_at": None,
+            "detail": runtime.frame_store_setup_error or "raw frame store is unavailable",
+        }
+    try:
+        bounds = await store.bounds()
+    except Exception as error:
+        return {
+            "state": "unavailable",
+            "first_sequence": None,
+            "last_sequence": None,
+            "message_count": 0,
+            "first_received_at": None,
+            "last_received_at": None,
+            "detail": str(error)[:240] or type(error).__name__,
+        }
+    payload = asdict(bounds)
+    if bounds.first_sequence is not None and bounds.first_received_at is None:
+        with suppress(Exception):
+            payload["first_received_at"] = (
+                await store.frame_at(bounds.first_sequence)
+            ).envelope.received_at
+    if bounds.last_sequence is not None and bounds.last_received_at is None:
+        with suppress(Exception):
+            payload["last_received_at"] = (
+                await store.frame_at(bounds.last_sequence)
+            ).envelope.received_at
+    return {
+        "state": "ready" if bounds.message_count else "empty",
+        **payload,
+        "detail": None if bounds.message_count else "尚未捕获可回放的原始行情帧",
+    }
+
+
+@app.get("/api/replay/cursor")
+async def replay_frame_cursor(sequence: int = Query(ge=1)) -> dict[str, Any]:
+    try:
+        recorded = await _frame_store().frame_at(sequence)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    frame = recorded.envelope
+    return {
+        "sequence": recorded.stream_sequence,
+        "received_at": frame.received_at,
+        "channel": frame.channel,
+        "connection_id": frame.connection_id,
+        "provider_sequence": frame.sequence,
+    }
+
+
+@app.websocket("/api/replay/stream/{code}")
+async def replay_stream(websocket: WebSocket, code: str) -> None:
+    await websocket.accept()
+    session = None
+    projector = None
+    try:
+        requested_period = websocket.query_params.get("period", "1m")
+        if requested_period not in PERIOD_DEFINITIONS:
+            raise ValueError("chart period is not supported")
+        start_sequence = int(websocket.query_params.get("start_sequence", "0"))
+        speed = float(websocket.query_params.get("speed", "1"))
+        store = _frame_store()
+        bounds = await store.bounds()
+        if bounds.last_sequence is None:
+            raise ValueError("recorded frame stream is empty")
+        end_sequence_text = websocket.query_params.get("end_sequence")
+        end_sequence = (
+            int(end_sequence_text)
+            if end_sequence_text is not None
+            else bounds.last_sequence
+        )
+        normalized_code, instrument, source_id = await _instrument_source(code)
+        if source_id != JIN10_CLIENT_SOURCE:
+            raise ValueError(f"{normalized_code} 的当前数据源没有原始帧回放能力")
+        definition = instrument_definition(normalized_code)
+        projector = MarketReplayProjector(
+            contracts=runtime.bar_contracts,
+            decode_frame=_replay_decoder(),
+            instrument=instrument,
+            source_id=source_id,
+            period_id=requested_period,
+            schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
+        )
+        await websocket.send_json(
+            {
+                "kind": "status",
+                "state": "playing",
+                "start_sequence": start_sequence,
+                "end_sequence": end_sequence,
+                "speed": speed,
+            }
+        )
+
+        async def send_recorded_frame(recorded) -> None:
+            frame = recorded.envelope
+            provider_frame = ProviderFrame(
+                version=frame.version,
+                channel=frame.channel,
+                connection_id=frame.connection_id,
+                sequence=frame.sequence,
+                received_at=frame.received_at,
+                encoding=frame.encoding,
+                body=frame.body,
+            )
+            events = await projector.accept_frame(recorded.stream_sequence, provider_frame)
+            for event in events:
+                await websocket.send_json(jsonable_encoder(asdict(event)))
+
+        session = await store.replay(
+            start_sequence=start_sequence,
+            end_sequence=end_sequence,
+            speed=speed,
+            on_frame=send_recorded_frame,
+        )
+        await session.wait()
+        await websocket.send_json(
+            {
+                "kind": "status",
+                "state": "completed",
+                "stream_sequence": session.last_stream_sequence,
+            }
+        )
+    except WebSocketDisconnect:
+        pass
+    except (HTTPException, ProviderError, TypeError, ValueError) as error:
+        detail = error.detail if isinstance(error, HTTPException) else str(error)
+        with suppress(Exception):
+            await websocket.send_json(
+                {"kind": "status", "state": "unavailable", "error": detail[:240]}
+            )
+    finally:
+        if session is not None:
+            await session.cancel()
+        if projector is not None:
+            await projector.close()
 
 
 @app.websocket("/api/stream/quotes/{code}")
