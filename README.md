@@ -19,6 +19,7 @@
 - 金十官方 MCP 适配代码仅作归档保留；应用不读取其配置、不注册来源、不初始化，也不用于实时、历史或校对；
 - 金十官网高速行情：直接接收金十官网公开结构化 WebSocket 的价格变化推送，无需 Token 或桌面客户端；
 - 金十桌面会话行情：使用本机金十客户端会话鉴权并解码 WebSocket 二进制报价，支持心跳、断线重连和源时间；截图与 OCR 已从生产代码中删除；
+- 黄金重要数据与事件事实库：统一保存计划/实际/有效期/发布时间与修订版本，事件显示和资金主导策略独立，并以冲击分、趋势分和证据覆盖率评估已发生事件；
 - 通用领域模型、能力端口和适配器边界，方便继续接入期货、股票、外汇、加密资产和其他供应商。
 
 ## 数据来源
@@ -95,4 +96,6 @@ corepack pnpm -C web build
 
 `XAUUSD` 和 `XAGUSD` 是现货黄金、现货白银；`AU8888` 和 `AG8888` 是加权指数观察值；`AU2610` 和 `AG2706` 才是明确月份合约。`BRN0Y` 是供应商发布的布伦特连续序列，不是交易所可下单合约；`USDIND`、`SHCOMP` 与 `IXIC` 都是指数观察值。
 
-总体设计见 [docs/architecture.md](docs/architecture.md)，冻结的 MCP 历史合同见 [docs/jin10-mcp.md](docs/jin10-mcp.md)。
+总体设计见 [docs/architecture.md](docs/architecture.md)，黄金事件契约与评分口径见
+[docs/gold-event-system.md](docs/gold-event-system.md)，冻结的 MCP 历史合同见
+[docs/jin10-mcp.md](docs/jin10-mcp.md)。

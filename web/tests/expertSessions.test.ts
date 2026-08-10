@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  EXPERT_GOLD_EVENTS_2026,
   projectExpertEventStrategies,
 } from "../src/expertEvents.ts";
 import {
@@ -11,8 +10,42 @@ import {
   dominantGoldSessionAt,
   EXPERT_HOLIDAY_CLOSURES_2026,
 } from "../src/expertSessions.ts";
+import type { ExpertMarketEvent } from "../src/expertTypes.ts";
 
 const epoch = (value: string) => Date.parse(value) / 1_000;
+const majorDataEvent: ExpertMarketEvent = {
+  id: "bls-cpi-2026-08",
+  time: epoch("2026-08-12T12:30:00Z"),
+  title: "美国 CPI",
+  shortLabel: "CPI",
+  eventTypeId: "us-cpi",
+  releaseClusterId: "us-data:2026-08-12T12:30:00+00:00",
+  family: "inflation",
+  baselineTier: "S+",
+  transmissionChannels: ["real-yields", "usd"],
+  directionRule: "按实际利率和美元重定价判断",
+  usDominanceTrigger: true,
+  source: "U.S. Bureau of Labor Statistics",
+  sourceUrl: "https://www.bls.gov/",
+  sourceTier: "official",
+  timing: "scheduled",
+  timePrecision: "instant",
+  scheduledAt: epoch("2026-08-12T12:30:00Z"),
+  releasedAt: null,
+  effectivePeriodStart: null,
+  effectivePeriodEnd: null,
+  sourcePublishedAt: epoch("2026-08-10T00:00:00Z"),
+  ingestedAt: epoch("2026-08-10T00:00:00Z"),
+  revisionVintage: "initial",
+  actual: null,
+  consensus: null,
+  previous: null,
+  revised: null,
+  flowDirection: "unknown",
+  flowAmount: null,
+  flowUnit: null,
+  note: null,
+};
 
 test("uses IANA daylight saving rules for Beijing capital-dominance boundaries", () => {
   assert.equal(dominantGoldSessionAt(epoch("2026-07-15T01:00:00Z")), "asia");
@@ -34,6 +67,7 @@ test("starts US dominance at 08:30 ET on major-data days and 09:30 ET otherwise"
     epoch("2026-08-13T00:00:00Z"),
     null,
     [],
+    [majorDataEvent],
   );
   const dataCore = dataDay.find((band) => band.kind === "us");
   assert.equal(dataCore?.start, epoch("2026-08-12T12:30:00Z"));
@@ -58,9 +92,9 @@ test("starts US dominance at 08:30 ET on major-data days and 09:30 ET otherwise"
 });
 
 test("hiding event markers never removes the event facts that drive US dominance", () => {
-  const projection = projectExpertEventStrategies(false, null, EXPERT_GOLD_EVENTS_2026);
+  const projection = projectExpertEventStrategies(false, null, [majorDataEvent]);
   assert.deepEqual(projection.displayMarkers, []);
-  assert.equal(projection.capitalDrivers, EXPERT_GOLD_EVENTS_2026);
+  assert.deepEqual(projection.capitalDrivers, [majorDataEvent]);
 
   const linkedBands = buildExpertSessionBandsForRange(
     epoch("2026-08-12T00:00:00Z"),

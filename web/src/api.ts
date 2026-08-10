@@ -10,7 +10,12 @@ import type {
   SourceDescriptor,
   SourceId,
 } from "./types";
-import type { ExpertAiAnalysis, ExpertAiStatus, ExpertOptionsStatus } from "./expertTypes";
+import type {
+  ExpertAiAnalysis,
+  ExpertAiStatus,
+  ExpertGoldEventCatalogSnapshot,
+  ExpertOptionsStatus,
+} from "./expertTypes";
 import { historyWindowBefore, type HistoryWindow } from "./historyLoading.ts";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -273,5 +278,6 @@ export const marketApi = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  expertGoldEvents: () => request<ExpertGoldEventCatalogSnapshot>("/api/expert/events/gold"),
   expertGoldOptions: () => request<ExpertOptionsStatus>("/api/expert/options/gold"),
 };

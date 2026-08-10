@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/chartLayers.test.ts tests/chartModel.test.ts tests/chartTimeAxis.test.ts tests/expertAnalysis.test.ts tests/expertDrawing.test.ts tests/expertOptions.test.ts tests/expertSessions.test.ts tests/historyLoading.test.ts tests/marketSession.test.ts tests/periodPreferences.test.ts tests/sourcePresentation.test.ts tests/watchlistStreams.test.ts",
+    "test": "node --test tests/chartLayers.test.ts tests/chartModel.test.ts tests/chartTimeAxis.test.ts tests/expertAnalysis.test.ts tests/expertDrawing.test.ts tests/expertEvents.test.ts tests/expertOptions.test.ts tests/expertSessions.test.ts tests/historyLoading.test.ts tests/marketSession.test.ts tests/periodPreferences.test.ts tests/sourcePresentation.test.ts tests/watchlistStreams.test.ts",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {

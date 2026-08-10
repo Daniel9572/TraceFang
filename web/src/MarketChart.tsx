@@ -2144,20 +2144,14 @@ export function MarketChart({
       .map((event): SeriesMarker<Time> | null => {
         const chartTime = nearestChartTimeForActual(event.time);
         if (chartTime === null) return null;
-        const text = event.category === "fomc"
-          ? "FOMC"
-          : event.category === "employment"
-            ? "非农"
-            : event.category === "inflation"
-              ? "CPI"
-              : event.category === "central-bank-gold" ? "央行金" : "事件";
+        const highPriority = event.baselineTier === "S+" || event.baselineTier === "S";
         return {
           time: chartTime as Time,
           position: "aboveBar",
-          color: event.importance === "high" ? "#d8a64b" : "#7896a7",
+          color: highPriority ? "#d8a64b" : "#7896a7",
           shape: "circle",
-          text,
-          size: event.importance === "high" ? 1.3 : 1,
+          text: `${event.shortLabel} · ${event.baselineTier}`,
+          size: highPriority ? 1.3 : 1,
         };
       })
       .filter((marker): marker is SeriesMarker<Time> => marker !== null)

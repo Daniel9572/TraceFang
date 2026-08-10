@@ -23,6 +23,7 @@ from market_analysis.application.expert_ai import (
     CodexExpertAnalysisService,
     ExpertStrategyId,
 )
+from market_analysis.application.gold_events import gold_event_catalog_snapshot
 from market_analysis.application.options import GoldOptionsService
 from market_analysis.application.period_bars import PERIOD_DEFINITIONS, PeriodBarService
 from market_analysis.application.quotes import (
@@ -1215,6 +1216,19 @@ async def expert_ai_status() -> dict[str, Any]:
 @app.get("/api/expert/options/gold")
 async def expert_gold_options() -> dict[str, Any]:
     return jsonable_encoder(asdict(await _gold_options().snapshot()))
+
+
+@app.get("/api/expert/events/gold")
+async def expert_gold_events(
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
+    as_of: Annotated[datetime | None, Query()] = None,
+) -> dict[str, Any]:
+    try:
+        snapshot = gold_event_catalog_snapshot(start=start, end=end, as_of=as_of)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return jsonable_encoder(asdict(snapshot))
 
 
 @app.post("/api/expert/ai/analyze")

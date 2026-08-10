@@ -1,5 +1,5 @@
 import { marketSessionAt } from "./marketSession.ts";
-import { EXPERT_GOLD_EVENTS_2026 } from "./expertEvents.ts";
+import { EMPTY_EXPERT_MARKET_EVENTS } from "./expertEvents.ts";
 import type {
   ExpertMarketEvent,
   ExpertSessionBand,
@@ -169,7 +169,7 @@ function majorUSDataEventForDate(
   marketEvents: readonly ExpertMarketEvent[],
 ): ExpertMarketEvent | null {
   return marketEvents.find((event) => {
-    if (event.importance !== "high" || event.timePrecision !== "instant") return false;
+    if (!event.usDominanceTrigger || event.timePrecision !== "instant") return false;
     const clock = zonedClock(event.time, "America/New_York");
     return Boolean(
       clock
@@ -276,7 +276,7 @@ function sessionIntervalsForRange(
 
 export function dominantGoldSessionAt(
   epochSeconds: number,
-  marketEvents: readonly ExpertMarketEvent[] = EXPERT_GOLD_EVENTS_2026,
+  marketEvents: readonly ExpertMarketEvent[] = EMPTY_EXPERT_MARKET_EVENTS,
 ): ExpertSessionKind | null {
   if (!Number.isFinite(epochSeconds)) return null;
   return sessionIntervalsForRange(epochSeconds - 1, epochSeconds + 1, marketEvents)
@@ -294,7 +294,7 @@ export function buildExpertSessionBandsForRange(
   end: number,
   marketSchedule?: MarketSchedule | null,
   closures: ExpertHolidayClosure[] = EXPERT_HOLIDAY_CLOSURES_2026,
-  marketEvents: readonly ExpertMarketEvent[] = EXPERT_GOLD_EVENTS_2026,
+  marketEvents: readonly ExpertMarketEvent[] = EMPTY_EXPERT_MARKET_EVENTS,
 ): ExpertSessionBand[] {
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
   const intervals = sessionIntervalsForRange(start, end, marketEvents);
@@ -352,7 +352,7 @@ export function buildExpertSessionBands(
   epochSeconds: readonly number[],
   marketSchedule?: MarketSchedule | null,
   closures: ExpertHolidayClosure[] = EXPERT_HOLIDAY_CLOSURES_2026,
-  marketEvents: readonly ExpertMarketEvent[] = EXPERT_GOLD_EVENTS_2026,
+  marketEvents: readonly ExpertMarketEvent[] = EMPTY_EXPERT_MARKET_EVENTS,
 ): ExpertSessionBand[] {
   let start = Number.POSITIVE_INFINITY;
   let end = Number.NEGATIVE_INFINITY;

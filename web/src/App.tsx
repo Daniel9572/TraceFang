@@ -40,7 +40,7 @@ import {
   buildExpertIndicatorSeriesAt,
   EXPERT_INDICATOR_HISTORY_VERSION,
 } from "./expertAnalysis";
-import { EXPERT_GOLD_EVENTS_2026 } from "./expertEvents";
+import { expertMarketEventsFromSnapshot } from "./expertEvents";
 import { historyBatchMinutes } from "./historyLoading";
 import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
 import { ExpertModeWorkspace } from "./ExpertModeWorkspace";
@@ -48,6 +48,7 @@ import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
 import { SourcePicker, type SourceTestFeedback } from "./SourcePicker";
 import { startWatchlistQuoteStream, watchlistQuoteStreamTargets } from "./watchlistStreams";
+import type { ExpertMarketEvent } from "./expertTypes";
 import type {
   Candle,
   HoverCandle,
@@ -286,6 +287,8 @@ export default function App() {
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [periodId, setPeriodId] = useState<ChartPeriodId>("1m");
   const [expertMode, setExpertMode] = useState(false);
+  const [goldEvents, setGoldEvents] = useState<ExpertMarketEvent[] | null>(null);
+  const [goldEventsError, setGoldEventsError] = useState<string | null>(null);
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [candleError, setCandleError] = useState<string | null>(null);
@@ -312,6 +315,26 @@ export default function App() {
   const watchlistQuoteStreamsRef = useRef(
     new Map<string, { sourceId: SourceId; stop: () => void }>(),
   );
+
+  useEffect(() => {
+    let disposed = false;
+    void marketApi.expertGoldEvents()
+      .then((snapshot) => {
+        if (disposed) return;
+        startTransition(() => {
+          setGoldEvents(expertMarketEventsFromSnapshot(snapshot));
+          setGoldEventsError(null);
+        });
+      })
+      .catch((requestError) => {
+        if (disposed) return;
+        setGoldEvents([]);
+        setGoldEventsError(
+          requestError instanceof Error ? requestError.message : String(requestError),
+        );
+      });
+    return () => { disposed = true; };
+  }, []);
 
   const selectedInstrument =
     catalog.find((instrument) => instrument.provider_code === selectedCode)
@@ -1112,8 +1135,8 @@ export default function App() {
     [candles, sharedIndicatorHistoryKey],
   );
   const sharedEventMarkers = useMemo(
-    () => selectedCode === "XAUUSD" ? EXPERT_GOLD_EVENTS_2026 : [],
-    [selectedCode],
+    () => selectedCode === "XAUUSD" ? goldEvents ?? [] : [],
+    [goldEvents, selectedCode],
   );
   const normalChartLayers = useMemo(
     () => buildChartLayers(layerWorkspace, {
@@ -1162,6 +1185,9 @@ export default function App() {
         sourceLabel={selectedSourceDescriptor?.display_name ?? sourceLabels[selectedSource] ?? selectedSource}
         sourceState={quoteStreamState}
         liveIndicatorSeries={sharedIndicatorSeries}
+        marketEvents={goldEvents ?? []}
+        marketEventsLoading={goldEvents === null}
+        marketEventsError={goldEventsError}
         layerWorkspace={layerWorkspace}
         onLayerWorkspaceChange={updateLayerWorkspace}
         historyLoading={chartHistoryLoading}

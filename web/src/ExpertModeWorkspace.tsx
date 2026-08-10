@@ -32,10 +32,10 @@ import {
   EXPERT_STRATEGIES,
 } from "./expertAnalysis";
 import {
-  EXPERT_GOLD_EVENTS_2026,
   IMPORTANT_EVENT_DISPLAY_STRATEGY,
   projectExpertEventStrategies,
 } from "./expertEvents";
+import { buildExpertEventAssessments } from "./expertEventScoring";
 import { ChartLayerManager } from "./ChartLayerManager";
 import {
   candleReplayCutoff,
@@ -77,7 +77,9 @@ import type {
   ExpertAiStatus,
   ExpertDrawingSnapMode,
   ExpertDrawingTool,
+  ExpertEventAssessment,
   ExpertIndicatorSeriesView,
+  ExpertMarketEvent,
   ExpertOptionContract,
   ExpertOptionsStatus,
   ExpertStrategyId,
@@ -109,6 +111,9 @@ interface ExpertModeWorkspaceProps {
   sourceLabel: string;
   sourceState: "connecting" | "live" | "waiting" | "unavailable";
   liveIndicatorSeries: ExpertIndicatorSeriesView;
+  marketEvents: readonly ExpertMarketEvent[];
+  marketEventsLoading: boolean;
+  marketEventsError: string | null;
   layerWorkspace: ChartLayerWorkspace;
   onLayerWorkspaceChange: (
     update: (current: ChartLayerWorkspace) => ChartLayerWorkspace,
@@ -179,6 +184,13 @@ function regimeLabel(regime: string): string {
   return "等待样本";
 }
 
+function eventDirectionLabel(direction: ExpertEventAssessment["observedDirection"]): string {
+  if (direction === "bullish") return "金价向上";
+  if (direction === "bearish") return "金价向下";
+  if (direction === "neutral") return "反应有限";
+  return "等待反应";
+}
+
 function optionMarketStateLabel(state: string): string {
   if (state === "provider_required") return "待配置行情源";
   if (state === "provider_and_entitlement_required") return "待配置行情源与授权";
@@ -238,6 +250,9 @@ export function ExpertModeWorkspace({
   sourceLabel,
   sourceState,
   liveIndicatorSeries,
+  marketEvents,
+  marketEventsLoading,
+  marketEventsError,
   layerWorkspace,
   onLayerWorkspaceChange,
   historyLoading,
@@ -503,8 +518,9 @@ export function ExpertModeWorkspace({
     () => projectExpertEventStrategies(
       importantEventsEnabled,
       replayEnabled ? replayBoundary : null,
+      marketEvents,
     ),
-    [importantEventsEnabled, replayBoundary, replayEnabled],
+    [importantEventsEnabled, marketEvents, replayBoundary, replayEnabled],
   );
   const capitalDriverEvents = eventStrategyProjection.capitalDrivers;
   const sessionBands = useMemo(
@@ -631,8 +647,38 @@ export function ExpertModeWorkspace({
   const latestEvent = !importantEventsEnabled || eventReferenceTime === null
     ? undefined
     : replayEnabled
-      ? [...EXPERT_GOLD_EVENTS_2026].reverse().find((event) => event.time <= eventReferenceTime)
-      : EXPERT_GOLD_EVENTS_2026.find((event) => event.time >= eventReferenceTime);
+      ? [...marketEvents].reverse().find((event) => (
+        event.time <= eventReferenceTime && event.sourcePublishedAt <= eventReferenceTime
+      ))
+      : marketEvents.find((event) => event.time >= eventReferenceTime);
+  const eventAssessmentTime = replayEnabled
+    ? replayBoundary
+    : observedAt === null ? null : Date.parse(observedAt) / 1_000;
+  const eventAssessments = useMemo(
+    () => importantEventsEnabled
+      ? buildExpertEventAssessments(
+        candles,
+        latestEvent ? [latestEvent] : [],
+        eventAssessmentTime,
+        replayEnabled ? replayIndex : candles.length - 1,
+      )
+      : [],
+    [
+      candles,
+      eventAssessmentTime,
+      importantEventsEnabled,
+      latestEvent,
+      replayEnabled,
+      replayIndex,
+    ],
+  );
+  const eventAssessmentById = useMemo(
+    () => new Map(eventAssessments.map((assessment) => [assessment.eventId, assessment] as const)),
+    [eventAssessments],
+  );
+  const latestEventAssessment = latestEvent
+    ? eventAssessmentById.get(latestEvent.id)
+    : undefined;
   const visibleEvents = eventStrategyProjection.displayMarkers;
   const chartLayers = useMemo(
     () => buildChartLayers(layerWorkspace, {
@@ -877,7 +923,9 @@ export function ExpertModeWorkspace({
               type="button"
               className={importantEventsEnabled ? "is-enabled" : ""}
               aria-pressed={importantEventsEnabled}
-              title="视觉策略：控制图上事件节点和侧栏事件提示；关闭只隐藏显示，不改变资金主导的接管时间判断"
+              title={marketEventsError
+                ? `事件事实库不可用：${marketEventsError}`
+                : "视觉策略：控制图上事件节点和侧栏事件提示；关闭只隐藏显示，不改变资金主导的接管时间判断"}
               onClick={toggleImportantEventStrategy}
             >
               <span className="strategy-quality is-event" />
@@ -886,8 +934,14 @@ export function ExpertModeWorkspace({
                 <small>{IMPORTANT_EVENT_DISPLAY_STRATEGY.description}</small>
               </div>
               <span className="strategy-provenance">
-                <small>数据 · {IMPORTANT_EVENT_DISPLAY_STRATEGY.dataSource}</small>
-                <em>{capitalDominanceEnabled && importantEventsEnabled ? "联动中" : "视觉策略"}</em>
+                <small>{marketEventsLoading
+                  ? "事实库 · 加载中"
+                  : marketEventsError
+                    ? "事实库 · 不可用"
+                    : `事实库 · ${marketEvents.length} 条`}</small>
+                <em>{marketEventsError
+                  ? "无数据"
+                  : capitalDominanceEnabled && importantEventsEnabled ? "独立联动" : "视觉策略"}</em>
               </span>
             </button>
             <button
@@ -989,11 +1043,27 @@ export function ExpertModeWorkspace({
                 {analysis.signals.length === 0 ? <div className="expert-empty">等待足够行情样本</div> : null}
               </div>
               {latestEvent ? (
-                <div className="expert-next-event">
+                <div
+                  className="expert-next-event"
+                  data-tier={latestEvent.baselineTier}
+                  title={latestEvent.directionRule}
+                >
                   <CalendarClock size={15} />
-                  <div><strong>{latestEvent.title}</strong><span>{latestEvent.timePrecision === "date"
-                    ? formatDateInTimeZone(latestEvent.time, displayTimeZone)
-                    : formatDateTimeInTimeZone(latestEvent.time, displayTimeZone)} · {latestEvent.source}</span></div>
+                  <div>
+                    <strong><b>{latestEvent.baselineTier}</b>{latestEvent.title}</strong>
+                    <span>{latestEvent.timePrecision === "date"
+                      ? formatDateInTimeZone(latestEvent.time, displayTimeZone)
+                      : formatDateTimeInTimeZone(latestEvent.time, displayTimeZone)} · {latestEvent.source}</span>
+                    {latestEventAssessment ? (
+                      <small className="expert-event-score">
+                        冲击 {latestEventAssessment.shockScore ?? "—"}/{latestEventAssessment.shockCoverage}%
+                        <i />趋势 {latestEventAssessment.regimeScore ?? "—"}/{latestEventAssessment.regimeCoverage}%
+                        <i />{eventDirectionLabel(latestEventAssessment.observedDirection)}
+                      </small>
+                    ) : (
+                      <small className="expert-event-score">公布后按已到达证据评分</small>
+                    )}
+                  </div>
                 </div>
               ) : null}
             </>

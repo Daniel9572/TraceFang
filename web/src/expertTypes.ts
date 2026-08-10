@@ -17,16 +17,143 @@ export interface ExpertSessionBand {
   eventId: string | null;
 }
 
+export type ExpertEventTier = "S+" | "S" | "A" | "B";
+
+export type ExpertEventFamily =
+  | "monetary-policy"
+  | "inflation"
+  | "employment"
+  | "growth"
+  | "geopolitical-risk"
+  | "financial-risk"
+  | "official-flow"
+  | "investment-flow"
+  | "physical-demand"
+  | "market-structure"
+  | "supply";
+
+export type ExpertEventTransmissionChannel =
+  | "real-yields"
+  | "usd"
+  | "risk"
+  | "liquidity"
+  | "central-bank"
+  | "etf"
+  | "positioning"
+  | "physical-demand"
+  | "supply";
+
 export interface ExpertMarketEvent {
   id: string;
   time: number;
   title: string;
-  category: "fomc" | "employment" | "inflation" | "central-bank-gold" | "custom";
-  importance: "high" | "medium";
+  shortLabel: string;
+  eventTypeId: string;
+  releaseClusterId: string | null;
+  family: ExpertEventFamily;
+  baselineTier: ExpertEventTier;
+  transmissionChannels: readonly ExpertEventTransmissionChannel[];
+  directionRule: string;
+  usDominanceTrigger: boolean;
   source: string;
   sourceUrl: string | null;
+  sourceTier: "official" | "institutional-research" | "manual-verified";
   timing: "scheduled" | "released" | "manual";
-  timePrecision?: "instant" | "date";
+  timePrecision: "instant" | "date";
+  scheduledAt: number | null;
+  releasedAt: number | null;
+  effectivePeriodStart: number | null;
+  effectivePeriodEnd: number | null;
+  sourcePublishedAt: number;
+  ingestedAt: number;
+  revisionVintage: string;
+  actual: string | null;
+  consensus: string | null;
+  previous: string | null;
+  revised: string | null;
+  flowDirection: "inflow" | "outflow" | "mixed" | "unknown";
+  flowAmount: number | null;
+  flowUnit: string | null;
+  note: string | null;
+}
+
+export interface ExpertGoldEventTypeDto {
+  event_type_id: string;
+  name: string;
+  family: ExpertEventFamily;
+  baseline_tier: ExpertEventTier;
+  cadence: string;
+  transmission_channels: ExpertEventTransmissionChannel[];
+  direction_rule: string;
+  official_source_urls: string[];
+  us_dominance_trigger: boolean;
+}
+
+export interface ExpertGoldEventFactDto {
+  event_id: string;
+  event_type_id: string;
+  title: string;
+  short_label: string;
+  country: string;
+  release_cluster_id: string | null;
+  marker_at: string;
+  scheduled_at: string | null;
+  released_at: string | null;
+  effective_period_start: string | null;
+  effective_period_end: string | null;
+  source_published_at: string;
+  ingested_at: string;
+  revision_vintage: string;
+  actual: string | null;
+  consensus: string | null;
+  previous: string | null;
+  revised: string | null;
+  source: string;
+  source_url: string;
+  source_tier: "official" | "institutional-research" | "manual-verified";
+  time_precision: "instant" | "date";
+  family: ExpertEventFamily;
+  baseline_tier: ExpertEventTier;
+  transmission_channels: ExpertEventTransmissionChannel[];
+  direction_rule: string;
+  us_dominance_trigger: boolean;
+  flow_direction: "inflow" | "outflow" | "mixed" | "unknown";
+  flow_amount: number | null;
+  flow_unit: string | null;
+  note: string | null;
+}
+
+export interface ExpertGoldEventCatalogSnapshot {
+  contract_version: "gold-events-v1";
+  generated_at: string;
+  event_types: ExpertGoldEventTypeDto[];
+  facts: ExpertGoldEventFactDto[];
+  score_methodology: {
+    shock: { label: string; weights: Record<string, number>; windows_seconds: number[]; rule: string };
+    regime: { label: string; weights: Record<string, number>; windows_seconds: number[]; rule: string };
+    tiers: Record<ExpertEventTier, [number, number]>;
+  };
+  source_precedence: string[];
+  limitations: string[];
+}
+
+export interface ExpertEventWindowReaction {
+  windowSeconds: number;
+  returnPercent: number;
+  robustZ: number | null;
+}
+
+export interface ExpertEventAssessment {
+  eventId: string;
+  evaluatedAt: number;
+  shockScore: number | null;
+  shockCoverage: number;
+  regimeScore: number | null;
+  regimeCoverage: number;
+  observedDirection: "bullish" | "bearish" | "neutral" | "unavailable";
+  confidence: "high" | "medium" | "low" | "unavailable";
+  reactions: ExpertEventWindowReaction[];
+  evidence: string[];
 }
 
 export type ExpertDrawingTool = "trend" | "horizontal";

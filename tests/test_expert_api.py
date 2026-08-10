@@ -250,6 +250,7 @@ class ExpertApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(methods_by_path["/api/expert/ai/status"], {"GET"})
         self.assertEqual(methods_by_path["/api/expert/ai/analyze"], {"POST"})
         self.assertEqual(methods_by_path["/api/expert/options/gold"], {"GET"})
+        self.assertEqual(methods_by_path["/api/expert/events/gold"], {"GET"})
 
 
 if __name__ == "__main__":

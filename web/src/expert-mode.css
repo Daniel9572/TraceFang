@@ -344,7 +344,11 @@
 .expert-next-event { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 7px; margin-top: 9px; padding: 9px; border: 1px solid rgba(213, 168, 75, .22); border-radius: 6px; color: var(--expert-gold); background: var(--expert-gold-soft); }
 .expert-next-event > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .expert-next-event strong { color: #e1c37e; font-size: 9px; }
+.expert-next-event strong b { display: inline-flex; margin-right: 5px; padding: 1px 4px; border: 1px solid currentColor; border-radius: 3px; font-size: 7px; line-height: 1; }
 .expert-next-event span { overflow: hidden; color: #a69061; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.expert-next-event .expert-event-score { color: #8da0aa; font-size: 7px; line-height: 1.4; }
+.expert-event-score i { display: inline-block; width: 1px; height: 7px; margin: 0 5px; background: rgba(141, 160, 170, .34); vertical-align: -1px; }
+.expert-next-event[data-tier="A"], .expert-next-event[data-tier="B"] { border-color: rgba(120, 150, 167, .25); color: #7896a7; background: rgba(120, 150, 167, .08); }
 
 .expert-options-panel,
 .expert-ai-panel { display: flex; flex-direction: column; gap: 10px; }
