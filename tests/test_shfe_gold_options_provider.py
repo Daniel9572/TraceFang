@@ -4,6 +4,7 @@ import ssl
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import patch
 
 import httpx
 
@@ -172,6 +173,46 @@ class ShfeGoldOptionsProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.delta_as_of.isoformat(), "2026-08-07")
         put = next(item for item in first.quotes if item.contract_id == "au2609P940")
         self.assertEqual(put.delta, Decimal("-1"))
+
+    async def test_rebuilds_owned_http_client_after_transport_failure(self) -> None:
+        failed_request_count = 0
+
+        async def failed_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal failed_request_count
+            failed_request_count += 1
+            raise httpx.ConnectError("stale proxy route", request=request)
+
+        failed_http = httpx.AsyncClient(
+            base_url="https://www.shfe.com.cn",
+            transport=httpx.MockTransport(failed_handler),
+        )
+        provider: ShfeGoldOptionsProvider | None = None
+        factory_path = (
+            "market_analysis.infrastructure.providers.shfe_options.provider.httpx.AsyncClient"
+        )
+        try:
+            with (
+                patch(factory_path, side_effect=(failed_http, self.http)) as factory,
+                self.assertLogs(
+                    "market_analysis.infrastructure.providers.shfe_options.provider",
+                    level="WARNING",
+                ) as logs,
+            ):
+                provider = ShfeGoldOptionsProvider(
+                    ShfeGoldOptionsSettings(snapshot_cache_seconds=30)
+                )
+                snapshot = await provider.get_chain()
+
+            self.assertEqual(len(snapshot.quotes), 4)
+            self.assertEqual(failed_request_count, 1)
+            self.assertEqual(factory.call_count, 2)
+            self.assertTrue(failed_http.is_closed)
+            self.assertTrue(any("stale proxy route" in item for item in logs.output))
+        finally:
+            if provider is not None:
+                await provider.close()
+            elif not failed_http.is_closed:
+                await failed_http.aclose()
 
     async def test_service_derives_positioning_without_fabricating_gex(self) -> None:
         service = GoldOptionsService((self.provider,))

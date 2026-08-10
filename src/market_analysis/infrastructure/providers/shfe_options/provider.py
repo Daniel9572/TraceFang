@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import ssl
 from datetime import UTC, datetime
 from time import monotonic
@@ -26,6 +27,8 @@ _OPTION_DELAY_PATH = "/data/tradedata/option/delaymarket/delaymarket_auQ.dat"
 _FUTURE_DELAY_PATH = "/data/tradedata/future/delaymarket/delaymarket_au.dat"
 _CONTRACT_PATH = "/data/busiparamdata/option/ContractBaseInfo{date}.dat"
 _DAILY_PATH = "/data/tradedata/option/dailydata/kx{date}.dat"
+
+_logger = logging.getLogger(__name__)
 
 
 def create_shfe_tls_context() -> ssl.SSLContext:
@@ -60,9 +63,16 @@ class ShfeGoldOptionsProvider:
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.settings = settings
-        self._http = http_client or httpx.AsyncClient(
-            base_url=settings.base_url,
-            timeout=settings.request_timeout_seconds,
+        self._owns_http_client = http_client is None
+        self._http = http_client or self._create_http_client()
+        self._http_reset_lock = asyncio.Lock()
+        self._cache: tuple[float, OptionChainSnapshot] | None = None
+        self._lock = asyncio.Lock()
+
+    def _create_http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self.settings.base_url,
+            timeout=self.settings.request_timeout_seconds,
             verify=create_shfe_tls_context(),
             follow_redirects=True,
             headers={
@@ -77,9 +87,6 @@ class ShfeGoldOptionsProvider:
                 ),
             },
         )
-        self._owns_http_client = http_client is None
-        self._cache: tuple[float, OptionChainSnapshot] | None = None
-        self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> ShfeGoldOptionsProvider:
         return self
@@ -90,7 +97,8 @@ class ShfeGoldOptionsProvider:
     async def close(self) -> None:
         self._cache = None
         if self._owns_http_client:
-            await self._http.aclose()
+            async with self._http_reset_lock:
+                await self._http.aclose()
 
     async def get_chain(self) -> OptionChainSnapshot:
         cached = self._cached()
@@ -145,10 +153,17 @@ class ShfeGoldOptionsProvider:
         return value
 
     async def _get_json(self, path: str) -> dict[str, Any]:
+        client = self._http
         try:
-            response = await self._http.get(path)
+            response = await client.get(path)
         except (httpx.TimeoutException, httpx.NetworkError) as error:
-            raise ProviderUnavailableError("上期所官方期权数据连接不可用") from error
+            if not await self._recover_http_client(client, path, error):
+                raise ProviderUnavailableError("上期所官方期权数据连接不可用") from error
+            response = await self._retry_get(path)
+        except RuntimeError as error:
+            if not client.is_closed or not await self._recover_http_client(client, path, error):
+                raise
+            response = await self._retry_get(path)
         if response.status_code == 429:
             raise ProviderRateLimitError("上期所官方期权数据请求过于频繁")
         if response.status_code >= 500:
@@ -166,6 +181,53 @@ class ShfeGoldOptionsProvider:
         if not isinstance(payload, dict):
             raise ProviderDataError("上期所官方期权数据根节点必须是对象")
         return payload
+
+    async def _retry_get(self, path: str) -> httpx.Response:
+        client = self._http
+        try:
+            return await client.get(path)
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            _logger.warning(
+                "SHFE options request still failed after rebuilding the HTTP client: %s",
+                path,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            raise ProviderUnavailableError("上期所官方期权数据连接不可用") from error
+        except RuntimeError as error:
+            if not client.is_closed:
+                raise
+            _logger.warning(
+                "SHFE options retry used a client that was concurrently closed: %s",
+                path,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            raise ProviderUnavailableError("上期所官方期权数据连接不可用") from error
+
+    async def _recover_http_client(
+        self,
+        failed_client: httpx.AsyncClient,
+        path: str,
+        error: Exception,
+    ) -> bool:
+        if not self._owns_http_client:
+            return False
+        async with self._http_reset_lock:
+            if self._http is not failed_client:
+                return True
+            _logger.warning(
+                "SHFE options transport failed; rebuilding the HTTP client and retrying: %s",
+                path,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            self._http = self._create_http_client()
+            try:
+                await failed_client.aclose()
+            except Exception:
+                _logger.warning(
+                    "Failed to close the stale SHFE options HTTP client",
+                    exc_info=True,
+                )
+        return True
 
     @staticmethod
     def _string_field(payload: dict[str, Any], field: str) -> str:
