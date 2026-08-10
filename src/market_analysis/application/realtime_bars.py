@@ -226,7 +226,7 @@ class RealtimeBarService:
         self._watermarks: dict[_SeriesKey, datetime] = {}
         self._latest_sample_observations: dict[_SampleKey, _SampleObservation] = {}
         self._backfills: dict[
-            tuple[str, Instrument, datetime, int],
+            tuple[str, Instrument, datetime, int, bool],
             asyncio.Task[BarBackfillResult],
         ] = {}
         self._backfill_locks: dict[tuple[str, Instrument], asyncio.Lock] = {}
@@ -798,12 +798,18 @@ class RealtimeBarService:
         source_id: str,
         start: datetime,
         count: int,
+        revalidate: bool = False,
     ) -> BarBackfillResult:
-        """Coalesces one same-source fetch and runs history through the same reducer."""
+        """Coalesces one same-source fetch and runs history through the same reducer.
+
+        ``revalidate`` is reserved for a concrete, observed in-session gap. It bypasses
+        the coarse completed-window cache without changing source identity or using a
+        fallback provider.
+        """
 
         self._validate_window(start, count)
         self._contract(source_id)
-        key = (source_id, instrument, start, count)
+        key = (source_id, instrument, start, count, revalidate)
         task = self._backfills.get(key)
         if task is None:
             task = asyncio.create_task(
@@ -812,6 +818,7 @@ class RealtimeBarService:
                     source_id=source_id,
                     start=start,
                     count=count,
+                    revalidate=revalidate,
                 ),
                 name=f"Bar-backfill:{source_id}:{instrument.symbol}",
             )
@@ -829,6 +836,7 @@ class RealtimeBarService:
         source_id: str,
         start: datetime,
         count: int,
+        revalidate: bool,
     ) -> BarBackfillResult:
         contract = self._contract(source_id)
         store = self._store
@@ -840,12 +848,16 @@ class RealtimeBarService:
         end = start + contract.interval * count
         lock = self._backfill_locks.setdefault((source_id, instrument), asyncio.Lock())
         async with lock:
-            missing = await store.candle_missing_ranges(
-                instrument,
-                realtime_source_id=source_id,
-                start=start,
-                end=end,
-                interval=contract.interval,
+            missing = (
+                ((start, end),)
+                if revalidate
+                else await store.candle_missing_ranges(
+                    instrument,
+                    realtime_source_id=source_id,
+                    start=start,
+                    end=end,
+                    interval=contract.interval,
+                )
             )
             if not missing:
                 return BarBackfillResult(source_id, "cached", start, end, 0)

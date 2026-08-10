@@ -63,7 +63,16 @@ import {
 } from "./chartTimeAxis";
 import { weakDrawingSnap } from "./expertDrawing";
 import type { ChartIndicatorLayer, ChartLayer } from "./chartLayers";
-import { prependedPointCount, shouldRequestOlderHistory } from "./historyLoading";
+import {
+  historyGapWindow,
+  isNearOlderHistoryEdge,
+  prependedPointCount,
+  resolveHistoryDemandOutcome,
+  shouldActivateOlderHistoryDemand,
+  shouldRequestOlderHistory,
+  type HistoryLoadOutcome,
+  type HistoryWindow,
+} from "./historyLoading";
 import type {
   ExpertDrawing,
   ExpertDrawingPoint,
@@ -100,7 +109,8 @@ interface MarketChartProps {
   marketPhase: MarketPhase;
   marketSchedule: MarketSchedule | null | undefined;
   historyLoading: boolean;
-  onRequestOlderHistory: () => void;
+  onRequestOlderHistory: () => Promise<HistoryLoadOutcome>;
+  onRequestHistoryGap: (window: HistoryWindow) => void;
   onHover: (value: HoverCandle | null) => void;
   appearance?: "default" | "expert";
   displayTimeZone?: string;
@@ -125,6 +135,7 @@ interface RenderableSeriesGap {
   nextIndex: number;
   time: Time;
   actualTime: number;
+  missingDurationSeconds: number;
 }
 
 function insertGapWhitespace<T extends { time: Time }>(
@@ -483,6 +494,7 @@ export function MarketChart({
   marketSchedule,
   historyLoading,
   onRequestOlderHistory,
+  onRequestHistoryGap,
   onHover,
   appearance = "default",
   displayTimeZone = "Asia/Shanghai",
@@ -589,6 +601,14 @@ export function MarketChart({
   const historyInteractionUntilRef = useRef(0);
   const historyLoadingRef = useRef(historyLoading);
   const requestOlderHistoryRef = useRef(onRequestOlderHistory);
+  const requestHistoryGapRef = useRef(onRequestHistoryGap);
+  const historyDemandActiveRef = useRef(false);
+  const historyRequestPendingRef = useRef(false);
+  const emptyHistoryAdvanceMinutesRef = useRef(0);
+  const evaluateHistoryDemandRef = useRef<((userInitiated?: boolean) => void) | null>(null);
+  const candleSeriesGapsRef = useRef<readonly RenderableSeriesGap[]>([]);
+  const dispatchedHistoryGapsRef = useRef(new Set<string>());
+  const historyGapDatasetKeyRef = useRef("");
   const tradingDayLayerRef = useRef<HTMLDivElement>(null);
   const expertOverlayLayerRef = useRef<HTMLDivElement>(null);
   const timelineLayoutRef = useRef<TimelineLayout>({ days: [] });
@@ -627,6 +647,7 @@ export function MarketChart({
   const drawingDraftRef = useRef<DrawingDraft | null>(null);
   historyLoadingRef.current = historyLoading;
   requestOlderHistoryRef.current = onRequestOlderHistory;
+  requestHistoryGapRef.current = onRequestHistoryGap;
   periodRef.current = period;
   timelineResolutionSecondsRef.current = timelineResolutionSeconds;
   displayTimeZoneRef.current = displayTimeZone;
@@ -650,6 +671,11 @@ export function MarketChart({
     latestCandleIdentity?.source.provider ?? "",
   ].join(":");
   const timelineMaterializationKey = `${period.mode}:${timelineDatasetKey}`;
+  const historyGapDatasetKey = `${period.id}:${timelineDatasetKey}`;
+  if (historyGapDatasetKeyRef.current !== historyGapDatasetKey) {
+    historyGapDatasetKeyRef.current = historyGapDatasetKey;
+    dispatchedHistoryGapsRef.current.clear();
+  }
   if (timelineMaterializationKeyRef.current !== timelineMaterializationKey) {
     timelineMaterializationKeyRef.current = timelineMaterializationKey;
     timelineMaterializedDayCountRef.current = INITIAL_TIMELINE_MATERIALIZED_DAYS;
@@ -721,9 +747,11 @@ export function MarketChart({
         nextIndex: gap.nextIndex,
         time: projectTimeForChinaAxis(gap.separatorTime) as Time,
         actualTime: gap.separatorTime,
+        missingDurationSeconds: gap.missingDurationSeconds,
       })),
     [candleGapLayout, candleResolutionSeconds, candleTimes],
   );
+  candleSeriesGapsRef.current = candleSeriesGaps;
   const candleWhitespaceGaps = useMemo(
     () => candleSeriesGaps.filter((gap) => gap.kind === "missing-trade"),
     [candleSeriesGaps],
@@ -888,6 +916,7 @@ export function MarketChart({
           nextIndex: gap.nextIndex,
           time: projectedTime as Time,
           actualTime: gap.separatorTime,
+          missingDurationSeconds: gap.missingDurationSeconds,
         }];
     }),
     [marketSchedule, projectedTimelineData, timelineLayout, timelineResolutionSeconds],
@@ -1574,6 +1603,74 @@ export function MarketChart({
     const markHistoryInteraction = () => {
       historyInteractionUntilRef.current = window.performance.now() + 800;
     };
+    const repairVisibleCandleGaps = (range: LogicalRange) => {
+      if (periodRef.current.mode === "timeline") return;
+      let whitespaceOffset = 0;
+      let requested = 0;
+      for (const gap of candleSeriesGapsRef.current) {
+        if (gap.kind !== "missing-trade") continue;
+        const logicalIndex = gap.nextIndex + whitespaceOffset;
+        whitespaceOffset += 1;
+        if (logicalIndex < range.from - 1 || logicalIndex > range.to + 1) continue;
+        const gapWindow = historyGapWindow(gap.actualTime, gap.missingDurationSeconds);
+        const gapKey = `${gapWindow.start}:${gapWindow.count}`;
+        if (dispatchedHistoryGapsRef.current.has(gapKey)) continue;
+        dispatchedHistoryGapsRef.current.add(gapKey);
+        requestHistoryGapRef.current(gapWindow);
+        requested += 1;
+        if (requested >= 4) break;
+      }
+    };
+    const runOlderHistoryRequest = () => {
+      if (historyRequestPendingRef.current || historyLoadingRef.current) return;
+      historyRequestPendingRef.current = true;
+      void Promise.resolve(requestOlderHistoryRef.current())
+        .then((outcome) => {
+          if (chartRef.current !== chart) return;
+          const resolution = resolveHistoryDemandOutcome(
+            emptyHistoryAdvanceMinutesRef.current,
+            outcome,
+          );
+          emptyHistoryAdvanceMinutesRef.current = resolution.emptyAdvanceMinutes;
+          historyDemandActiveRef.current = resolution.active;
+        })
+        .catch(() => {
+          if (chartRef.current === chart) historyDemandActiveRef.current = false;
+        })
+        .finally(() => {
+          if (chartRef.current === chart) historyRequestPendingRef.current = false;
+        });
+    };
+    const evaluateHistoryDemand = (userInitiated = false) => {
+      const range = chart.timeScale().getVisibleLogicalRange();
+      if (!range || returningRef.current || dataLengthRef.current === 0) return;
+      repairVisibleCandleGaps(range);
+      if (!isNearOlderHistoryEdge(range, dataLengthRef.current)) {
+        historyDemandActiveRef.current = false;
+        emptyHistoryAdvanceMinutesRef.current = 0;
+        return;
+      }
+      if (shouldActivateOlderHistoryDemand(range, dataLengthRef.current, userInitiated)) {
+        historyDemandActiveRef.current = true;
+      }
+      if (!historyDemandActiveRef.current) return;
+      if (
+        periodRef.current.mode === "timeline"
+        && timelineHasUnmaterializedHistoryRef.current
+      ) {
+        ensureTimelineMaterializedDays(timelineMaterializedDayCountRef.current + 1);
+        return;
+      }
+      if (shouldRequestOlderHistory(
+        range,
+        dataLengthRef.current,
+        historyLoadingRef.current || historyRequestPendingRef.current,
+        historyDemandActiveRef.current,
+      )) {
+        runOlderHistoryRequest();
+      }
+    };
+    evaluateHistoryDemandRef.current = evaluateHistoryDemand;
     const handleLogicalRange = (range: LogicalRange | null) => {
       scheduleLiveMarker();
       refreshTimelineDecorations();
@@ -1612,21 +1709,9 @@ export function MarketChart({
       }
       if (timelineViewportApplyingRef.current) return;
       updateFollowing(range.to >= latestLogicalIndexRef.current - 1.15);
-      if (shouldRequestOlderHistory(
-        range,
-        dataLengthRef.current,
-        historyLoadingRef.current,
+      evaluateHistoryDemand(
         window.performance.now() <= historyInteractionUntilRef.current,
-      )) {
-        if (
-          activePeriod.mode === "timeline"
-          && timelineHasUnmaterializedHistoryRef.current
-        ) {
-          ensureTimelineMaterializedDays(timelineMaterializedDayCountRef.current + 1);
-        } else {
-          requestOlderHistoryRef.current();
-        }
-      }
+      );
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleLogicalRange);
 
@@ -1684,12 +1769,12 @@ export function MarketChart({
         if (
           event.deltaY > 0
           && nextDaySpan > availableDaySpan
-          && !historyLoadingRef.current
         ) {
+          historyDemandActiveRef.current = true;
           if (timelineHasUnmaterializedHistoryRef.current) {
             ensureTimelineMaterializedDays(Math.ceil(nextDaySpan));
           } else {
-            requestOlderHistoryRef.current();
+            runOlderHistoryRequest();
           }
         }
         scheduleLiveMarker();
@@ -1773,6 +1858,10 @@ export function MarketChart({
       timelineViewportSpanRef.current = 1;
       timelineViewportEndKeyRef.current = null;
       timelineViewportManagedRef.current = true;
+      historyDemandActiveRef.current = false;
+      historyRequestPendingRef.current = false;
+      emptyHistoryAdvanceMinutesRef.current = 0;
+      evaluateHistoryDemandRef.current = null;
       rendererRef.current?.removeAttribute("data-timeline-visible-days");
       rendererRef.current?.removeAttribute("data-timeline-window-start");
       rendererRef.current?.removeAttribute("data-timeline-window-end");
@@ -1791,6 +1880,19 @@ export function MarketChart({
     schedulePaneMeasurement,
     scheduleHoverChange,
     updateFollowing,
+  ]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      evaluateHistoryDemandRef.current?.(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    candleSeriesGaps,
+    chartData.length,
+    historyLoading,
+    period.id,
+    timelineMaterializedDayCount,
   ]);
 
   useEffect(() => {

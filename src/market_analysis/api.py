@@ -1283,7 +1283,7 @@ async def chart_bars(
     code: str,
     period: str = Query(default="1m"),
     before: int | None = Query(default=None, description="Exclusive Unix-second cursor"),
-    page_size: int = Query(default=500, ge=1),
+    page_size: int = Query(default=500, ge=1, le=10_000),
 ) -> dict[str, Any]:
     if period not in PERIOD_DEFINITIONS:
         raise HTTPException(status_code=422, detail=f"unsupported chart period: {period}")
@@ -1322,6 +1322,10 @@ async def backfill_candles(
     code: str,
     count: int = Query(default=1_000, ge=1, le=10_000),
     time: int = Query(description="Inclusive range start as Unix seconds"),
+    revalidate: bool = Query(
+        default=False,
+        description="Bypass completed coverage only for one observed in-session gap",
+    ),
 ) -> dict[str, Any]:
     """Explicitly fills one missing range from the contract's bound realtime source."""
 
@@ -1338,6 +1342,7 @@ async def backfill_candles(
         source_id=source_id,
         start=start,
         count=count,
+        revalidate=revalidate,
     )
     return asdict(result)
 
@@ -1346,7 +1351,7 @@ async def backfill_candles(
 async def timeline_samples(
     code: str,
     cursor: int | None = Query(default=None, ge=1),
-    page_size: int = Query(default=20_000, ge=1),
+    page_size: int = Query(default=20_000, ge=1, le=20_000),
 ) -> dict[str, Any]:
     """Reads canonical chart samples while raw quote evidence remains losslessly stored."""
 

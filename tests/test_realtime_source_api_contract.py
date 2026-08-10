@@ -32,12 +32,26 @@ class RealtimeSourceApiContractTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(inspect.signature(api.backfill_candles).parameters),
-            ("code", "count", "time"),
+            ("code", "count", "time", "revalidate"),
         )
         self.assertEqual(
             tuple(inspect.signature(api.quote_stream).parameters),
             ("websocket", "code"),
         )
+
+    def test_market_history_transport_pages_have_hard_upper_bounds(self) -> None:
+        schema = api.app.openapi()
+        bars = {
+            item["name"]: item["schema"]
+            for item in schema["paths"]["/api/bars/{code}"]["get"]["parameters"]
+        }
+        timeline = {
+            item["name"]: item["schema"]
+            for item in schema["paths"]["/api/timeline/{code}"]["get"]["parameters"]
+        }
+
+        self.assertEqual(bars["page_size"]["maximum"], 10_000)
+        self.assertEqual(timeline["page_size"]["maximum"], 20_000)
 
     def test_public_source_payload_hides_physical_topology(self) -> None:
         descriptor = SimpleNamespace(

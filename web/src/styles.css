@@ -598,6 +598,14 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
   animation: history-loader-enter 120ms ease-out both;
 }
 .history-loading-indicator svg { color: #6f8fba; animation: spin 780ms linear infinite; }
+.history-loading-indicator.is-error {
+  top: calc(52% + 34px);
+  max-width: min(620px, calc(100% - 40px));
+  color: #a45f35;
+  border-color: #e8c9b4;
+  white-space: normal;
+}
+.history-loading-indicator.is-error svg { flex: 0 0 auto; color: #d78a35; animation: none; }
 
 .spin { animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

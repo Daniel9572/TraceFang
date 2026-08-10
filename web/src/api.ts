@@ -141,8 +141,10 @@ async function backfillCandleWindow(
   code: string,
   sourceId: SourceId,
   window: HistoryWindow,
+  options: { revalidate?: boolean } = {},
 ): Promise<CandleHistoryBackfill> {
-  const cacheKey = `${sourceId}:${code}:${window.start}:${window.count}`;
+  const revalidate = options.revalidate === true;
+  const cacheKey = `${sourceId}:${code}:${window.start}:${window.count}:${revalidate ? "revalidate" : "missing"}`;
   const active = candleBackfillRequests.get(cacheKey);
   if (active) return active;
   const promise = (async () => {
@@ -157,6 +159,7 @@ async function backfillCandleWindow(
         Math.ceil((window.end - time) / 60),
       );
       const params = new URLSearchParams({ time: String(time), count: String(count) });
+      if (revalidate) params.set("revalidate", "true");
       const result = await request<CandleBackfillResult>(
         `/api/candles/${encodeURIComponent(code)}/backfill?${params.toString()}`,
         { method: "POST" },
@@ -199,6 +202,14 @@ function loadOlderCandleHistory(
     sourceId,
     historyWindowBefore(beforeEpochSeconds, countMinutes),
   );
+}
+
+function revalidateCandleHistory(
+  code: string,
+  sourceId: SourceId,
+  window: HistoryWindow,
+): Promise<CandleHistoryBackfill> {
+  return backfillCandleWindow(code, sourceId, window, { revalidate: true });
 }
 
 export interface ExpertAiAnalysisRequest {
@@ -250,6 +261,7 @@ export const marketApi = {
     });
   },
   olderCandleHistory: loadOlderCandleHistory,
+  revalidateCandleHistory,
   timelineSamplePage: (code: string, sourceId: SourceId, cursor?: number) => {
     const params = new URLSearchParams({ page_size: "20000" });
     if (cursor !== undefined) params.set("cursor", String(cursor));

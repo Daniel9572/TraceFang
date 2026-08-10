@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from time import time_ns
 from urllib.parse import quote as quote_url
 
 import httpx
@@ -55,6 +56,24 @@ _MAX_HISTORY_PAGES = 64
 _MAX_HISTORY_FILE_CACHE = 32
 QuoteListener = Callable[[QuoteSnapshot], None]
 CandleListener = Callable[[Candle], None]
+
+
+def _manifest_record_count(
+    item: Jin10KlineHistoryFile,
+    timestamps: Sequence[int],
+) -> int:
+    if item.start_timestamp is None or item.end_timestamp is None:
+        return len(timestamps)
+    return sum(
+        item.start_timestamp <= timestamp <= item.end_timestamp
+        for timestamp in timestamps
+    )
+
+
+def _manifest_version(item: Jin10KlineHistoryFile) -> str:
+    record_count = item.record_count if item.record_count is not None else "unknown"
+    end_timestamp = item.end_timestamp if item.end_timestamp is not None else "unknown"
+    return f"{record_count}-{end_timestamp}"
 
 
 class Jin10LocalProvider:
@@ -513,7 +532,14 @@ class Jin10LocalProvider:
     ) -> tuple[Candle, ...]:
         cache_key = (provider_code, time_type, item.file_name)
         cached = self._history_file_cache.get(cache_key)
-        if cached is not None:
+        if cached is not None and (
+            item.record_count is None
+            or _manifest_record_count(
+                item,
+                tuple(int(candle.open_time.timestamp()) for candle in cached),
+            )
+            == item.record_count
+        ):
             return cached
         url = "/".join(
             (
@@ -523,14 +549,38 @@ class Jin10LocalProvider:
                 quote_url(item.file_name, safe=""),
             )
         )
-        try:
-            response = await client.get(url)
+
+        async def request_wire_rows(*, refresh: int | None = None) -> tuple[Jin10WireCandle, ...]:
+            params: dict[str, str | int] = {
+                "manifest_version": _manifest_version(item),
+            }
+            if refresh is not None:
+                params["refresh"] = refresh
+            response = await client.get(url, params=params)
             response.raise_for_status()
+            return parse_kline_history_file(response.content)
+
+        try:
+            wire_rows = await request_wire_rows()
+            manifest_record_count = _manifest_record_count(
+                item,
+                tuple(row.timestamp for row in wire_rows),
+            )
+            if item.record_count is not None and manifest_record_count != item.record_count:
+                wire_rows = await request_wire_rows(refresh=time_ns())
+                manifest_record_count = _manifest_record_count(
+                    item,
+                    tuple(row.timestamp for row in wire_rows),
+                )
         except httpx.HTTPError as error:
             raise ProviderUnavailableError("下载金十同源历史 K 线文件失败") from error
-        wire_rows = parse_kline_history_file(response.content)
-        if item.record_count is not None and len(wire_rows) != item.record_count:
-            raise ProviderDataError("Jin10 Kline history file row count does not match manifest")
+        if item.record_count is not None and manifest_record_count != item.record_count:
+            raise ProviderDataError(
+                "Jin10 Kline history file row count does not match manifest: "
+                f"file={item.file_name}, expected={item.record_count}, "
+                f"actual={manifest_record_count}, downloaded={len(wire_rows)}, "
+                f"start={item.start_timestamp}, end={item.end_timestamp}"
+            )
         rows = self._store_wire_candles(
             instrument,
             provider_code,

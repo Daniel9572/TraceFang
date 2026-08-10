@@ -88,6 +88,7 @@ import { formatDateInTimeZone, formatDateTimeInTimeZone } from "./chartTimeAxis"
 import { barDataPeriodId, chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
+import type { HistoryLoadOutcome, HistoryWindow } from "./historyLoading";
 import type { Candle, HoverCandle, MarketPhase, MarketSchedule, TimelineSample } from "./types";
 
 import "./expert-mode.css";
@@ -122,7 +123,8 @@ interface ExpertModeWorkspaceProps {
   loading: boolean;
   error: string | null;
   onPeriodChange: (period: ChartPeriodId) => void;
-  onRequestOlderHistory: () => void;
+  onRequestOlderHistory: () => Promise<HistoryLoadOutcome>;
+  onRequestHistoryGap: (window: HistoryWindow) => void;
   onExit: () => void;
 }
 
@@ -260,6 +262,7 @@ export function ExpertModeWorkspace({
   error,
   onPeriodChange,
   onRequestOlderHistory,
+  onRequestHistoryGap,
   onExit,
 }: ExpertModeWorkspaceProps) {
   const period = chartPeriodById(periodId);
@@ -874,6 +877,7 @@ export function ExpertModeWorkspace({
           marketSchedule={marketSchedule}
           historyLoading={historyLoading}
           onRequestOlderHistory={onRequestOlderHistory}
+          onRequestHistoryGap={onRequestHistoryGap}
           onHover={setHover}
           appearance="expert"
           displayTimeZone={displayTimeZone}

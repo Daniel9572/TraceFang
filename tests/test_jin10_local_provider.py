@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import gzip
+import struct
 import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import httpx
+
+from market_analysis.domain.errors import ProviderDataError
 from market_analysis.infrastructure.providers.jin10 import SPOT_GOLD
 from market_analysis.infrastructure.providers.jin10_local.protocol import (
     KLINE_HISTORY_PROTOCOL,
     KLINE_UPDATE_PROTOCOL,
     QUOTE_PUSH_PROTOCOL,
+    Jin10KlineHistoryFile,
     Jin10KlineHistoryManifest,
     Jin10KlineSnapshot,
     Jin10WireCandle,
@@ -50,6 +56,23 @@ class Jin10LocalProviderTests(unittest.TestCase):
 
 
 class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _history_payload(*timestamps: int) -> bytes:
+        return gzip.compress(
+            b"".join(
+                struct.pack(
+                    "<qqqqqq",
+                    timestamp,
+                    4_252_000_000,
+                    4_250_000_000,
+                    4_249_000_000,
+                    4_251_000_000,
+                    10,
+                )
+                for timestamp in timestamps
+            )
+        )
+
     @staticmethod
     def _wire_quote(last_micros: int, timestamp: datetime) -> Jin10WireQuote:
         return Jin10WireQuote(
@@ -181,6 +204,137 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
             time_type=1,
             boundary_timestamp=boundary,
         )
+
+    async def test_history_file_accepts_append_only_rows_beyond_manifest_end(self) -> None:
+        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        start = 1_786_027_380
+        item = Jin10KlineHistoryFile(
+            "mutable-history-file",
+            record_count=2,
+            start_timestamp=start,
+            end_timestamp=start + 60,
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=self._history_payload(start, start + 60, start + 120),
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            rows = await provider._download_history_file(
+                client,
+                SPOT_GOLD,
+                "XAUUSD.GOODS",
+                1,
+                item,
+            )
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(requests[0].url.params["manifest_version"], f"2-{start + 60}")
+
+    async def test_history_file_refreshes_a_cached_snapshot_behind_manifest(self) -> None:
+        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        start = 1_786_027_380
+        item = Jin10KlineHistoryFile(
+            "mutable-history-file",
+            record_count=2,
+            start_timestamp=start,
+            end_timestamp=start + 60,
+        )
+        cache_key = ("XAUUSD.GOODS", 1, item.file_name)
+        provider._history_file_cache[cache_key] = provider._store_wire_candles(
+            SPOT_GOLD,
+            "XAUUSD.GOODS",
+            (
+                Jin10WireCandle(
+                    timestamp=start,
+                    high_micros=4_252_000_000,
+                    open_micros=4_250_000_000,
+                    low_micros=4_249_000_000,
+                    close_micros=4_251_000_000,
+                    volume=10,
+                ),
+            ),
+            protocol=KLINE_HISTORY_PROTOCOL,
+            time_type=1,
+            file_name=item.file_name,
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=self._history_payload(start, start + 60),
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            rows = await provider._download_history_file(
+                client,
+                SPOT_GOLD,
+                "XAUUSD.GOODS",
+                1,
+                item,
+            )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(rows), 2)
+
+    async def test_history_file_retries_one_stale_manifest_version_download(self) -> None:
+        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        start = 1_786_027_380
+        item = Jin10KlineHistoryFile(
+            "mutable-history-file",
+            record_count=2,
+            start_timestamp=start,
+            end_timestamp=start + 60,
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            timestamps = (start,) if len(requests) == 1 else (start, start + 60)
+            return httpx.Response(200, content=self._history_payload(*timestamps))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            rows = await provider._download_history_file(
+                client,
+                SPOT_GOLD,
+                "XAUUSD.GOODS",
+                1,
+                item,
+            )
+
+        self.assertEqual(len(requests), 2)
+        self.assertNotIn("refresh", requests[0].url.params)
+        self.assertIn("refresh", requests[1].url.params)
+        self.assertEqual(len(rows), 2)
+
+    async def test_history_file_rejects_rows_missing_inside_manifest_window(self) -> None:
+        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        start = 1_786_027_380
+        item = Jin10KlineHistoryFile(
+            "truncated-history-file",
+            record_count=2,
+            start_timestamp=start,
+            end_timestamp=start + 60,
+        )
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._history_payload(start))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with self.assertRaisesRegex(ProviderDataError, "expected=2, actual=1"):
+                await provider._download_history_file(
+                    client,
+                    SPOT_GOLD,
+                    "XAUUSD.GOODS",
+                    1,
+                    item,
+                )
 
     async def test_history_fetch_does_not_promote_live_native_bar_to_final_history(self) -> None:
         provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
