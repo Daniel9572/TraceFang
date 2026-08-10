@@ -37,6 +37,7 @@ const emptyIndicatorSeries: ExpertIndicatorSeriesView = {
   bars: [],
   macd: { value: [], signal: [], histogram: [] },
   kdj: { k: [], d: [], j: [] },
+  rsi: { value: [] },
 };
 
 test("scopes the shared layer workspace by instrument rather than display mode", () => {
@@ -54,7 +55,11 @@ test("creates an immutable price base with managed drawing and read-only indicat
   assert.equal(chartLayerCapabilities("indicator").canEditContent, false);
   assert.deepEqual(
     workspace.layers.filter((layer) => layer.kind === "indicator").map((layer) => layer.indicatorId),
-    ["kdj", "macd"],
+    ["rsi", "kdj", "macd"],
+  );
+  assert.deepEqual(
+    workspace.layers.filter((layer) => layer.kind === "indicator").map((layer) => layer.height),
+    [92, 92, 92],
   );
   assert.equal(
     workspace.layers.find((layer) => layer.kind === "annotation" && layer.annotationId === "sessions")?.visible,
@@ -68,11 +73,32 @@ test("creates an immutable price base with managed drawing and read-only indicat
     workspace.layers.find((layer) => layer.kind === "annotation" && layer.annotationId === "events")?.visible,
     false,
   );
+  assert.equal(
+    workspace.layers.find((layer) => layer.kind === "annotation" && layer.annotationId === "patterns")?.visible,
+    true,
+  );
 });
 
 test("migrates legacy drawings into the first drawing layer", () => {
   const workspace = readChartLayerWorkspace(null, JSON.stringify([drawing]));
   assert.deepEqual(activeDrawingLayer(workspace).drawings, [drawing]);
+});
+
+test("adds RSI without crowding an existing persisted indicator workspace", () => {
+  const serialized = JSON.stringify({
+    version: 1,
+    activeDrawingLayerId: "drawings",
+    layers: [
+      { id: CHART_PRICE_LAYER_ID, kind: "price", name: "价格", visible: true, order: 0 },
+      { id: "drawings", kind: "drawing", name: "A", visible: true, order: 10, drawings: [] },
+      { id: "layer:indicator:kdj", kind: "indicator", indicatorId: "kdj", placement: "pane", name: "KDJ", visible: true, order: 20, height: 132 },
+      { id: "layer:indicator:macd", kind: "indicator", indicatorId: "macd", placement: "pane", name: "MACD", visible: true, order: 30, height: 132 },
+    ],
+  });
+  const workspace = readChartLayerWorkspace(serialized);
+  const rsi = workspace.layers.find((layer) => layer.kind === "indicator" && layer.indicatorId === "rsi");
+  assert.equal(rsi?.visible, false);
+  assert.equal(rsi?.height, 92);
 });
 
 test("repairs a tampered hidden price layer and filters unknown layers", () => {
@@ -122,7 +148,7 @@ test("reorders only layers of the same movable kind", () => {
   workspace = moveChartLayer(workspace, "layer:indicator:macd", "layer:indicator:kdj");
   assert.deepEqual(
     workspace.layers.filter((layer) => layer.kind === "indicator").map((layer) => layer.indicatorId),
-    ["macd", "kdj"],
+    ["rsi", "macd", "kdj"],
   );
   const unchanged = moveChartLayer(workspace, "layer:indicator:macd", workspace.activeDrawingLayerId);
   assert.strictEqual(unchanged, workspace);
@@ -140,6 +166,10 @@ test("builds one ordered render registry without coupling indicator visibility t
     eventMarkers: [],
     priceLevels: [],
     valueZones: [],
+    trendLines: [],
+    pricePatterns: [],
+    marketStructureEvents: [],
+    overlaySeries: [],
   });
   const kdj = layers.find((layer) => layer.definition.id === "layer:indicator:kdj");
   assert.ok(kdj && kdj.definition.kind === "indicator");

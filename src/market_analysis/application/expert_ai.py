@@ -13,11 +13,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-EXPERT_AI_MAX_BARS = 160
+EXPERT_AI_MAX_BARS = 320
 ExpertStrategyId = Literal[
     "structure",
+    "ma-structure",
     "macd",
     "kdj",
+    "rsi",
+    "bollinger",
+    "nine-count",
+    "momentum-ensemble",
+    "auto-trend",
+    "multi-timeframe",
+    "smart-money",
+    "vix-gvz",
+    "volume-open-interest",
     "fair-value",
     "poc-proxy",
     "order-flow-proxy",
@@ -26,7 +36,18 @@ ExpertStrategyId = Literal[
 EXPERT_STRATEGY_CATALOG: dict[ExpertStrategyId, dict[str, str]] = {
     "structure": {
         "label": "价格结构",
-        "definition": "基于 Bar 的趋势斜率、摆动高低点、M 顶及支撑压力。",
+        "definition": (
+            "仅在右侧 Bar 到齐后确认摆动高低点, 机械识别 W 底、M 顶与 2B 假突破, "
+            "并给出颈线、支撑压力及失效条件。"
+        ),
+        "data_quality": "native",
+    },
+    "ma-structure": {
+        "label": "MA 均线结构与动态支撑",
+        "definition": (
+            "按当前周期独立计算 MA20/60/120/250, 识别多空排列、斜率共振及"
+            "经波动容差和收盘确认的动态支撑压力。"
+        ),
         "data_quality": "native",
     },
     "macd": {
@@ -38,6 +59,69 @@ EXPERT_STRATEGY_CATALOG: dict[ExpertStrategyId, dict[str, str]] = {
         "label": "KDJ 摆动",
         "definition": "基于高低收价格的 9 周期随机值与平滑动量。",
         "data_quality": "native",
+    },
+    "rsi": {
+        "label": "RSI 相对强弱",
+        "definition": (
+            "使用 Wilder 14 周期平滑计算 RSI; 仅把超买超卖区间的回穿视为恢复或回落信号, "
+            "原始极值本身不等同于反转。"
+        ),
+        "data_quality": "native",
+    },
+    "bollinger": {
+        "label": "布林带波动结构",
+        "definition": "使用 20 周期均值及两倍滚动标准差描述相对位置、带宽压缩与扩张。",
+        "data_quality": "native",
+    },
+    "nine-count": {
+        "label": "九转计数 (Setup 9)",
+        "definition": (
+            "仅实现收盘价相对四根前收盘价的连续 Setup 9 与简化 perfected 条件, "
+            "不声称完整 DeMARK Sequential。"
+        ),
+        "data_quality": "native",
+    },
+    "momentum-ensemble": {
+        "label": "多尺度趋势动量集成",
+        "definition": "对 20/60/120 周期因果回报做波动归一化和方向集成。",
+        "data_quality": "native",
+    },
+    "auto-trend": {
+        "label": "智能趋势线",
+        "definition": "使用已确认摆动锚点、ATR 接触容差与穿越惩罚生成可审计趋势线。",
+        "data_quality": "native",
+    },
+    "multi-timeframe": {
+        "label": "多周期趋势差异",
+        "definition": (
+            "在同一信息截止时间内仅使用 1h/1d/1w 已收盘 Bar, 以 5/20 SMA 与 20 Bar "
+            "回报描述周期方向及分歧; 分歧是交易上下文, 不是入场信号或预测概率。"
+        ),
+        "data_quality": "conditional",
+    },
+    "smart-money": {
+        "label": "流动性与结构代理 (SMC)",
+        "definition": (
+            "以已确认摆动点的流动性扫掠及后续 BOS/CHOCH 共振作为价格行为代理; "
+            "不能据此识别机构、订单身份或真实智能资金流。"
+        ),
+        "data_quality": "proxy",
+    },
+    "vix-gvz": {
+        "label": "VIX / GVZ 风险与黄金波动",
+        "definition": (
+            "仅使用 Cboe 官方日频历史值描述股票与黄金隐含波动环境; "
+            "波动率指数不提供金价方向。"
+        ),
+        "data_quality": "conditional",
+    },
+    "volume-open-interest": {
+        "label": "期货量价持仓结构",
+        "definition": (
+            "使用 SHFE 延迟的单边成交量与总持仓量作为市场参与度上下文; "
+            "总持仓不能辨别多空方向。"
+        ),
+        "data_quality": "conditional",
     },
     "fair-value": {
         "label": "公允价值缺口",
@@ -60,6 +144,7 @@ EXPERT_STRATEGY_CATALOG: dict[ExpertStrategyId, dict[str, str]] = {
         "data_quality": "conditional",
     },
 }
+EXPERT_STRATEGY_COUNT = len(EXPERT_STRATEGY_CATALOG)
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {

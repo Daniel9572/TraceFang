@@ -3,10 +3,14 @@ import type {
   ExpertIndicatorId,
   ExpertIndicatorSeriesView,
   ExpertMarketEvent,
+  ExpertOverlaySeries,
+  ExpertPricePattern,
   ExpertPriceLevel,
   ExpertSessionBand,
+  ExpertTrendLine,
   ExpertValueZone,
 } from "./expertTypes";
+import type { ExpertMarketStructureEvent } from "./expertSmartMoney.ts";
 
 export const EXPERT_LAYER_STORAGE_KEY = "market-expert-layers-v1";
 export const LEGACY_DRAWING_STORAGE_KEY = "market-expert-drawings-v1";
@@ -14,10 +18,12 @@ export const EXPERT_PRICE_LAYER_ID = "layer:price";
 export const EXPERT_SESSION_LAYER_ID = "layer:annotation:sessions";
 export const EXPERT_GAP_LAYER_ID = "layer:annotation:gaps";
 export const EXPERT_EVENT_LAYER_ID = "layer:annotation:events";
+export const EXPERT_TREND_LINE_LAYER_ID = "layer:annotation:trend-lines";
+export const EXPERT_PATTERN_LAYER_ID = "layer:annotation:patterns";
 export const DEFAULT_DRAWING_LAYER_ID = "layer:drawing:1";
 
 export type ExpertLayerKind = "price" | "drawing" | "indicator" | "annotation";
-export type ExpertAnnotationId = "sessions" | "gaps" | "events" | "analysis";
+export type ExpertAnnotationId = "sessions" | "gaps" | "events" | "analysis" | "trend-lines" | "patterns";
 
 interface ExpertLayerBase {
   id: string;
@@ -80,6 +86,10 @@ export type ExpertChartLayer =
       eventMarkers: readonly ExpertMarketEvent[];
       priceLevels: readonly ExpertPriceLevel[];
       valueZones: readonly ExpertValueZone[];
+      trendLines: readonly ExpertTrendLine[];
+      pricePatterns: readonly ExpertPricePattern[];
+      marketStructureEvents: readonly ExpertMarketStructureEvent[];
+      overlaySeries: readonly ExpertOverlaySeries[];
     };
 
 export interface ExpertChartLayerPayloads {
@@ -88,12 +98,20 @@ export interface ExpertChartLayerPayloads {
   eventMarkers: readonly ExpertMarketEvent[];
   priceLevels: readonly ExpertPriceLevel[];
   valueZones: readonly ExpertValueZone[];
+  trendLines: readonly ExpertTrendLine[];
+  pricePatterns: readonly ExpertPricePattern[];
+  marketStructureEvents: readonly ExpertMarketStructureEvent[];
+  overlaySeries: readonly ExpertOverlaySeries[];
 }
 
 const EMPTY_SESSION_BANDS: readonly ExpertSessionBand[] = [];
 const EMPTY_EVENT_MARKERS: readonly ExpertMarketEvent[] = [];
 const EMPTY_PRICE_LEVELS: readonly ExpertPriceLevel[] = [];
 const EMPTY_VALUE_ZONES: readonly ExpertValueZone[] = [];
+const EMPTY_TREND_LINES: readonly ExpertTrendLine[] = [];
+const EMPTY_PRICE_PATTERNS: readonly ExpertPricePattern[] = [];
+const EMPTY_MARKET_STRUCTURE_EVENTS: readonly ExpertMarketStructureEvent[] = [];
+const EMPTY_OVERLAY_SERIES: readonly ExpertOverlaySeries[] = [];
 const MIN_INDICATOR_HEIGHT = 92;
 const MAX_INDICATOR_HEIGHT = 280;
 
@@ -102,9 +120,12 @@ const ANNOTATION_NAMES: Record<ExpertAnnotationId, string> = {
   gaps: "跳空标注",
   events: "数据公布与重要事件",
   analysis: "策略标注",
+  "trend-lines": "智能趋势线",
+  patterns: "结构印记",
 };
 
 const INDICATOR_NAMES: Record<ExpertIndicatorId, string> = {
+  rsi: "RSI 14 强弱",
   kdj: "KDJ 摆动",
   macd: "MACD 动量",
 };
@@ -151,7 +172,7 @@ function canonicalPriceLayer(): ExpertPriceLayer {
   return {
     id: EXPERT_PRICE_LAYER_ID,
     kind: "price",
-    name: "现货黄金价格",
+    name: "行情价格主图",
     visible: true,
     order: 0,
   };
@@ -163,11 +184,17 @@ function canonicalAnnotationLayer(annotationId: ExpertAnnotationId, order: numbe
       ? EXPERT_SESSION_LAYER_ID
       : annotationId === "gaps"
         ? EXPERT_GAP_LAYER_ID
-        : annotationId === "events" ? EXPERT_EVENT_LAYER_ID : `layer:annotation:${annotationId}`,
+        : annotationId === "events"
+          ? EXPERT_EVENT_LAYER_ID
+          : annotationId === "trend-lines"
+            ? EXPERT_TREND_LINE_LAYER_ID
+            : annotationId === "patterns"
+              ? EXPERT_PATTERN_LAYER_ID
+            : `layer:annotation:${annotationId}`,
     kind: "annotation",
     annotationId,
     name: ANNOTATION_NAMES[annotationId],
-    visible: annotationId === "analysis",
+    visible: annotationId === "analysis" || annotationId === "trend-lines" || annotationId === "patterns",
     order,
   };
 }
@@ -184,7 +211,7 @@ function canonicalIndicatorLayer(
     visible: true,
     order,
     placement: "pane",
-    height: 132,
+    height: MIN_INDICATOR_HEIGHT,
   };
 }
 
@@ -208,18 +235,21 @@ export function createDefaultExpertLayerWorkspace(
       canonicalPriceLayer(),
       canonicalAnnotationLayer("sessions", 10),
       canonicalAnnotationLayer("gaps", 20),
-      canonicalAnnotationLayer("analysis", 30),
-      canonicalAnnotationLayer("events", 40),
+      canonicalAnnotationLayer("trend-lines", 30),
+      canonicalAnnotationLayer("patterns", 40),
+      canonicalAnnotationLayer("analysis", 50),
+      canonicalAnnotationLayer("events", 60),
       {
         id: DEFAULT_DRAWING_LAYER_ID,
         kind: "drawing",
         name: "画线图层 1",
         visible: true,
-        order: 50,
+        order: 70,
         drawings: [...legacyDrawings],
       },
-      canonicalIndicatorLayer("kdj", 60),
-      canonicalIndicatorLayer("macd", 70),
+      canonicalIndicatorLayer("rsi", 80),
+      canonicalIndicatorLayer("kdj", 90),
+      canonicalIndicatorLayer("macd", 100),
     ]),
   };
 }
@@ -238,7 +268,10 @@ function parseLayer(value: unknown, fallbackOrder: number): ExpertLayerDefinitio
       drawings: parseDrawings(value.drawings),
     };
   }
-  if (value.kind === "indicator" && (value.indicatorId === "kdj" || value.indicatorId === "macd")) {
+  if (
+    value.kind === "indicator"
+    && (value.indicatorId === "rsi" || value.indicatorId === "kdj" || value.indicatorId === "macd")
+  ) {
     return {
       id: value.id,
       kind: "indicator",
@@ -257,6 +290,8 @@ function parseLayer(value: unknown, fallbackOrder: number): ExpertLayerDefinitio
       || value.annotationId === "gaps"
       || value.annotationId === "events"
       || value.annotationId === "analysis"
+      || value.annotationId === "trend-lines"
+      || value.annotationId === "patterns"
     )
   ) {
     return {
@@ -317,15 +352,22 @@ export function readExpertLayerWorkspace(
       layers.filter((layer): layer is ExpertAnnotationLayer => layer.kind === "annotation")
         .map((layer) => layer.annotationId),
     );
-    for (const annotationId of ["sessions", "gaps", "analysis", "events"] as const) {
+    for (const annotationId of ["sessions", "gaps", "trend-lines", "patterns", "analysis", "events"] as const) {
       if (!annotations.has(annotationId)) layers.push(canonicalAnnotationLayer(annotationId, layers.length * 10));
     }
     const indicators = new Set(
       layers.filter((layer): layer is ExpertIndicatorLayer => layer.kind === "indicator")
         .map((layer) => layer.indicatorId),
     );
-    for (const indicatorId of ["kdj", "macd"] as const) {
-      if (!indicators.has(indicatorId)) layers.push(canonicalIndicatorLayer(indicatorId, layers.length * 10));
+    const migratingExistingIndicators = indicators.size > 0;
+    for (const indicatorId of ["rsi", "kdj", "macd"] as const) {
+      if (indicators.has(indicatorId)) continue;
+      const layer = canonicalIndicatorLayer(indicatorId, layers.length * 10);
+      layers.push(
+        indicatorId === "rsi" && migratingExistingIndicators
+          ? { ...layer, visible: false }
+          : layer,
+      );
     }
 
     const activeCandidate = typeof parsed.activeDrawingLayerId === "string"
@@ -562,6 +604,12 @@ export function buildExpertChartLayers(
       eventMarkers: definition.annotationId === "events" ? payloads.eventMarkers : EMPTY_EVENT_MARKERS,
       priceLevels: definition.annotationId === "analysis" ? payloads.priceLevels : EMPTY_PRICE_LEVELS,
       valueZones: definition.annotationId === "analysis" ? payloads.valueZones : EMPTY_VALUE_ZONES,
+      trendLines: definition.annotationId === "trend-lines" ? payloads.trendLines : EMPTY_TREND_LINES,
+      pricePatterns: definition.annotationId === "patterns" ? payloads.pricePatterns : EMPTY_PRICE_PATTERNS,
+      marketStructureEvents: definition.annotationId === "patterns"
+        ? payloads.marketStructureEvents
+        : EMPTY_MARKET_STRUCTURE_EVENTS,
+      overlaySeries: definition.annotationId === "analysis" ? payloads.overlaySeries : EMPTY_OVERLAY_SERIES,
     };
   });
 }

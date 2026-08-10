@@ -199,6 +199,99 @@ test("builds explainable indicators and price levels from real bars", () => {
   assert.ok(analysis.signals.every((signal) => signal.evidence.length > 0));
 });
 
+test("neutralizes opposite price patterns confirmed by the same completed Bar", () => {
+  const closes = [100, 101, 102, 104, 102, 100, 98, 100, 102, 100];
+  const candles = closes.map((close, index) => candle(index, close));
+  candles[3] = { ...candles[3], high: "104.8" };
+  candles[6] = { ...candles[6], low: "97.2" };
+  candles[9] = {
+    ...candles[9],
+    open: "100",
+    high: "105.4",
+    low: "96.6",
+    close: "100",
+  };
+  const analysis = buildExpertAnalysis(candles, ["structure"]);
+  const signal = analysis.signals.find((item) => item.strategyId === "structure");
+  assert.equal(signal?.title, "同柱结构方向冲突");
+  assert.equal(signal?.direction, "neutral");
+  assert.equal(signal?.confidence, 0);
+});
+
+test("does not promote partial MA or one-horizon momentum history into directional evidence", () => {
+  const partial = Array.from({ length: 45 }, (_, index) => candle(index, 2400 + index * 0.4));
+  const partialAnalysis = buildExpertAnalysis(partial, ["ma-structure", "momentum-ensemble"]);
+  const maSignal = partialAnalysis.signals.find((signal) => signal.strategyId === "ma-structure");
+  const momentumSignal = partialAnalysis.signals.find((signal) => signal.strategyId === "momentum-ensemble");
+
+  assert.equal(maSignal?.title, "MA 样本不足");
+  assert.equal(maSignal?.direction, "neutral");
+  assert.equal(maSignal?.confidence, 0);
+  assert.equal(momentumSignal?.direction, "neutral");
+  assert.equal(momentumSignal?.confidence, 0);
+
+  const complete = Array.from({ length: 130 }, (_, index) => candle(index, 2400 + index * 0.4));
+  const completeMomentum = buildExpertAnalysis(complete, ["momentum-ensemble"])
+    .signals.find((signal) => signal.strategyId === "momentum-ensemble");
+  assert.equal(completeMomentum?.direction, "bullish");
+  assert.ok((completeMomentum?.confidence ?? 0) > 0);
+});
+
+test("emits nine-count exhaustion only on the exact ninth setup bar", () => {
+  const completed = Array.from({ length: 13 }, (_, index) => candle(index, 2400 + index));
+  const completedSignal = buildExpertAnalysis(completed, ["nine-count"]).signals[0];
+  const extendedSignal = buildExpertAnalysis(
+    [...completed, candle(13, 2413)],
+    ["nine-count"],
+  ).signals[0];
+
+  assert.equal(completedSignal?.direction, "bearish");
+  assert.ok((completedSignal?.confidence ?? 0) > 0);
+  assert.equal(extendedSignal?.direction, "neutral");
+  assert.equal(extendedSignal?.confidence, 0);
+  assert.match(extendedSignal?.detail ?? "", /更早的 Bar 完成/);
+});
+
+test("keeps confirmed strategy signals unchanged while the tail Bar is provisional", () => {
+  const completed = Array.from({ length: 130 }, (_, index) => candle(index, 2400 + index * 0.2));
+  const provisional = {
+    ...candle(130, 2200),
+    state: "provisional_authoritative" as const,
+    finalized_at: null,
+  };
+  const enabled = ["ma-structure", "bollinger", "nine-count", "momentum-ensemble"] as const;
+
+  assert.deepEqual(
+    buildExpertAnalysisAt([...completed, provisional], enabled, completed.length - 1),
+    buildExpertAnalysis(completed, enabled),
+  );
+
+  const invalid = { ...candle(40, 2408), high: 1, low: 2 };
+  const withInvalidAndProvisional = [
+    ...completed.slice(0, 40),
+    invalid,
+    ...completed.slice(40),
+    provisional,
+  ];
+  const rawFinalIndex = completed.length;
+  assert.deepEqual(
+    buildExpertAnalysisAt(withInvalidAndProvisional, enabled, rawFinalIndex),
+    buildExpertAnalysis(completed, enabled),
+  );
+  assert.equal(
+    buildExpertIndicatorSeriesAt(withInvalidAndProvisional, rawFinalIndex).visibleLength,
+    completed.length,
+  );
+});
+
+test("normalizes only the requested raw prefix when input timestamps are unordered", () => {
+  const later = candle(10, 2410);
+  const earlierFutureRow = candle(0, 2300);
+  const snapshot = buildExpertAnalysisAt([later, earlierFutureRow], ["structure"], 0);
+
+  assert.equal(snapshot.asOf, Date.parse(later.open_time) / 1_000);
+});
+
 test("marks volume-price analysis unavailable when spot volume is absent", () => {
   const candles = Array.from({ length: 40 }, (_, index) => candle(index, 2400 + index * 0.2, null));
   const analysis = buildExpertAnalysis(candles, ["volume-price"]);
@@ -236,6 +329,17 @@ test("excludes the still-open position from trade count and win rate", () => {
   assert.equal(result.winRate, 0);
   assert.ok(result.totalReturnPercent > 0);
   assert.match(result.caveat, /仅统计已平仓/);
+});
+
+test("backtests only eligible selected strategies without filling the visual snapshot cache", () => {
+  const historyKey = "test:XAUUSD:macd-only:memory";
+  clearExpertIndicatorHistory(historyKey);
+  const candles = Array.from({ length: 600 }, (_, index) => candle(index, 2400 + Math.sin(index / 9)));
+  const runner = createExpertBacktestRunner(candles, ["macd", "smart-money"], historyKey);
+  while (!runner.done) runner.advance(128);
+  const stats = expertIndicatorHistoryStats(historyKey);
+  assert.equal(stats?.snapshotCalculations, 0);
+  assert.equal(stats?.backtestVariants, 1);
 });
 
 test("reads causal analysis and backtest snapshots by replay index without rebuilding prefixes", () => {

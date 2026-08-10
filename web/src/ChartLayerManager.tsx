@@ -23,6 +23,8 @@ import {
 
 interface ChartLayerManagerProps {
   workspace: ChartLayerWorkspace;
+  trendLineStats?: { active: number; invalidated: number };
+  patternStats?: { active: number; invalidated: number };
   onClose: () => void;
   onAddDrawingLayer: () => void;
   onSelectDrawingLayer: (layerId: string) => void;
@@ -40,18 +42,30 @@ const GROUPS: Array<{ kind: ChartLayerKind; label: string }> = [
   { kind: "annotation", label: "系统标注" },
 ];
 
-function layerDetail(layer: ChartLayerDefinition): string {
+function layerDetail(
+  layer: ChartLayerDefinition,
+  trendLineStats: { active: number; invalidated: number },
+  patternStats: { active: number; invalidated: number },
+): string {
   if (layer.kind === "price") return "固定 · 不可隐藏";
   if (layer.kind === "drawing") return `${layer.drawings.length} 条画线`;
   if (layer.kind === "indicator") return `${layer.height}px · 共享时间轴`;
   if (layer.annotationId === "sessions") return "由资金主导策略输出，可单独隐藏";
   if (layer.annotationId === "gaps") return "由跳空视觉策略输出，仅标记复市首点";
   if (layer.annotationId === "events") return "由数据/事件策略输出：FOMC / 非农 / CPI / 央行购金";
+  if (layer.annotationId === "trend-lines") {
+    return `有效 ${trendLineStats.active} · 淡化 ${trendLineStats.invalidated}`;
+  }
+  if (layer.annotationId === "patterns") {
+    return `确认 ${patternStats.active} · 失效 ${patternStats.invalidated}`;
+  }
   return "支撑压力 / POC / FVG";
 }
 
 export function ChartLayerManager({
   workspace,
+  trendLineStats = { active: 0, invalidated: 0 },
+  patternStats = { active: 0, invalidated: 0 },
   onClose,
   onAddDrawingLayer,
   onSelectDrawingLayer,
@@ -161,7 +175,9 @@ export function ChartLayerManager({
                         }}
                         role={layer.kind === "drawing" ? "button" : undefined}
                         tabIndex={layer.kind === "drawing" ? 0 : undefined}
-                        title={layer.kind === "drawing" ? "设为当前画线图层" : layerDetail(layer)}
+                        title={layer.kind === "drawing"
+                          ? "设为当前画线图层"
+                          : layerDetail(layer, trendLineStats, patternStats)}
                       >
                         <span className="expert-layer-kind-icon">
                           {layer.kind === "price" ? <CandlestickChart size={14} /> : layer.kind === "indicator" ? <Activity size={14} /> : null}
@@ -181,7 +197,7 @@ export function ChartLayerManager({
                               }}
                             />
                           ) : <strong>{layer.name}</strong>}
-                          <small>{layerDetail(layer)}</small>
+                          <small>{layerDetail(layer, trendLineStats, patternStats)}</small>
                         </span>
                       </div>
                       <div className="expert-layer-actions">

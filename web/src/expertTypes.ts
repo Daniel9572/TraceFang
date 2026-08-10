@@ -1,3 +1,5 @@
+import type { ExpertMarketStructureEvent } from "./expertSmartMoney.ts";
+
 export type ExpertSessionKind = "asia" | "europe" | "us";
 
 export type ExpertSessionDriver =
@@ -137,6 +139,133 @@ export interface ExpertGoldEventCatalogSnapshot {
   limitations: string[];
 }
 
+export interface ExpertVolatilityEodIndex {
+  index_code: "VIX" | "GVZ";
+  underlying: "SPX" | "GLD";
+  value: number;
+  as_of: string;
+  trailing_percentile_252: number | null;
+  history_sample_size: number;
+  history_start: string | null;
+  history_end: string | null;
+  expected_horizon_days: number;
+  directional: false;
+  source: {
+    provider_id: string;
+    dataset_id: string;
+    source_url: string;
+    frequency: "daily_eod";
+    received_at: string;
+  };
+}
+
+export interface ExpertVolatilityContext {
+  contract_version: "volatility-eod-context-v1";
+  state: "ready";
+  mode: "eod";
+  refresh_after_seconds: number;
+  directional: false;
+  indices: ExpertVolatilityEodIndex[];
+  limitations: string[];
+}
+
+export interface ExpertShfePositioningContract {
+  product_code: "AU" | "AG";
+  contract_code: string;
+  volume: number;
+  open_interest: number;
+  open_interest_change: number | null;
+  last_price: number | null;
+  observed_at: string;
+}
+
+export interface ExpertShfePositioningContext {
+  contract_version: "shfe-positioning-context-v1";
+  state: "ready";
+  mode: "delayed_snapshot";
+  refresh_after_seconds: number;
+  as_of: string;
+  delayed: true;
+  declared_delay_seconds: number;
+  product_code: "AU" | "AG";
+  contract_count: number;
+  volume: number;
+  open_interest: number;
+  open_interest_change: number | null;
+  open_interest_change_contracts: number;
+  unit: "lots";
+  counting_method: "single_side";
+  directional_inference: "unavailable";
+  derived_aggregate: true;
+  contracts: ExpertShfePositioningContract[];
+  source: {
+    provider_id: string;
+    dataset_id: string;
+    source_url: string;
+    observed_at: string;
+    received_at: string;
+    published_at: string | null;
+  };
+  limitations: string[];
+}
+
+export type ExpertMultiTimeframeDirection = "up" | "down" | "mixed" | "unavailable";
+
+export interface ExpertMultiTimeframeItem {
+  horizon: "short" | "medium" | "long";
+  period_id: "1h" | "1d" | "1w";
+  state: "ready" | "insufficient_data" | "unavailable";
+  direction: ExpertMultiTimeframeDirection;
+  required_final_bars: number;
+  loaded_bar_count: number;
+  eligible_final_bar_count: number;
+  used_bar_count: number;
+  excluded_non_final_bars: number;
+  excluded_after_as_of_bars: number;
+  excluded_invalid_time_bars: number;
+  first_open_time: string | null;
+  last_open_time: string | null;
+  last_bucket_end: string | null;
+  last_available_at: string | null;
+  last_close: number | null;
+  sma_fast: number | null;
+  sma_slow: number | null;
+  window_return_percent: number | null;
+  limitation: string | null;
+}
+
+export interface ExpertMultiTimeframeContext {
+  contract_version: "multi-timeframe-trend-v1";
+  profile_id: "swing-1h-1d-1w-v1";
+  state: "ready" | "partial" | "insufficient_data" | "unavailable";
+  code: string;
+  instrument_symbol: string;
+  source_id: string;
+  decision_as_of: string;
+  as_of_policy: string;
+  direction_rule: string;
+  period_mapping: Record<"short" | "medium" | "long", {
+    period_id: "1h" | "1d" | "1w";
+    required_final_bars: number;
+    fast_sma_bars: number;
+    slow_sma_bars: number;
+  }>;
+  timeframes: ExpertMultiTimeframeItem[];
+  comparison: {
+    state: "aligned" | "divergent" | "mixed" | "not_comparable";
+    comparable: boolean;
+    aligned_direction: "up" | "down" | null;
+    differences: Array<{
+      left: "short" | "medium" | "long";
+      right: "short" | "medium" | "long";
+      left_direction: ExpertMultiTimeframeDirection;
+      right_direction: ExpertMultiTimeframeDirection;
+    }>;
+    incomparable_reasons: string[];
+  };
+  limitations: string[];
+}
+
 export interface ExpertEventWindowReaction {
   windowSeconds: number;
   returnPercent: number;
@@ -173,6 +302,65 @@ export interface ExpertDrawing {
   label: string;
 }
 
+export interface ExpertTrendLine {
+  id: string;
+  direction: "support" | "resistance";
+  start: ExpertDrawingPoint;
+  anchor: ExpertDrawingPoint;
+  end: ExpertDrawingPoint;
+  status: "candidate" | "confirmed" | "tested" | "invalidated";
+  touchCount: number;
+  quality: number;
+  atrError: number;
+  invalidatedAt: number | null;
+  invalidationReason: string | null;
+}
+
+export type ExpertPricePatternKind =
+  | "double-bottom"
+  | "double-top"
+  | "two-b-bottom"
+  | "two-b-top";
+
+export interface ExpertPricePatternAnchor {
+  index: number;
+  time: number;
+  price: number;
+}
+
+export interface ExpertPricePattern {
+  id: string;
+  kind: ExpertPricePatternKind;
+  label: string;
+  direction: "bullish" | "bearish";
+  status: "confirmed" | "invalidated";
+  first: ExpertPricePatternAnchor;
+  neckline: ExpertPricePatternAnchor | null;
+  second: ExpertPricePatternAnchor;
+  confirmation: ExpertPricePatternAnchor;
+  triggerPrice: number;
+  invalidationPrice: number;
+  detectedAt: number;
+  invalidatedAt: number | null;
+  confidence: number;
+  evidence: string[];
+}
+
+export interface ExpertOverlayPoint {
+  time: number;
+  value: number;
+}
+
+export interface ExpertOverlaySeries {
+  id: string;
+  label: string;
+  color: string;
+  lineStyle: "solid" | "dashed" | "dotted";
+  lineWidth: 1 | 2 | 3;
+  points: ExpertOverlayPoint[];
+  lastValueVisible: boolean;
+}
+
 export interface ExpertPriceLevel {
   id: string;
   price: number;
@@ -193,12 +381,47 @@ export interface ExpertValueZone {
 
 export type ExpertStrategyId =
   | "structure"
+  | "ma-structure"
   | "macd"
   | "kdj"
+  | "rsi"
+  | "bollinger"
+  | "nine-count"
+  | "momentum-ensemble"
+  | "auto-trend"
+  | "vix-gvz"
+  | "volume-open-interest"
+  | "multi-timeframe"
+  | "smart-money"
   | "fair-value"
   | "poc-proxy"
   | "order-flow-proxy"
   | "volume-price";
+
+export interface ExpertStrategyReference {
+  title: string;
+  publisher: string;
+  url: string;
+  note: string;
+}
+
+export interface ExpertStrategyDetails {
+  role: "direction" | "confirmation" | "exhaustion" | "structure" | "risk-context";
+  horizon: string;
+  principle: string;
+  formula: string[];
+  parameters: string[];
+  signalRules: string[];
+  requiredFields: string[];
+  suitableRegimes: string[];
+  boundaryConditions: string[];
+  invalidation: string[];
+  references: ExpertStrategyReference[];
+  validation: string;
+  version: string;
+  compositeEligible: boolean;
+  backtestEligible: boolean;
+}
 
 export interface ExpertStrategyDefinition {
   id: ExpertStrategyId;
@@ -207,6 +430,7 @@ export interface ExpertStrategyDefinition {
   description: string;
   dataSource: string;
   evidenceMode: "native" | "proxy" | "conditional";
+  details: ExpertStrategyDetails;
 }
 
 export interface ExpertSignal {
@@ -223,13 +447,49 @@ export interface ExpertSignal {
 export interface ExpertIndicatorSnapshot {
   macd: { value: number; signal: number; histogram: number } | null;
   kdj: { k: number; d: number; j: number } | null;
+  rsi: {
+    period: number;
+    value: number;
+    state: "oversold" | "neutral" | "overbought";
+    signal: "oversold-recovery" | "overbought-reversal" | "oversold" | "overbought" | "none";
+  } | null;
+  movingAverage: {
+    alignment: "bullish" | "bearish" | "mixed" | "insufficient";
+    values: Array<{
+      period: 20 | 60 | 120 | 250;
+      value: number | null;
+      slopePercent: number | null;
+      distanceAtr: number | null;
+      interaction: "support-test" | "resistance-test" | "break" | "none";
+    }>;
+  } | null;
+  bollinger: {
+    middle: number;
+    upper: number;
+    lower: number;
+    bandwidth: number;
+    bandwidthPercentile: number | null;
+    position: number;
+    state: "squeeze" | "expanding" | "normal";
+  } | null;
+  nineCount: {
+    direction: "sell-setup" | "buy-setup" | "none";
+    count: number;
+    perfected: boolean;
+    completedNow: boolean;
+  } | null;
+  momentum: {
+    score: number;
+    availableHorizons: number;
+    returns: Array<{ horizon: 20 | 60 | 120; percent: number | null }>;
+  } | null;
   trendSlopePercent: number | null;
   pocPrice: number | null;
   orderFlowPressure: number | null;
   volumePriceState: "confirming" | "diverging" | "unavailable";
 }
 
-export type ExpertIndicatorId = "kdj" | "macd";
+export type ExpertIndicatorId = "rsi" | "kdj" | "macd";
 
 export interface ExpertIndicatorBarReference {
   readonly time: number;
@@ -253,6 +513,9 @@ export interface ExpertIndicatorSeriesView {
     readonly d: readonly number[];
     readonly j: readonly number[];
   };
+  readonly rsi: {
+    readonly value: readonly (number | null)[];
+  };
 }
 
 export interface ExpertAnalysisSnapshot {
@@ -260,6 +523,8 @@ export interface ExpertAnalysisSnapshot {
   signals: ExpertSignal[];
   levels: ExpertPriceLevel[];
   valueZones: ExpertValueZone[];
+  pricePatterns: ExpertPricePattern[];
+  marketStructureEvents: ExpertMarketStructureEvent[];
   indicators: ExpertIndicatorSnapshot;
   regime: "trend-up" | "trend-down" | "balanced" | "insufficient";
   compositeScore: number;
