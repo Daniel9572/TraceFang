@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,92 @@ _DATE = re.compile(r"^\d{8}$")
 _MINUTE = re.compile(r"^\d{12}$")
 _CLOCK = re.compile(r"^\d{4}$")
 _SESSION = re.compile(r"^(\d{4})-(\d{4})$")
+
+TONGHUASHUN_HTTP_FRAME_VERSION = 1
+TONGHUASHUN_HTTP_FRAME_ENCODING = "tonghuashun_http_v1"
+TONGHUASHUN_LIVE_FRAME_CHANNEL = "tonghuashun_futures_live"
+TONGHUASHUN_HISTORY_FRAME_CHANNEL = "tonghuashun_futures_history"
+
+
+class TonghuashunHttpFrameKind(StrEnum):
+    TIME = "time"
+    DAILY_LAST = "daily_last"
+    MINUTE_LAST = "minute_last"
+    MINUTE_YEAR = "minute_year"
+
+
+@dataclass(frozen=True, slots=True)
+class TonghuashunHttpResponseFrame:
+    """Versioned HTTP response plus the request context required for replay decoding."""
+
+    version: int
+    kind: TonghuashunHttpFrameKind
+    provider_code: str
+    capability: str
+    request_url: str
+    status_code: int
+    content_type: str | None
+    text_encoding: str
+    content: bytes
+    period: str | None = None
+    file: str | None = None
+    trade_date: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.version != TONGHUASHUN_HTTP_FRAME_VERSION:
+            raise ValueError("unsupported Tonghuashun HTTP frame version")
+        for value, field in (
+            (self.provider_code, "provider_code"),
+            (self.capability, "capability"),
+            (self.request_url, "request_url"),
+            (self.text_encoding, "text_encoding"),
+        ):
+            if not value.strip():
+                raise ValueError(f"Tonghuashun HTTP frame {field} cannot be empty")
+        if not 100 <= self.status_code <= 599:
+            raise ValueError("Tonghuashun HTTP frame status_code is invalid")
+        if not isinstance(self.content, bytes):
+            raise TypeError("Tonghuashun HTTP frame content must be bytes")
+        if self.kind is TonghuashunHttpFrameKind.DAILY_LAST and not self.trade_date:
+            raise ValueError("a daily-last frame requires trade_date")
+        if self.kind in {
+            TonghuashunHttpFrameKind.DAILY_LAST,
+            TonghuashunHttpFrameKind.MINUTE_LAST,
+            TonghuashunHttpFrameKind.MINUTE_YEAR,
+        } and (not self.period or not self.file):
+            raise ValueError("a line frame requires period and file")
+
+
+@dataclass(frozen=True, slots=True)
+class TonghuashunDecodedQuoteFrame:
+    response: TonghuashunHttpResponseFrame
+    connection_id: str
+    sequence: int
+    received_at: datetime
+    quote: TonghuashunWireQuote
+
+
+@dataclass(frozen=True, slots=True)
+class TonghuashunDecodedDailyFrame:
+    response: TonghuashunHttpResponseFrame
+    connection_id: str
+    sequence: int
+    received_at: datetime
+    stats: TonghuashunDailyStats | None
+
+
+@dataclass(frozen=True, slots=True)
+class TonghuashunDecodedLineFrame:
+    response: TonghuashunHttpResponseFrame
+    connection_id: str
+    sequence: int
+    received_at: datetime
+    rows: tuple[TonghuashunWireCandle, ...]
+
+
+TonghuashunDecodedFrame = (
+    TonghuashunDecodedQuoteFrame | TonghuashunDecodedDailyFrame | TonghuashunDecodedLineFrame
+)
 
 
 @dataclass(frozen=True, slots=True)

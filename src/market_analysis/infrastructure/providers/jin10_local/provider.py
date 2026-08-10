@@ -7,10 +7,12 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import time_ns
 from urllib.parse import quote as quote_url
+from uuid import uuid4
 
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
 
+from market_analysis.application.provider_frames import ProviderFrame, RawFrameSink
 from market_analysis.domain.errors import (
     InstrumentNotSupportedError,
     ProviderDataError,
@@ -56,6 +58,7 @@ _MAX_HISTORY_PAGES = 64
 _MAX_HISTORY_FILE_CACHE = 32
 QuoteListener = Callable[[QuoteSnapshot], None]
 CandleListener = Callable[[Candle], None]
+HistoryManifestListener = Callable[[Jin10KlineHistoryManifest], None]
 
 
 def _manifest_record_count(
@@ -86,9 +89,11 @@ class Jin10LocalProvider:
         settings: Jin10LocalSettings,
         *,
         symbol_mapper: Jin10LocalSymbolMapper | None = None,
+        frame_sink: RawFrameSink | None = None,
     ) -> None:
         self.settings = settings
         self.symbol_mapper = symbol_mapper or Jin10LocalSymbolMapper()
+        self._frame_sink = frame_sink
         self._subscriptions = self.symbol_mapper.provider_codes
         self._latest: dict[str, QuoteSnapshot] = {}
         self._minute_candles: dict[str, dict[datetime, Candle]] = {}
@@ -99,6 +104,7 @@ class Jin10LocalProvider:
         self._quote_listeners: set[QuoteListener] = set()
         self._candle_listeners: set[CandleListener] = set()
         self._connection_had_quote = False
+        self._sequence = 0
         self._connection_ready = asyncio.Event()
         self._active_socket: ClientConnection | None = None
         self._active_session_key: str | None = None
@@ -359,6 +365,8 @@ class Jin10LocalProvider:
             )
 
     async def _run_connection(self) -> None:
+        connection_id = uuid4().hex
+        sequence = 0
         async with connect(
             self.settings.endpoint,
             open_timeout=self.settings.connect_timeout_seconds,
@@ -393,32 +401,15 @@ class Jin10LocalProvider:
                 async for message in socket:
                     if not isinstance(message, bytes):
                         continue
-                    protocol, payload = decode_message(xor_cipher(message, key))
-                    if protocol == RELOGIN_REQUEST_PROTOCOL:
-                        await self._send_login(socket, key)
-                        continue
-                    if protocol in _QUOTE_PROTOCOLS:
-                        try:
-                            wire_quote = parse_quote(payload)
-                            self._store_quote(wire_quote, protocol=protocol)
-                        except (InstrumentNotSupportedError, ProviderDataError):
-                            continue
-                        continue
-                    try:
-                        if protocol == KLINE_SNAPSHOT_PROTOCOL:
-                            self._store_kline_snapshot(
-                                parse_kline_snapshot(payload),
-                                protocol=protocol,
-                            )
-                        elif protocol == KLINE_UPDATE_PROTOCOL:
-                            self._store_kline_snapshot(
-                                parse_kline_update(payload),
-                                protocol=protocol,
-                            )
-                        elif protocol == KLINE_HISTORY_PROTOCOL:
-                            self._resolve_history_manifest(parse_kline_history_manifest(payload))
-                    except (InstrumentNotSupportedError, ProviderDataError):
-                        continue
+                    sequence += 1
+                    await self._capture_live_frame(
+                        xor_cipher(message, key),
+                        connection_id=connection_id,
+                        sequence=sequence,
+                        received_at=datetime.now(UTC),
+                        socket=socket,
+                        session_key=key,
+                    )
             finally:
                 if self._active_socket is socket:
                     self._connection_ready.clear()
@@ -429,6 +420,99 @@ class Jin10LocalProvider:
                     )
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _capture_live_frame(
+        self,
+        body: bytes,
+        *,
+        connection_id: str,
+        sequence: int,
+        received_at: datetime,
+        socket: ClientConnection | None = None,
+        session_key: str | None = None,
+    ) -> None:
+        frame = ProviderFrame(
+            version=1,
+            channel=self.name,
+            connection_id=connection_id,
+            sequence=sequence,
+            received_at=received_at,
+            encoding="session-decrypted",
+            body=body,
+        )
+        if self._frame_sink is not None:
+            await self._frame_sink.capture(frame)
+        try:
+            await self.ingest_frame(
+                frame,
+                on_quote=self._accept_live_quote,
+                on_candle=self._accept_live_candle,
+                on_history_manifest=self._resolve_history_manifest,
+                socket=socket,
+                session_key=session_key,
+            )
+        except (InstrumentNotSupportedError, ProviderDataError):
+            return
+
+    async def ingest_frame(
+        self,
+        frame: ProviderFrame,
+        *,
+        on_quote: QuoteListener | None = None,
+        on_candle: CandleListener | None = None,
+        on_history_manifest: HistoryManifestListener | None = None,
+        socket: ClientConnection | None = None,
+        session_key: str | None = None,
+    ) -> None:
+        """Decode one decrypted frame without capturing or mutating live provider state."""
+
+        if frame.channel != self.name or frame.encoding != "session-decrypted":
+            raise ProviderDataError("frame does not belong to the Jin10 local wire channel")
+        protocol, payload = decode_message(frame.body)
+        if protocol == RELOGIN_REQUEST_PROTOCOL:
+            if socket is not None:
+                if session_key is None:
+                    raise ProviderDataError("live relogin frame requires a session key")
+                await self._send_login(socket, session_key)
+            return
+        if protocol in _QUOTE_PROTOCOLS:
+            quote = self._quote_from_wire(
+                parse_quote(payload),
+                protocol=protocol,
+                received_at=frame.received_at,
+                connection_id=frame.connection_id,
+                sequence=frame.sequence,
+            )
+            if on_quote is not None:
+                on_quote(quote)
+            return
+        snapshot: Jin10KlineSnapshot | None = None
+        if protocol == KLINE_SNAPSHOT_PROTOCOL:
+            snapshot = parse_kline_snapshot(payload)
+        elif protocol == KLINE_UPDATE_PROTOCOL:
+            snapshot = parse_kline_update(payload)
+        elif protocol == KLINE_HISTORY_PROTOCOL:
+            manifest = parse_kline_history_manifest(payload)
+            if on_history_manifest is not None:
+                on_history_manifest(manifest)
+            return
+        if snapshot is None or snapshot.time_type != _KLINE_TIME_TYPE:
+            return
+        instrument = self.symbol_mapper.from_provider_code(snapshot.provider_code)
+        candles = self._candles_from_wire(
+            instrument,
+            snapshot.provider_code,
+            snapshot.candles,
+            protocol=protocol,
+            time_type=snapshot.time_type,
+            received_at=frame.received_at,
+            state=BarState.PROVISIONAL_AUTHORITATIVE,
+            connection_id=frame.connection_id,
+            sequence=frame.sequence,
+        )
+        if on_candle is not None:
+            for candle in candles:
+                on_candle(candle)
 
     async def _send_login(self, socket: ClientConnection, key: str) -> None:
         packet = encode_login(
@@ -598,15 +682,20 @@ class Jin10LocalProvider:
         if value.time_type != _KLINE_TIME_TYPE:
             return
         instrument = self.symbol_mapper.from_provider_code(value.provider_code)
-        self._store_wire_candles(
+        self._sequence += 1
+        candles = self._candles_from_wire(
             instrument,
             value.provider_code,
             value.candles,
             protocol=protocol,
             time_type=value.time_type,
+            received_at=datetime.now(UTC),
             state=BarState.PROVISIONAL_AUTHORITATIVE,
-            publish=True,
+            connection_id="legacy",
+            sequence=self._sequence,
         )
+        for candle in candles:
+            self._accept_live_candle(candle)
 
     def _store_wire_candles(
         self,
@@ -620,8 +709,42 @@ class Jin10LocalProvider:
         state: BarState = BarState.FINAL,
         publish: bool = False,
     ) -> tuple[Candle, ...]:
-        received_at = datetime.now(UTC)
+        rows = self._candles_from_wire(
+            instrument,
+            provider_code,
+            wire_rows,
+            protocol=protocol,
+            time_type=time_type,
+            received_at=datetime.now(UTC),
+            file_name=file_name,
+            state=state,
+        )
         target = self._minute_candles.setdefault(provider_code, {})
+        for candle in rows:
+            current = target.get(candle.open_time)
+            if current is None or candle.source.received_at >= current.source.received_at:
+                target[candle.open_time] = candle
+                if publish:
+                    for listener in tuple(self._candle_listeners):
+                        with suppress(Exception):
+                            listener(candle)
+        self._trim_candles(target)
+        return rows
+
+    def _candles_from_wire(
+        self,
+        instrument: Instrument,
+        provider_code: str,
+        wire_rows: tuple[Jin10WireCandle, ...],
+        *,
+        protocol: int,
+        time_type: int,
+        received_at: datetime,
+        file_name: str | None = None,
+        state: BarState = BarState.FINAL,
+        connection_id: str | None = None,
+        sequence: int | None = None,
+    ) -> tuple[Candle, ...]:
         rows: list[Candle] = []
         for wire in wire_rows:
             try:
@@ -648,23 +771,36 @@ class Jin10LocalProvider:
                         "price_scale": 1_000_000,
                         "history_file": file_name,
                         "bar_state": state.value,
+                        "connection_id": connection_id,
+                        "sequence": sequence,
                     },
                 ),
             )
-            current = target.get(open_time)
-            if current is None or candle.source.received_at >= current.source.received_at:
-                target[open_time] = candle
-                if publish:
-                    for listener in tuple(self._candle_listeners):
-                        with suppress(Exception):
-                            listener(candle)
             rows.append(candle)
-        self._trim_candles(target)
         return tuple(rows)
 
     def _store_quote(self, wire: Jin10WireQuote, *, protocol: int) -> None:
-        instrument = self.symbol_mapper.from_provider_code(wire.provider_code)
         received_at = datetime.now(UTC)
+        self._sequence += 1
+        quote = self._quote_from_wire(
+            wire,
+            protocol=protocol,
+            received_at=received_at,
+            connection_id="legacy",
+            sequence=self._sequence,
+        )
+        self._accept_live_quote(quote)
+
+    def _quote_from_wire(
+        self,
+        wire: Jin10WireQuote,
+        *,
+        protocol: int,
+        received_at: datetime,
+        connection_id: str,
+        sequence: int,
+    ) -> QuoteSnapshot:
+        instrument = self.symbol_mapper.from_provider_code(wire.provider_code)
         last = self._price(wire.last_micros)
         if last <= 0:
             raise ProviderDataError("Jin10 local quote price must be positive")
@@ -686,7 +822,7 @@ class Jin10LocalProvider:
             observed_at = received_at
         if abs((received_at - observed_at).total_seconds()) > 7 * 24 * 3600:
             observed_at = received_at
-        quote = QuoteSnapshot(
+        return QuoteSnapshot(
             instrument=instrument,
             last=last,
             open=self._optional_price(wire.open_micros),
@@ -706,16 +842,33 @@ class Jin10LocalProvider:
                     "ask": str(self._price(wire.ask_micros)),
                     "previous_close": str(previous_close) if previous_close else None,
                     "turnover": wire.turnover,
+                    "connection_id": connection_id,
+                    "sequence": sequence,
                 },
             ),
         )
-        self._latest[wire.provider_code] = quote
+
+    def _accept_live_quote(self, quote: QuoteSnapshot) -> None:
+        provider_code = quote.source.provider_symbol
+        self._latest[provider_code] = quote
         self._last_error = None
         self._connection_had_quote = True
         for listener in tuple(self._quote_listeners):
             with suppress(Exception):
                 listener(quote)
-        self._updates[wire.provider_code].set()
+        self._updates[provider_code].set()
+
+    def _accept_live_candle(self, candle: Candle) -> None:
+        provider_code = candle.source.provider_symbol
+        target = self._minute_candles.setdefault(provider_code, {})
+        current = target.get(candle.open_time)
+        if current is not None and candle.source.received_at < current.source.received_at:
+            return
+        target[candle.open_time] = candle
+        self._trim_candles(target)
+        for listener in tuple(self._candle_listeners):
+            with suppress(Exception):
+                listener(candle)
 
     @staticmethod
     def _trim_candles(rows: dict[datetime, Candle]) -> None:
