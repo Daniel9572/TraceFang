@@ -51,6 +51,17 @@ test("projects standard one-second Bars into the timeline without a second quote
   assert.deepEqual(series.map((point) => point.resolutionSeconds), [1, 1]);
 });
 
+test("compacts only the historical timeline snapshot to the newest Bar revision", () => {
+  const original = { ...candle("2026-08-06T01:47:02Z", 100, 100, 100, 100), interval: 1 };
+  const correction = { ...original, high: 102, close: 102, revision: 3 };
+  const stale = { ...original, close: 99, revision: 2 };
+
+  assert.deepEqual(
+    buildTimelineSeries([correction, original, stale]).map((point) => point.value),
+    [102],
+  );
+});
+
 test("replaces the complete current Bar while preserving the immutable history prefix", () => {
   const first = candle("2026-08-06T01:46:59Z", 99, 101, 98, 100);
   const current = candle("2026-08-06T01:47:00Z", 100, 102, 99, 101);
@@ -120,6 +131,21 @@ test("merges backend Bar revisions without letting an older page overwrite a cor
 
   assert.equal(result.revision, 2);
   assert.equal(result.close, 103);
+});
+
+test("merges equivalent ISO encodings of the same Bar open time", () => {
+  const snapshot = candle("2026-08-06T01:47:00Z", 100, 102, 99, 101);
+  const realtime = {
+    ...snapshot,
+    open_time: "2026-08-06T01:47:00+00:00",
+    close: 103,
+    revision: 2,
+  };
+
+  const result = mergeCandleRows([snapshot], [realtime]);
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0], realtime);
 });
 
 test("keeps the current candle array when a refresh contains no revision", () => {

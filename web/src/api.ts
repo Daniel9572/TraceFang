@@ -5,6 +5,8 @@ import type {
   InstrumentEntry,
   InstrumentSourceSelection,
   QuoteView,
+  ReplayFrameBounds,
+  ReplayFrameCursor,
   SourceConnectionTest,
   SourceDescriptor,
   SourceId,
@@ -13,9 +15,13 @@ import type {
   ExpertAiAnalysis,
   ExpertAiStatus,
   ExpertGoldEventCatalogSnapshot,
+  ExpertMultiTimeframeContext,
   ExpertOptionsStatus,
+  ExpertShfePositioningContext,
+  ExpertVolatilityContext,
 } from "./expertTypes";
 import type { BarPeriodId } from "./chartPeriods";
+import { BoundedBarPageCache } from "./barPageCache.ts";
 import { sameCandleVersion } from "./chartModel.ts";
 import { historyWindowBefore, type HistoryWindow } from "./historyLoading.ts";
 
@@ -47,6 +53,7 @@ const BACKFILL_TRANSPORT_PAGE_MINUTES = 10_000;
 interface CandleRequestOptions {
   time?: number;
   count?: number;
+  signal?: AbortSignal;
 }
 
 interface CandleHistoryBackfill {
@@ -54,15 +61,30 @@ interface CandleHistoryBackfill {
   candles: Candle[];
 }
 
-const candleBackfillRequests = new Map<string, Promise<CandleHistoryBackfill>>();
+const barPageCache = new BoundedBarPageCache();
+
+function candleTimeKey(candle: Candle): string {
+  const milliseconds = Date.parse(candle.open_time);
+  return Number.isFinite(milliseconds)
+    ? String(Math.floor(milliseconds / 1_000))
+    : candle.open_time;
+}
+
+interface BarPageRequest {
+  before?: number;
+  pageSize?: number;
+  signal?: AbortSignal;
+  cache?: "default" | "reload";
+}
 
 export function mergeCandleRows(...pages: Candle[][]): Candle[] {
   const rows = new Map<string, Candle>();
   for (const page of pages) {
     for (const candle of page) {
-      const current = rows.get(candle.open_time);
+      const timeKey = candleTimeKey(candle);
+      const current = rows.get(timeKey);
       if (!current) {
-        rows.set(candle.open_time, candle);
+        rows.set(timeKey, candle);
         continue;
       }
       const stateRank = { provisional_quote: 0, provisional_authoritative: 1, final: 2 };
@@ -76,7 +98,7 @@ export function mergeCandleRows(...pages: Candle[][]): Candle[] {
           && candle.state === current.state
           && Date.parse(candle.source.received_at) > Date.parse(current.source.received_at)
         );
-      if (incomingWins) rows.set(candle.open_time, candle);
+      if (incomingWins) rows.set(timeKey, candle);
     }
   }
   const merged = [...rows.values()].sort(
@@ -111,7 +133,10 @@ function fetchCandles(
     count: String(options.count ?? HISTORY_PAGE_SIZE),
   });
   if (options.time !== undefined) params.set("time", String(options.time));
-  return request<Candle[]>(`/api/candles/${encodeURIComponent(code)}?${params.toString()}`)
+  return request<Candle[]>(
+    `/api/candles/${encodeURIComponent(code)}?${params.toString()}`,
+    { signal: options.signal },
+  )
     .then((rows) => {
       if (rows.some((row) => row.source.provider !== expectedSourceId)) {
         throw new Error("合约实时数据源已变化，请重新读取 K 线");
@@ -124,54 +149,39 @@ async function backfillCandleWindow(
   code: string,
   sourceId: SourceId,
   window: HistoryWindow,
-  options: { revalidate?: boolean } = {},
+  options: { revalidate?: boolean; signal?: AbortSignal } = {},
 ): Promise<CandleHistoryBackfill> {
   const revalidate = options.revalidate === true;
-  const cacheKey = `${sourceId}:${code}:${window.start}:${window.count}:${revalidate ? "revalidate" : "missing"}`;
-  const active = candleBackfillRequests.get(cacheKey);
-  if (active) return active;
-  const promise = (async () => {
-    const results: CandleBackfillResult[] = [];
-    for (
-      let time = window.start;
-      time < window.end;
-      time += BACKFILL_TRANSPORT_PAGE_MINUTES * 60
-    ) {
-      const count = Math.min(
-        BACKFILL_TRANSPORT_PAGE_MINUTES,
-        Math.ceil((window.end - time) / 60),
-      );
-      const params = new URLSearchParams({ time: String(time), count: String(count) });
-      if (revalidate) params.set("revalidate", "true");
-      const result = await request<CandleBackfillResult>(
-        `/api/candles/${encodeURIComponent(code)}/backfill?${params.toString()}`,
-        { method: "POST" },
-      );
-      if (result.source_id !== sourceId) {
-        throw new Error("合约实时数据源已变化，请重新读取 K 线");
-      }
-      results.push(result);
+  const results: CandleBackfillResult[] = [];
+  for (
+    let time = window.start;
+    time < window.end;
+    time += BACKFILL_TRANSPORT_PAGE_MINUTES * 60
+  ) {
+    options.signal?.throwIfAborted();
+    const count = Math.min(
+      BACKFILL_TRANSPORT_PAGE_MINUTES,
+      Math.ceil((window.end - time) / 60),
+    );
+    const params = new URLSearchParams({ time: String(time), count: String(count) });
+    if (revalidate) params.set("revalidate", "true");
+    const result = await request<CandleBackfillResult>(
+      `/api/candles/${encodeURIComponent(code)}/backfill?${params.toString()}`,
+      { method: "POST", signal: options.signal },
+    );
+    if (result.source_id !== sourceId) {
+      throw new Error("合约实时数据源已变化，请重新读取 K 线");
     }
-    const result: CandleBackfillResult = {
-      source_id: sourceId,
-      state: results.some((item) => item.state === "fetched") ? "fetched" : "cached",
-      start: new Date(window.start * 1_000).toISOString(),
-      end: new Date(window.end * 1_000).toISOString(),
-      row_count: results.reduce((total, item) => total + item.row_count, 0),
-    };
-    return {
-      result,
-      candles: [],
-    };
-  })();
-  candleBackfillRequests.set(cacheKey, promise);
-  try {
-    return await promise;
-  } finally {
-    if (candleBackfillRequests.get(cacheKey) === promise) {
-      candleBackfillRequests.delete(cacheKey);
-    }
+    results.push(result);
   }
+  const result: CandleBackfillResult = {
+    source_id: sourceId,
+    state: results.some((item) => item.state === "fetched") ? "fetched" : "cached",
+    start: new Date(window.start * 1_000).toISOString(),
+    end: new Date(window.end * 1_000).toISOString(),
+    row_count: results.reduce((total, item) => total + item.row_count, 0),
+  };
+  return { result, candles: [] };
 }
 
 function loadOlderCandleHistory(
@@ -179,11 +189,13 @@ function loadOlderCandleHistory(
   sourceId: SourceId,
   beforeEpochSeconds: number,
   countMinutes: number,
+  signal?: AbortSignal,
 ): Promise<CandleHistoryBackfill> {
   return backfillCandleWindow(
     code,
     sourceId,
     historyWindowBefore(beforeEpochSeconds, countMinutes),
+    { signal },
   );
 }
 
@@ -191,8 +203,9 @@ function revalidateCandleHistory(
   code: string,
   sourceId: SourceId,
   window: HistoryWindow,
+  signal?: AbortSignal,
 ): Promise<CandleHistoryBackfill> {
-  return backfillCandleWindow(code, sourceId, window, { revalidate: true });
+  return backfillCandleWindow(code, sourceId, window, { revalidate: true, signal });
 }
 
 export interface ExpertAiAnalysisRequest {
@@ -231,15 +244,32 @@ export const marketApi = {
     code: string,
     sourceId: SourceId,
     periodId: string,
-    before?: number,
-    pageSize = 500,
+    options: BarPageRequest = {},
   ) => {
+    const { before, signal } = options;
+    const pageSize = options.pageSize ?? 500;
+    signal?.throwIfAborted();
+    const cacheKey = before === undefined ? null : {
+      code,
+      sourceId,
+      periodId,
+      before,
+      pageSize,
+    };
+    const cached = cacheKey && options.cache !== "reload"
+      ? barPageCache.get(cacheKey)
+      : undefined;
+    if (cached) return Promise.resolve(cached);
     const params = new URLSearchParams({ period: periodId, page_size: String(pageSize) });
     if (before !== undefined) params.set("before", String(before));
-    return request<ChartBarPage>(`/api/bars/${encodeURIComponent(code)}?${params}`).then((page) => {
+    return request<ChartBarPage>(
+      `/api/bars/${encodeURIComponent(code)}?${params}`,
+      { signal },
+    ).then((page) => {
       if (page.items.some((item) => item.source.provider !== sourceId)) {
         throw new Error("合约实时数据源已变化，请重新读取周期 Bar");
       }
+      if (cacheKey && page.items.length > 0) barPageCache.set(cacheKey, page);
       return page;
     });
   },
@@ -249,6 +279,30 @@ export const marketApi = {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const params = new URLSearchParams({ period });
     const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}?${params}`;
+    return new WebSocket(url);
+  },
+  replayFrameBounds: () => request<ReplayFrameBounds>("/api/replay/frames"),
+  replayFrameCursor: (sequence: number, signal?: AbortSignal) => request<ReplayFrameCursor>(
+    `/api/replay/cursor?sequence=${encodeURIComponent(String(sequence))}`,
+    { signal },
+  ),
+  openReplayStream: (
+    code: string,
+    options: {
+      period: string;
+      startSequence: number;
+      endSequence: number;
+      speed: number;
+    },
+  ) => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const params = new URLSearchParams({
+      period: options.period,
+      start_sequence: String(options.startSequence),
+      end_sequence: String(options.endSequence),
+      speed: String(options.speed),
+    });
+    const url = `${protocol}//${window.location.host}/api/replay/stream/${encodeURIComponent(code)}?${params}`;
     return new WebSocket(url);
   },
   testSource: (sourceId: SourceId, code: string) =>
@@ -264,4 +318,14 @@ export const marketApi = {
     }),
   expertGoldEvents: () => request<ExpertGoldEventCatalogSnapshot>("/api/expert/events/gold"),
   expertGoldOptions: () => request<ExpertOptionsStatus>("/api/expert/options/gold"),
+  expertVolatilityContext: () => request<ExpertVolatilityContext>("/api/expert/context/volatility"),
+  expertMultiTimeframe: (code: string, asOf?: string) => {
+    const query = asOf ? `?as_of=${encodeURIComponent(asOf)}` : "";
+    return request<ExpertMultiTimeframeContext>(
+      `/api/expert/context/multi-timeframe/${encodeURIComponent(code)}${query}`,
+    );
+  },
+  expertShfePositioning: (productCode: "au" | "ag") => request<ExpertShfePositioningContext>(
+    `/api/expert/context/shfe-positioning/${productCode}`,
+  ),
 };

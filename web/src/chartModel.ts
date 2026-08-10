@@ -114,22 +114,37 @@ export function candleSeriesUpdateStart(
   return null;
 }
 
+export function timelineSampleFromCandle(candle: Candle): TimelineSample | null {
+  const time = epochSeconds(candle.open_time);
+  const value = numberOf(candle.close);
+  if (time === null || !Number.isFinite(value)) return null;
+  return {
+    time,
+    observedTime: time,
+    value,
+    eventId: `bar:${candle.source.provider}:${candle.open_time}:${candle.revision}`,
+    resolutionSeconds: Number(candle.interval),
+  };
+}
+
+/**
+ * Builds a historical snapshot with one visible state per Bar time. Snapshot
+ * compaction is deliberately separate from realtime delivery, where every
+ * increasing revision must still be emitted in order.
+ */
 export function buildTimelineSeries(candles: Candle[]): TimelineSample[] {
-  const rows: TimelineSample[] = [];
+  const byTime = new Map<number, { candle: Candle; sample: TimelineSample }>();
   for (const candle of candles) {
-    const time = epochSeconds(candle.open_time);
-    const value = numberOf(candle.close);
-    if (time !== null && Number.isFinite(value)) {
-      rows.push({
-        time,
-        observedTime: time,
-        value,
-        eventId: `bar:${candle.source.provider}:${candle.open_time}:${candle.revision}`,
-        resolutionSeconds: Number(candle.interval),
-      });
+    const sample = timelineSampleFromCandle(candle);
+    if (!sample) continue;
+    const current = byTime.get(sample.time);
+    if (!current || realtimeBarCanReplace(current.candle, candle)) {
+      byTime.set(sample.time, { candle, sample });
     }
   }
-  return rows;
+  return [...byTime.values()]
+    .sort((left, right) => left.sample.time - right.sample.time)
+    .map(({ sample }) => sample);
 }
 
 export function formatBarCountdown(totalSeconds: number): string {

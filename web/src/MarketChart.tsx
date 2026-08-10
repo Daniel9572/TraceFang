@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
+  AreaSeries,
   CandlestickSeries,
   ColorType,
   CrosshairMode,
@@ -17,6 +18,7 @@ import {
   TickMarkType,
   createChart,
   createSeriesMarkers,
+  type AreaData,
   type CandlestickData,
   type Coordinate,
   type HistogramData,
@@ -38,34 +40,23 @@ import {
   candleSeriesUpdateStart,
   classifyCandleSeriesMutation,
   formatBarCountdown,
+  timelineSampleFromCandle,
   type CandleSeriesMutation,
 } from "./chartModel";
 import { secondsUntilPeriodClose, type ChartPeriod } from "./chartPeriods";
 import {
   DATE_ONLY_AXIS_THRESHOLD_SECONDS,
-  TIMELINE_CLOCK_BUCKET_SECONDS,
   actualTimeForChinaAxis,
-  actualTimeForTimelineChartTime,
   buildSeriesDataGaps,
   buildTimelineLayout,
   buildTimelineSessionGaps,
   formatBeijingDateTime,
   formatChartTick,
-  formatCrosshairTime,
+  formatChartTimeLabel,
   formatSessionGapDuration,
-  formatTimelineTick,
   projectTimeForChinaAxis,
-  projectTimelineTime,
-  projectTimelineSeries,
-  timelineClockBucketTime,
-  timelineDayWindowAtLogicalRange,
-  timelineGapSeparatorTime,
-  timelineLogicalSpanAtRange,
-  timelineLogicalViewportForSpan,
-  timelineZoomSpanAfterWheel,
   type SeriesDataGapKind,
   type TimelineLayout,
-  type TimelineLogicalDayRange,
   type TimelineSessionGap,
 } from "./chartTimeAxis";
 import { weakDrawingSnap } from "./expertDrawing";
@@ -86,26 +77,18 @@ import type {
   ExpertDrawingSnapMode,
   ExpertDrawingTool,
   ExpertIndicatorSeriesView,
+  ExpertOverlaySeries,
+  ExpertPricePattern,
+  ExpertTrendLine,
 } from "./expertTypes";
+import type { ExpertMarketStructureEvent } from "./expertSmartMoney.ts";
 import type { Candle, HoverCandle, MarketPhase, MarketSchedule, TimelineSample } from "./types";
-import {
-  TimelineClockSeries,
-  buildTimelineClockDomain,
-  changedTimelineClockDataIndexes,
-  isTimelineClockBucket,
-  materializeTimelineClockData,
-  nearestTimelineClockSample,
-  timelineClockDataItemAt,
-  timelineClockDomainsSharePrefix,
-  timelineClockVisibleDataLength,
-  timelineClockVisibleRanges,
-  recentTimelineWindowStart,
-  type TimelineClockDomain,
-  type TimelineClockSeriesApi,
-} from "./timelineClockSeries";
+import type { RealtimeBarStream } from "./realtimeBarStream";
 
 interface MarketChartProps {
   candles: Candle[];
+  realtimeBarStream: RealtimeBarStream;
+  realtimeBarStreamKey: string;
   period: ChartPeriod;
   livePrice: number | null;
   referencePrice: number | null;
@@ -133,7 +116,6 @@ const UP_COLOR = "#e94357";
 const DOWN_COLOR = "#35aa75";
 const EMPTY_CHART_LAYERS: readonly ChartLayer[] = [];
 const MAX_INCREMENTAL_REPLAY_POINTS = 2_000;
-const INITIAL_TIMELINE_MATERIALIZED_DAYS = 1;
 
 interface RenderableSeriesGap {
   kind: SeriesDataGapKind;
@@ -210,6 +192,14 @@ interface KdjIndicatorRuntime {
   state: IndicatorRenderState | null;
 }
 
+interface RsiIndicatorRuntime {
+  kind: "rsi";
+  pane: IPaneApi<Time>;
+  configuredHeight: number;
+  value: ISeriesApi<"Line">;
+  state: IndicatorRenderState | null;
+}
+
 interface MacdIndicatorRuntime {
   kind: "macd";
   pane: IPaneApi<Time>;
@@ -220,7 +210,7 @@ interface MacdIndicatorRuntime {
   state: IndicatorRenderState | null;
 }
 
-type IndicatorRuntime = KdjIndicatorRuntime | MacdIndicatorRuntime;
+type IndicatorRuntime = RsiIndicatorRuntime | KdjIndicatorRuntime | MacdIndicatorRuntime;
 
 interface DrawingLayerRuntime {
   series: Array<ISeriesApi<"Line">>;
@@ -228,19 +218,89 @@ interface DrawingLayerRuntime {
   priceLineOwner: MainSeriesApi;
 }
 
-type MainSeriesApi = ISeriesApi<"Candlestick"> | TimelineClockSeriesApi;
+interface SystemLineRuntime {
+  series: Array<ISeriesApi<"Line">>;
+}
+
+function chartLineStyle(style: "solid" | "dashed" | "dotted"): LineStyle {
+  if (style === "dashed") return LineStyle.Dashed;
+  if (style === "dotted") return LineStyle.Dotted;
+  return LineStyle.Solid;
+}
+
+function trendLineAppearance(line: ExpertTrendLine): {
+  color: string;
+  lineStyle: LineStyle;
+  lineWidth: 1 | 2 | 3;
+} {
+  if (line.status === "invalidated") {
+    return { color: "rgba(158, 173, 181, .24)", lineStyle: LineStyle.Dashed, lineWidth: 1 };
+  }
+  const opacity = line.status === "candidate" ? 0.36 : line.status === "confirmed" ? 0.68 : 0.9;
+  return {
+    color: line.direction === "support"
+      ? `rgba(67, 190, 137, ${opacity})`
+      : `rgba(230, 92, 112, ${opacity})`,
+    lineStyle: line.status === "candidate" ? LineStyle.Dotted : LineStyle.Solid,
+    lineWidth: line.status === "tested" ? 2 : 1,
+  };
+}
+
+function pricePatternAppearance(pattern: ExpertPricePattern): {
+  color: string;
+  lineStyle: LineStyle;
+  lineWidth: 1 | 2;
+} {
+  if (pattern.status === "invalidated") {
+    return { color: "rgba(151, 164, 174, .24)", lineStyle: LineStyle.Dashed, lineWidth: 1 };
+  }
+  if (pattern.kind === "two-b-bottom" || pattern.kind === "two-b-top") {
+    return {
+      color: pattern.direction === "bullish"
+        ? "rgba(232, 93, 110, .78)"
+        : "rgba(73, 184, 135, .78)",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 2,
+    };
+  }
+  return {
+    color: pattern.direction === "bullish"
+      ? "rgba(232, 93, 110, .8)"
+      : "rgba(73, 184, 135, .8)",
+    lineStyle: LineStyle.Solid,
+    lineWidth: 2,
+  };
+}
+
+function marketStructureAppearance(event: ExpertMarketStructureEvent): {
+  color: string;
+  lineStyle: LineStyle;
+  lineWidth: 1 | 2;
+} {
+  if (event.status === "invalidated") {
+    return { color: "rgba(151, 164, 174, .2)", lineStyle: LineStyle.Dashed, lineWidth: 1 };
+  }
+  const sweep = event.kind === "low-liquidity-sweep" || event.kind === "high-liquidity-sweep";
+  return {
+    color: sweep
+      ? "rgba(213, 168, 75, .72)"
+      : event.direction === "bullish" ? "rgba(232, 93, 110, .68)" : "rgba(73, 184, 135, .68)",
+    lineStyle: sweep ? LineStyle.Dotted : LineStyle.Dashed,
+    lineWidth: sweep ? 1 : 2,
+  };
+}
+
+type MainSeriesApi = ISeriesApi<"Candlestick"> | ISeriesApi<"Area">;
 
 interface TimelineSeriesRenderState {
-  domain: TimelineClockDomain;
-  pointCount: number;
+  data: Array<AreaData<Time> | WhitespaceData<Time>>;
   dataLength: number;
   periodId: string;
 }
 
 interface TimelineSeriesCache {
   datasetKey: string;
-  windowCandles: Candle[];
-  windowStart: number | null;
+  candles: Candle[];
   data: TimelineSample[];
 }
 
@@ -308,38 +368,6 @@ function timelinePrefixCount(
   return low;
 }
 
-function lowerBoundCandleTime(candles: readonly Candle[], targetTime: number): number {
-  let low = 0;
-  let high = candles.length;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    const candleTime = Date.parse(candles[middle].open_time) / 1_000;
-    if (!Number.isFinite(candleTime) || candleTime < targetTime) low = middle + 1;
-    else high = middle;
-  }
-  return low;
-}
-
-function stableTailSlice<T>(
-  source: T[],
-  startIndex: number,
-  previous: T[] | null,
-): T[] {
-  if (startIndex <= 0) return source;
-  const length = source.length - startIndex;
-  if (previous && previous.length === length) {
-    let unchanged = true;
-    for (let index = 0; index < length; index += 1) {
-      if (source[startIndex + index] !== previous[index]) {
-        unchanged = false;
-        break;
-      }
-    }
-    if (unchanged) return previous;
-  }
-  return source.slice(startIndex);
-}
-
 function sameHoverCandle(left: HoverCandle | null, right: HoverCandle | null): boolean {
   return left === right || Boolean(
     left
@@ -358,6 +386,33 @@ function createIndicatorRuntime(
 ): IndicatorRuntime {
   const pane = chart.addPane(true);
   const paneIndex = pane.paneIndex();
+  if (layer.indicatorId === "rsi") {
+    const value = chart.addSeries(LineSeries, {
+      title: "RSI 14",
+      color: "#b49af4",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+      priceFormat: { type: "price", precision: 1, minMove: 0.1 },
+    }, paneIndex);
+    for (const price of [30, 50, 70]) {
+      value.createPriceLine({
+        price,
+        color: price === 50 ? "rgba(213, 168, 75, .24)" : "rgba(130, 154, 168, .3)",
+        lineWidth: 1,
+        lineStyle: price === 50 ? LineStyle.Dashed : LineStyle.Dotted,
+        axisLabelVisible: false,
+        title: "",
+      });
+    }
+    pane.priceScale("right").applyOptions({
+      borderVisible: false,
+      scaleMargins: { top: 0.08, bottom: 0.08 },
+    });
+    pane.setHeight(layer.height);
+    return { kind: "rsi", pane, configuredHeight: layer.height, value, state: null };
+  }
   if (layer.indicatorId === "kdj") {
     const k = chart.addSeries(LineSeries, {
       title: "K",
@@ -454,7 +509,9 @@ function createIndicatorRuntime(
 }
 
 function removeIndicatorRuntime(chart: IChartApi, runtime: IndicatorRuntime): void {
-  if (runtime.kind === "kdj") {
+  if (runtime.kind === "rsi") {
+    chart.removeSeries(runtime.value);
+  } else if (runtime.kind === "kdj") {
     chart.removeSeries(runtime.k);
     chart.removeSeries(runtime.d);
     chart.removeSeries(runtime.j);
@@ -469,6 +526,8 @@ function removeIndicatorRuntime(chart: IChartApi, runtime: IndicatorRuntime): vo
 
 export function MarketChart({
   candles,
+  realtimeBarStream,
+  realtimeBarStreamKey,
   period,
   livePrice,
   referencePrice,
@@ -546,28 +605,98 @@ export function MarketChart({
     () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.valueZones),
     [annotationLayers],
   );
+  const smartTrendLines = useMemo(
+    () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.trendLines),
+    [annotationLayers],
+  );
+  const pricePatterns = useMemo(
+    () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.pricePatterns),
+    [annotationLayers],
+  );
+  const marketStructureEvents = useMemo(
+    () => annotationLayers
+      .filter((layer) => layer.definition.visible)
+      .flatMap((layer) => layer.marketStructureEvents),
+    [annotationLayers],
+  );
+  const technicalOverlaySeries = useMemo(
+    () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.overlaySeries),
+    [annotationLayers],
+  );
+  const smartTrendLineSignature = smartTrendLines.map((line) => [
+    line.id,
+    line.status,
+    line.start.time,
+    line.start.price,
+    line.anchor.time,
+    line.anchor.price,
+    line.end.time,
+    line.end.price,
+    line.touchCount,
+    line.quality,
+    line.invalidatedAt ?? "",
+  ].join(":")).join("|");
+  const structureMarkSignature = [
+    ...pricePatterns.map((pattern) => [
+      pattern.id,
+      pattern.status,
+      pattern.first.time,
+      pattern.first.price,
+      pattern.neckline?.time ?? "",
+      pattern.neckline?.price ?? "",
+      pattern.second.time,
+      pattern.second.price,
+      pattern.confirmation.time,
+      pattern.confirmation.price,
+      pattern.invalidatedAt ?? "",
+    ].join(":")),
+    ...marketStructureEvents.map((event) => [
+      event.id,
+      event.status,
+      event.reference.time,
+      event.reference.price,
+      event.confirmation.time,
+      event.confirmation.price,
+      event.invalidatedAt ?? "",
+    ].join(":")),
+  ].join("|");
+  const technicalOverlaySignature = technicalOverlaySeries.map((series) => {
+    const first = series.points[0];
+    const last = series.points.at(-1);
+    return [
+      series.id,
+      series.color,
+      series.lineStyle,
+      series.lineWidth,
+      series.lastValueVisible ? 1 : 0,
+      series.points.length,
+      first?.time ?? "",
+      first?.value ?? "",
+      last?.time ?? "",
+      last?.value ?? "",
+    ].join(":");
+  }).join("|");
   const drawingsVisible = drawingLayers.some((layer) => layer.definition.visible);
   const rendererRef = useRef<HTMLDivElement>(null);
   const liveLayerRef = useRef<HTMLDivElement>(null);
+  const livePriceValueRef = useRef<HTMLElement>(null);
   const countdownRef = useRef<HTMLSpanElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const timelineSeriesRef = useRef<TimelineClockSeriesApi | null>(null);
+  const timelineSeriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   const timelineSeriesRenderStateRef = useRef<TimelineSeriesRenderState | null>(null);
   const timelineSeriesCacheRef = useRef<TimelineSeriesCache | null>(null);
-  const timelineWindowCandlesRef = useRef<Candle[] | null>(null);
   const candleSeriesRenderStateRef = useRef<CandleSeriesRenderState | null>(null);
   const renderedCandlesRef = useRef<Candle[] | null>(null);
   const referenceLineRef = useRef<IPriceLine | null>(null);
   const eventMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const drawingLayerRuntimeRef = useRef<Map<string, DrawingLayerRuntime>>(new Map());
+  const systemLineRuntimeRef = useRef<SystemLineRuntime>({ series: [] });
   const indicatorRuntimeRef = useRef<Map<string, IndicatorRuntime>>(new Map());
   const strategyPriceLinesRef = useRef<IPriceLine[]>([]);
   const strategyPriceLineOwnerRef = useRef<MainSeriesApi | null>(null);
   const markerFrameRef = useRef<number | null>(null);
   const hoverFrameRef = useRef<number | null>(null);
-  const timelineDecorationFrameRef = useRef<number | null>(null);
-  const timelineViewportReleaseFrameRef = useRef<number | null>(null);
   const expertDecorationFrameRef = useRef<number | null>(null);
   const paneMeasureFrameRef = useRef<number | null>(null);
   const paneResizeReportRef = useRef(false);
@@ -593,21 +722,9 @@ export function MarketChart({
   const candleSeriesGapsRef = useRef<readonly RenderableSeriesGap[]>([]);
   const dispatchedHistoryGapsRef = useRef(new Set<string>());
   const historyGapDatasetKeyRef = useRef("");
-  const tradingDayLayerRef = useRef<HTMLDivElement>(null);
   const expertOverlayLayerRef = useRef<HTMLDivElement>(null);
   const timelineLayoutRef = useRef<TimelineLayout>({ days: [] });
-  const timelineLogicalDayRangesRef = useRef<readonly TimelineLogicalDayRange[]>([]);
-  const timelineTradingDaysRef = useRef<TimelineLayout["days"]>([]);
   const timelineSessionGapsRef = useRef<TimelineSessionGap[]>([]);
-  const timelineViewportSpanRef = useRef(1);
-  const timelineViewportEndKeyRef = useRef<string | null>(null);
-  const timelineViewportManagedRef = useRef(true);
-  const timelineViewportApplyingRef = useRef(false);
-  const timelineMaterializationKeyRef = useRef("");
-  const timelineMaterializedDayCountRef = useRef(INITIAL_TIMELINE_MATERIALIZED_DAYS);
-  const timelineMaterializationPendingRef = useRef(false);
-  const timelineHasUnmaterializedHistoryRef = useRef(false);
-  const timelineIntradayAxisRef = useRef(false);
   const visibleCandleSpanRef = useRef(0);
   const candleDateOnlyAxisRef = useRef(false);
   const periodRef = useRef(period);
@@ -617,6 +734,9 @@ export function MarketChart({
   const eventMarkersByIdRef = useRef(eventMarkersById);
   const openingGapVisibleRef = useRef(openingGapVisible);
   const valueZonesRef = useRef(valueZones);
+  const smartTrendLinesRef = useRef(smartTrendLines);
+  const pricePatternsRef = useRef(pricePatterns);
+  const marketStructureEventsRef = useRef(marketStructureEvents);
   const projectedTimesRef = useRef<ReadonlyArray<{ actualTime: number; time: number }>>([]);
   const candleTimesRef = useRef<ReadonlyArray<{ actualTime: number; time: number }>>([]);
   const visibleProjectedLengthRef = useRef(0);
@@ -639,6 +759,9 @@ export function MarketChart({
   eventMarkersByIdRef.current = eventMarkersById;
   openingGapVisibleRef.current = openingGapVisible;
   valueZonesRef.current = valueZones;
+  smartTrendLinesRef.current = smartTrendLines;
+  pricePatternsRef.current = pricePatterns;
+  marketStructureEventsRef.current = marketStructureEvents;
   drawingToolRef.current = drawingTool;
   drawingSnapModeRef.current = drawingSnapMode;
   onDrawingCommitRef.current = onDrawingCommit;
@@ -647,44 +770,17 @@ export function MarketChart({
   const [isFollowing, setIsFollowing] = useState(true);
   const [drawingDraft, setDrawingDraft] = useState<DrawingDraft | null>(null);
   const [mainPaneHeight, setMainPaneHeight] = useState<number | null>(null);
-  const [, setTimelineMaterializationRevision] = useState(0);
 
   const latestCandleIdentity = candles.at(-1);
   const timelineDatasetKey = [
     latestCandleIdentity?.instrument.symbol ?? "",
     latestCandleIdentity?.source.provider ?? "",
   ].join(":");
-  const timelineMaterializationKey = `${period.mode}:${timelineDatasetKey}`;
   const historyGapDatasetKey = `${period.id}:${timelineDatasetKey}`;
   if (historyGapDatasetKeyRef.current !== historyGapDatasetKey) {
     historyGapDatasetKeyRef.current = historyGapDatasetKey;
     dispatchedHistoryGapsRef.current.clear();
   }
-  if (timelineMaterializationKeyRef.current !== timelineMaterializationKey) {
-    timelineMaterializationKeyRef.current = timelineMaterializationKey;
-    timelineMaterializedDayCountRef.current = INITIAL_TIMELINE_MATERIALIZED_DAYS;
-    timelineMaterializationPendingRef.current = false;
-  }
-  const timelineMaterializedDayCount = timelineMaterializedDayCountRef.current;
-  const ensureTimelineMaterializedDays = useCallback((requestedDayCount: number): boolean => {
-    const normalizedDayCount = Math.max(
-      INITIAL_TIMELINE_MATERIALIZED_DAYS,
-      Math.ceil(Number.isFinite(requestedDayCount) ? requestedDayCount : 0),
-    );
-    if (
-      normalizedDayCount <= timelineMaterializedDayCountRef.current
-      || timelineMaterializationPendingRef.current
-    ) return false;
-    timelineMaterializedDayCountRef.current = normalizedDayCount;
-    timelineMaterializationPendingRef.current = true;
-    setTimelineMaterializationRevision((current) => current + 1);
-    return true;
-  }, []);
-
-  useEffect(() => {
-    timelineMaterializationPendingRef.current = false;
-  }, [timelineMaterializationKey, timelineMaterializedDayCount]);
-
   const activeMainSeries = useCallback((): MainSeriesApi | null => (
     periodRef.current.mode === "timeline"
       ? timelineSeriesRef.current
@@ -710,7 +806,9 @@ export function MarketChart({
     })),
     [bars],
   );
-  const candleResolutionSeconds = period.aggregation.kind === "fixed"
+  const candleResolutionSeconds = period.mode === "timeline"
+    ? 1
+    : period.aggregation.kind === "fixed"
     ? period.aggregation.minutes * 60
     : null;
   const candleGapLayout = useMemo(
@@ -751,30 +849,6 @@ export function MarketChart({
   const visibleChartDataCount = gapAwarePrefixLength(visibleCandleCount, candleWhitespaceGaps);
   visibleCandleLengthRef.current = visibleCandleCount;
   const latestBar = visibleCandleCount > 0 ? bars[visibleCandleCount - 1] : null;
-  const timelineWindowStart = useMemo(() => {
-    if (period.mode !== "timeline") return null;
-    return recentTimelineWindowStart(
-      candleTimes,
-      timelineMaterializedDayCount,
-      marketSchedule,
-    );
-  }, [
-    candleTimes,
-    marketSchedule,
-    period.mode,
-    timelineMaterializedDayCount,
-  ]);
-  const timelineWindowCandles = useMemo(() => {
-    if (period.mode !== "timeline" || timelineWindowStart === null) return candles;
-    const firstIndex = lowerBoundCandleTime(candles, timelineWindowStart);
-    const window = stableTailSlice(candles, firstIndex, timelineWindowCandlesRef.current);
-    timelineWindowCandlesRef.current = window;
-    return window;
-  }, [candles, period.mode, timelineWindowStart]);
-  const earliestLoadedTimelineTime = candleTimes[0]?.actualTime ?? Number.POSITIVE_INFINITY;
-  const timelineHasUnmaterializedHistory = timelineWindowStart !== null
-    && earliestLoadedTimelineTime < timelineWindowStart;
-  timelineHasUnmaterializedHistoryRef.current = timelineHasUnmaterializedHistory;
   const rawTimelineData = useMemo(() => {
     const cache = timelineSeriesCacheRef.current;
     if (period.mode !== "timeline") {
@@ -784,22 +858,19 @@ export function MarketChart({
     }
     if (
       cache?.datasetKey === timelineDatasetKey
-      && cache.windowCandles === timelineWindowCandles
-      && cache.windowStart === timelineWindowStart
+      && cache.candles === candles
     ) return cache.data;
-    const data = buildTimelineSeries(timelineWindowCandles);
+    const data = buildTimelineSeries(candles);
     timelineSeriesCacheRef.current = {
       datasetKey: timelineDatasetKey,
-      windowCandles: timelineWindowCandles,
-      windowStart: timelineWindowStart,
+      candles,
       data,
     };
     return data;
   }, [
+    candles,
     period.mode,
     timelineDatasetKey,
-    timelineWindowCandles,
-    timelineWindowStart,
   ]);
   const timelineLayout = useMemo(() => {
     const actualTimes = rawTimelineData
@@ -808,26 +879,13 @@ export function MarketChart({
     return buildTimelineLayout(actualTimes, marketSchedule);
   }, [marketSchedule, rawTimelineData]);
   timelineLayoutRef.current = timelineLayout;
-  const timelineTradingDays = useMemo(
-    () => [...timelineLayout.days.reduce((groups, day) => {
-      const current = groups.get(day.key);
-      groups.set(day.key, current
-        ? {
-          ...current,
-          actualStart: Math.min(current.actualStart, day.actualStart),
-          actualEnd: Math.max(current.actualEnd, day.actualEnd),
-          chartStart: Math.min(current.chartStart, day.chartStart),
-          chartEnd: Math.max(current.chartEnd, day.chartEnd),
-        }
-        : day);
-      return groups;
-    }, new Map<string, TimelineLayout["days"][number]>()).values()],
-    [timelineLayout],
-  );
-  timelineTradingDaysRef.current = timelineTradingDays;
   const projectedTimelineData = useMemo(
-    () => projectTimelineSeries(rawTimelineData, timelineLayout),
-    [rawTimelineData, timelineLayout],
+    () => rawTimelineData.map((point) => ({
+      ...point,
+      actualTime: point.observedTime ?? point.time,
+      time: projectTimeForChinaAxis(point.time),
+    })),
+    [rawTimelineData],
   );
   projectedTimesRef.current = projectedTimelineData;
   const visibleTimelineCount = replayMode
@@ -835,65 +893,47 @@ export function MarketChart({
     : projectedTimelineData.length;
   visibleProjectedLengthRef.current = visibleTimelineCount;
   const timelineSessionGaps = useMemo(
-    () => buildTimelineSessionGaps(timelineLayout, projectedTimelineData, priceDigits).map((gap) => ({
-      ...gap,
-      chartTime: timelineClockBucketTime(timelineLayout, gap.chartTime) ?? gap.chartTime,
-    })),
+    () => buildTimelineSessionGaps(timelineLayout, projectedTimelineData, priceDigits),
     [priceDigits, projectedTimelineData, timelineLayout],
   );
   timelineSessionGapsRef.current = timelineSessionGaps;
   const timelineSeriesGaps = useMemo<RenderableSeriesGap[]>(
     () => buildSeriesDataGaps(
       projectedTimelineData,
-      timelineResolutionSeconds,
+      1,
       marketSchedule?.sessions.length ? timelineLayout : null,
-      TIMELINE_CLOCK_BUCKET_SECONDS,
-    ).flatMap((gap) => {
-      const projectedTime = timelineGapSeparatorTime(gap, projectedTimelineData, timelineLayout);
-      return projectedTime === null
-        ? []
-        : [{
-          kind: gap.kind,
-          nextIndex: gap.nextIndex,
-          time: projectedTime as Time,
-          actualTime: gap.separatorTime,
-          missingDurationSeconds: gap.missingDurationSeconds,
-        }];
-    }),
-    [marketSchedule, projectedTimelineData, timelineLayout, timelineResolutionSeconds],
+    ).map((gap) => ({
+      kind: gap.kind,
+      nextIndex: gap.nextIndex,
+      time: projectTimeForChinaAxis(gap.separatorTime) as Time,
+      actualTime: gap.separatorTime,
+      missingDurationSeconds: gap.missingDurationSeconds,
+    })),
+    [marketSchedule, projectedTimelineData, timelineLayout],
   );
-  const timelineClockDomain = useMemo(
-    () => buildTimelineClockDomain(
-      projectedTimelineData,
+  const timelineSeriesData = useMemo(
+    () => insertGapWhitespace(
+      projectedTimelineData.map((point) => ({
+        time: point.time as Time,
+        value: point.value,
+      })),
       timelineSeriesGaps,
-      timelineLayout,
     ),
-    [projectedTimelineData, timelineLayout, timelineSeriesGaps],
+    [projectedTimelineData, timelineSeriesGaps],
   );
-  const timelineLogicalDayRanges = useMemo(
-    () => timelineClockVisibleRanges(timelineClockDomain, visibleTimelineCount),
-    [timelineClockDomain, visibleTimelineCount],
-  );
-  timelineLogicalDayRangesRef.current = timelineLogicalDayRanges;
-  const visibleTimelineSeriesCount = timelineClockVisibleDataLength(
-    timelineClockDomain,
+  const visibleTimelineSeriesCount = gapAwarePrefixLength(
     visibleTimelineCount,
+    timelineSeriesGaps,
   );
-  const latestTimelineLogicalIndex = timelineLogicalDayRanges.length > 0
-    ? timelineLogicalDayRanges[timelineLogicalDayRanges.length - 1].to - 0.5
-    : null;
-  const visibleTimelineLogicalCount = latestTimelineLogicalIndex === null
-    ? 0
-    : latestTimelineLogicalIndex + 1;
   const drawingDataRangeKey = period.mode === "timeline"
     ? `timeline:${projectedTimelineData[0]?.actualTime ?? ""}:${replayMode ? projectedTimelineData[visibleTimelineCount - 1]?.actualTime ?? "" : "live"}`
     : `candles:${candleTimes[0]?.actualTime ?? ""}:${replayMode ? candleTimes[visibleCandleCount - 1]?.actualTime ?? "" : "live"}`;
   const indicatorProjectionKey = useMemo(() => [
     period.mode,
     period.id,
-    ...timelineLayout.days.map((day) => `${day.key}:${day.chartStart}:${day.chartEnd}`),
+    displayTimeZone,
     ...candleSeriesGaps.map((gap) => `gap:${gap.nextIndex}:${gap.actualTime}`),
-  ].join("|"), [candleSeriesGaps, period.id, period.mode, timelineLayout.days]);
+  ].join("|"), [candleSeriesGaps, displayTimeZone, period.id, period.mode]);
   const comparisonPrice = period.mode === "timeline" ? referencePrice : latestBar?.open ?? null;
   const liveColor = livePrice !== null && comparisonPrice !== null && livePrice >= comparisonPrice
     ? UP_COLOR
@@ -974,105 +1014,28 @@ export function MarketChart({
     setIsFollowing(value);
   }, []);
 
-  const applyTimelineDayViewport = useCallback((
-    chart: IChartApi,
-    requestedDaySpan: number,
-    endKey?: string | null,
-  ) => {
-    const ranges = timelineLogicalDayRangesRef.current;
-    const normalizedDaySpan = Math.max(
-      1,
-      Number.isFinite(requestedDaySpan) ? requestedDaySpan : 1,
-    );
-    const viewport = timelineLogicalViewportForSpan(ranges, normalizedDaySpan, endKey);
-    if (!viewport) return null;
-    timelineViewportSpanRef.current = normalizedDaySpan;
-    timelineViewportEndKeyRef.current = viewport.lastKey;
-    timelineViewportManagedRef.current = true;
-    timelineViewportApplyingRef.current = true;
-    if (timelineViewportReleaseFrameRef.current !== null) {
-      window.cancelAnimationFrame(timelineViewportReleaseFrameRef.current);
-    }
-    chart.timeScale().setVisibleLogicalRange({ from: viewport.from, to: viewport.to });
-    const renderer = rendererRef.current;
-    renderer?.setAttribute("data-timeline-visible-days", String(viewport.dayCount));
-    const firstRange = ranges.find((range) => range.key === viewport.firstKey);
-    const lastRange = ranges.find((range) => range.key === viewport.lastKey);
-    if (firstRange && lastRange) {
-      renderer?.setAttribute(
-        "data-timeline-window-start",
-        new Date(firstRange.actualFrom * 1_000).toISOString(),
-      );
-      renderer?.setAttribute(
-        "data-timeline-window-end",
-        new Date(lastRange.actualTo * 1_000).toISOString(),
-      );
-    }
-    updateFollowing(viewport.lastKey === ranges[ranges.length - 1]?.key);
-    timelineViewportReleaseFrameRef.current = window.requestAnimationFrame(() => {
-      timelineViewportReleaseFrameRef.current = null;
-      timelineViewportApplyingRef.current = false;
-    });
-    return viewport;
-  }, [updateFollowing]);
-
   const axisTickFormatter = useCallback((time: Time, tickMarkType: TickMarkType) => {
     const chartTime = Number(time);
     const activePeriod = periodRef.current;
-    return activePeriod.mode === "timeline"
-      ? formatTimelineTick(
-        chartTime,
-        tickMarkType,
-        timelineLayoutRef.current,
-        timelineIntradayAxisRef.current,
-        displayTimeZoneRef.current,
-      )
-      : formatChartTick(
-        actualTimeForChinaAxis(chartTime),
-        tickMarkType,
-        activePeriod,
-        visibleCandleSpanRef.current,
-        displayTimeZoneRef.current,
-      );
-  }, []);
-
-  const actualTimeAtProjectedPoint = useCallback((chartTime: number): number | undefined => {
-    const values = projectedTimesRef.current;
-    const visibleLength = visibleProjectedLengthRef.current;
-    let low = 0;
-    let high = visibleLength - 1;
-    while (low <= high) {
-      const middle = Math.floor((low + high) / 2);
-      const difference = values[middle].time - chartTime;
-      if (Math.abs(difference) < 0.000_01) return values[middle].actualTime;
-      if (difference < 0) low = middle + 1;
-      else high = middle - 1;
-    }
-    return undefined;
+    return formatChartTick(
+      actualTimeForChinaAxis(chartTime),
+      tickMarkType,
+      activePeriod,
+      visibleCandleSpanRef.current,
+      displayTimeZoneRef.current,
+    );
   }, []);
 
   const axisTimeFormatter = useCallback((time: Time) => {
     const chartTime = Number(time);
     const activePeriod = periodRef.current;
-    if (activePeriod.mode === "timeline") {
-      return formatCrosshairTime(
-        chartTime,
-        activePeriod,
-        timelineLayoutRef.current,
-        timelineResolutionSecondsRef.current,
-        actualTimeAtProjectedPoint(chartTime),
-        displayTimeZoneRef.current,
-      );
-    }
-    return formatCrosshairTime(
+    return formatChartTimeLabel(
       actualTimeForChinaAxis(chartTime),
       activePeriod,
-      timelineLayoutRef.current,
-      60,
-      undefined,
+      activePeriod.mode === "timeline" ? timelineResolutionSecondsRef.current : 60,
       displayTimeZoneRef.current,
     );
-  }, [actualTimeAtProjectedPoint]);
+  }, []);
 
   const nearestChartTimeForActual = useCallback((actualTime: number): number | null => {
     const timelineMode = periodRef.current.mode === "timeline";
@@ -1099,16 +1062,12 @@ export function MarketChart({
     const nearestTime = Math.abs(right.actualTime - actualTime) < Math.abs(actualTime - left.actualTime)
       ? right.time
       : left.time;
-    return timelineMode
-      ? timelineClockBucketTime(timelineLayoutRef.current, nearestTime)
-      : nearestTime;
+    return nearestTime;
   }, []);
 
   const actualTimeForChartCoordinate = useCallback((chartTime: number): number | null => {
-    if (periodRef.current.mode !== "timeline") return actualTimeForChinaAxis(chartTime);
-    return actualTimeAtProjectedPoint(chartTime)
-      ?? actualTimeForTimelineChartTime(timelineLayoutRef.current, chartTime);
-  }, [actualTimeAtProjectedPoint]);
+    return actualTimeForChinaAxis(chartTime);
+  }, []);
 
   const refreshExpertDecorations = useCallback(() => {
     if (expertDecorationFrameRef.current !== null) return;
@@ -1272,123 +1231,108 @@ export function MarketChart({
         element.title = `${zone.label} ${zone.low.toFixed(priceDigits)}–${zone.high.toFixed(priceDigits)}`;
         fragment.append(element);
       }
+      for (const trendLine of smartTrendLinesRef.current) {
+        const endTime = nearestChartTimeForActual(trendLine.end.time);
+        if (endTime === null) continue;
+        const xCoordinate = chart.timeScale().timeToCoordinate(endTime as Time);
+        const yCoordinate = series.priceToCoordinate(trendLine.end.price);
+        if (xCoordinate === null || yCoordinate === null) continue;
+        const x = Number(xCoordinate);
+        const y = Number(yCoordinate);
+        if (x < 0 || x > plotWidth || y < 0 || y > paneHeight) continue;
+        const label = document.createElement("span");
+        label.className = `smart-trend-label is-${trendLine.direction} is-${trendLine.status}`;
+        label.style.left = `${Math.min(plotWidth - 8, x).toFixed(2)}px`;
+        label.style.top = `${y.toFixed(2)}px`;
+        label.textContent = trendLine.status === "invalidated"
+          ? "已失效"
+          : `${trendLine.direction === "support" ? "支撑" : "压力"} · ${trendLine.touchCount}触`;
+        label.title = [
+          `智能${trendLine.direction === "support" ? "支撑" : "压力"}趋势线`,
+          `状态 ${trendLine.status}`,
+          `质量 ${(trendLine.quality * 100).toFixed(0)}%`,
+          `平均误差 ${trendLine.atrError.toFixed(2)} ATR`,
+          trendLine.invalidationReason,
+        ].filter(Boolean).join(" · ");
+        label.setAttribute("role", "note");
+        fragment.append(label);
+      }
+      const appendStructureStamp = (
+        time: number,
+        price: number,
+        className: string,
+        labelText: string,
+        stateText: string,
+        title: string,
+      ) => {
+        const chartTime = nearestChartTimeForActual(time);
+        if (chartTime === null) return;
+        const xCoordinate = chart.timeScale().timeToCoordinate(chartTime as Time);
+        const yCoordinate = series.priceToCoordinate(price);
+        if (xCoordinate === null || yCoordinate === null) return;
+        const x = Number(xCoordinate);
+        const y = Number(yCoordinate);
+        if (x < 0 || x > plotWidth || y < 0 || y > paneHeight) return;
+        const stamp = document.createElement("span");
+        stamp.className = `structure-stamp ${className}`;
+        if (x > plotWidth - 86) stamp.classList.add("is-align-left");
+        if (y < 44) stamp.classList.add("is-below");
+        stamp.style.left = `${x.toFixed(2)}px`;
+        stamp.style.top = `${y.toFixed(2)}px`;
+        stamp.title = title;
+        stamp.setAttribute("role", "note");
+        stamp.setAttribute("aria-label", title);
+        stamp.tabIndex = 0;
+        const mark = document.createElement("strong");
+        mark.textContent = labelText;
+        stamp.append(mark);
+        const state = document.createElement("small");
+        state.textContent = stateText;
+        stamp.append(state);
+        fragment.append(stamp);
+      };
+      for (const pattern of pricePatternsRef.current) {
+        appendStructureStamp(
+          pattern.confirmation.time,
+          pattern.confirmation.price,
+          `is-pattern is-${pattern.kind} is-${pattern.direction} is-${pattern.status}`,
+          pattern.kind === "double-bottom"
+            ? "W"
+            : pattern.kind === "double-top"
+              ? "M"
+              : pattern.kind === "two-b-bottom" ? "2B↑" : "2B↓",
+          pattern.status === "invalidated"
+            ? "失效"
+            : pattern.kind === "two-b-bottom" ? "底部" : pattern.kind === "two-b-top" ? "顶部" : "确认",
+          [
+            pattern.label,
+            `置信 ${Math.round(pattern.confidence * 100)}%`,
+            ...pattern.evidence,
+          ].join(" · "),
+        );
+      }
+      for (const event of marketStructureEventsRef.current) {
+        appendStructureStamp(
+          event.confirmation.time,
+          event.confirmation.price,
+          `is-market-structure is-${event.direction} is-${event.status}`,
+          event.label,
+          event.status === "invalidated" ? "失效" : "结构",
+          [
+            event.label,
+            `置信 ${Math.round(event.confidence * 100)}%`,
+            ...event.evidence,
+          ].join(" · "),
+        );
+      }
       layer.replaceChildren(fragment);
     });
   }, [actualTimeForChartCoordinate, nearestChartTimeForActual, priceDigits]);
 
   const refreshTimelineDecorations = useCallback(() => {
-    if (timelineDecorationFrameRef.current !== null) return;
-    timelineDecorationFrameRef.current = window.requestAnimationFrame(() => {
-      timelineDecorationFrameRef.current = null;
-      const chart = chartRef.current;
-      const layer = tradingDayLayerRef.current;
-      const activePeriod = periodRef.current;
-      if (!chart || !layer || activePeriod.mode !== "timeline") {
-        layer?.replaceChildren();
-        return;
-      }
-
-      const layout = timelineLayoutRef.current;
-      const visibleRange = chart.timeScale().getVisibleRange();
-      const visibleFrom = visibleRange ? Number(visibleRange.from) : Number.NEGATIVE_INFINITY;
-      const visibleTo = visibleRange ? Number(visibleRange.to) : Number.POSITIVE_INFINITY;
-      const logicalVisibleRange = chart.timeScale().getVisibleLogicalRange();
-      const visibleLogicalDays = logicalVisibleRange
-        ? timelineLogicalDayRangesRef.current.filter((range) => (
-          range.to > logicalVisibleRange.from && range.from < logicalVisibleRange.to
-        ))
-        : timelineLogicalDayRangesRef.current;
-      const visibleDayKeys = new Set(visibleLogicalDays.map((range) => range.key));
-      const tradingDays = timelineTradingDaysRef.current;
-      const visibleDays = tradingDays.filter((day) => visibleDayKeys.has(day.key));
-      const visibleSpan = visibleRange
-        ? Math.max(0, visibleTo - visibleFrom)
-        : Number.POSITIVE_INFINITY;
-      const showTradingDays = visibleDays.length > 1 && visibleSpan >= 1.35 * 24 * 60 * 60;
-      const nextIntradayAxis = !showTradingDays;
-      if (timelineIntradayAxisRef.current !== nextIntradayAxis) {
-        timelineIntradayAxisRef.current = nextIntradayAxis;
-        chart.applyOptions({ timeScale: { tickMarkFormatter: axisTickFormatter } });
-      }
-      layer.dataset.axisMode = showTradingDays ? "trading-days" : "intraday";
-
-      const fragment = document.createDocumentFragment();
-      const chartWidth = rendererRef.current?.clientWidth ?? 0;
-      const priceScaleWidth = chart.priceScale("right").width();
-      const plotWidth = Math.max(0, chartWidth - priceScaleWidth);
-      layer.style.right = `${priceScaleWidth}px`;
-      for (const day of visibleDays) {
-        const dayRange = timelineLogicalDayRangesRef.current.find(
-          (range) => range.key === day.key,
-        );
-        const startX = chart.timeScale().timeToCoordinate(day.chartStart as Time);
-        const endX = dayRange
-          ? chart.timeScale().timeToCoordinate(dayRange.chartTo as Time)
-          : null;
-        const centerX = startX === null || endX === null
-          ? null
-          : (Number(startX) + Number(endX)) / 2;
-        if (startX !== null && startX > 0 && startX < plotWidth) {
-          const separator = document.createElement("span");
-          separator.className = "timeline-trading-day-separator";
-          separator.style.transform = `translate3d(${startX.toFixed(2)}px, 0, 0)`;
-          separator.dataset.tradingDay = day.key;
-          fragment.append(separator);
-        }
-        if (showTradingDays && centerX !== null) {
-          const labelX = Math.min(
-            Math.max(22, centerX),
-            Math.max(22, plotWidth - 22),
-          );
-          const label = document.createElement("span");
-          label.className = "timeline-trading-day-label";
-          label.style.transform = `translate3d(${labelX.toFixed(2)}px, 0, 0) translateX(-50%)`;
-          label.dataset.tradingDay = day.key;
-          label.textContent = day.label;
-          fragment.append(label);
-        }
-      }
-
-      const logicalWindow = timelineDayWindowAtLogicalRange(
-        timelineLogicalDayRangesRef.current,
-        logicalVisibleRange,
-      );
-      if (logicalWindow?.dayCount === 1) {
-        const dayRange = timelineLogicalDayRangesRef.current.find(
-          (range) => range.key === logicalWindow.endKey,
-        );
-        if (dayRange) {
-          for (const boundary of [
-            { edge: "open", time: dayRange.chartFrom },
-            { edge: "close", time: dayRange.chartTo },
-          ] as const) {
-            const coordinate = chart.timeScale().timeToCoordinate(boundary.time as Time);
-            if (coordinate === null) continue;
-            const x = boundary.edge === "open"
-              ? Math.max(4, Number(coordinate))
-              : Math.min(plotWidth - 4, Number(coordinate));
-            const label = document.createElement("span");
-            label.className = `timeline-window-boundary-label is-${boundary.edge}`;
-            label.style.transform = boundary.edge === "open"
-              ? `translate3d(${x.toFixed(2)}px, 0, 0)`
-              : `translate3d(${x.toFixed(2)}px, 0, 0) translateX(-100%)`;
-            label.dataset.tradingDay = dayRange.key;
-            label.dataset.edge = boundary.edge;
-            label.textContent = formatTimelineTick(
-              boundary.time,
-              TickMarkType.Time,
-              layout,
-              true,
-              displayTimeZoneRef.current,
-            );
-            fragment.append(label);
-          }
-        }
-      }
-
-      layer.replaceChildren(fragment);
-    });
-  }, [activeMainSeries, axisTickFormatter, priceDigits]);
+    // Standard time-scale labels and explicit coverage metadata replace the
+    // former synthetic trading-day clock overlay.
+  }, []);
 
   useEffect(() => {
     const container = rendererRef.current;
@@ -1441,8 +1385,8 @@ export function MarketChart({
         secondsVisible: initialTimelineMode && timelineResolutionSecondsRef.current < 60,
         rightOffset: 0,
         rightOffsetPixels: 56,
-        barSpacing: initialTimelineMode ? 5 : 10,
-        minBarSpacing: initialTimelineMode ? 0.001 : 3,
+        barSpacing: initialTimelineMode ? 4 : 10,
+        minBarSpacing: initialTimelineMode ? 0.5 : 3,
         lockVisibleTimeRangeOnResize: true,
         minimumHeight: 28,
         allowBoldLabels: false,
@@ -1452,23 +1396,22 @@ export function MarketChart({
         uniformDistribution: false,
       },
       handleScroll: {
-        mouseWheel: !initialTimelineMode,
+        mouseWheel: true,
         pressedMouseMove: true,
         horzTouchDrag: true,
         vertTouchDrag: false,
       },
       handleScale: {
-        axisPressedMouseMove: !initialTimelineMode,
-        mouseWheel: !initialTimelineMode,
-        pinch: !initialTimelineMode,
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
       },
       localization: { locale: "zh-CN", timeFormatter: axisTimeFormatter },
     });
     let candlestickSeries: ISeriesApi<"Candlestick"> | null = null;
-    let timelineSeries: TimelineClockSeriesApi | null = null;
+    let timelineSeries: ISeriesApi<"Area"> | null = null;
     if (initialTimelineMode) {
-      timelineSeries = chart.addCustomSeries(new TimelineClockSeries(), {
-        color: expertAppearance ? "#ddb45c" : "#4e7deb",
+      timelineSeries = chart.addSeries(AreaSeries, {
         lineColor: expertAppearance ? "#ddb45c" : "#4e7deb",
         topColor: expertAppearance ? "rgba(221, 180, 92, .20)" : "rgba(78, 125, 235, .20)",
         bottomColor: expertAppearance ? "rgba(221, 180, 92, .015)" : "rgba(78, 125, 235, .015)",
@@ -1504,26 +1447,16 @@ export function MarketChart({
       }
       if (timelineSeries) {
         const item = parameter.seriesData.get(timelineSeries);
-        if (!item || !isTimelineClockBucket(item)) {
+        if (!item || !("value" in item)) {
           scheduleHoverChange(null);
           return;
         }
-        const bucketX = chart.timeScale().timeToCoordinate(item.time);
-        const pointerX = parameter.point?.x;
-        const barSpacing = Math.max(0.000_001, chart.timeScale().options().barSpacing);
-        const fraction = bucketX === null || pointerX === undefined
-          ? 0
-          : Math.max(0, Math.min(1, (Number(pointerX) - Number(bucketX)) / barSpacing));
-        const sample = nearestTimelineClockSample(
-          item,
-          Number(item.time) + fraction * TIMELINE_CLOCK_BUCKET_SECONDS,
-        );
         scheduleHoverChange({
-          time: sample.actualTime,
-          open: sample.value,
-          high: sample.value,
-          low: sample.value,
-          close: sample.value,
+          time: actualTimeForChinaAxis(Number(parameter.time)),
+          open: item.value,
+          high: item.value,
+          low: item.value,
+          close: item.value,
         });
       } else if (candlestickSeries) {
         const item = parameter.seriesData.get(candlestickSeries);
@@ -1595,13 +1528,6 @@ export function MarketChart({
         historyDemandActiveRef.current = true;
       }
       if (!historyDemandActiveRef.current) return;
-      if (
-        periodRef.current.mode === "timeline"
-        && timelineHasUnmaterializedHistoryRef.current
-      ) {
-        ensureTimelineMaterializedDays(timelineMaterializedDayCountRef.current + 1);
-        return;
-      }
       if (shouldRequestOlderHistory(
         range,
         dataLengthRef.current,
@@ -1617,38 +1543,18 @@ export function MarketChart({
       refreshTimelineDecorations();
       refreshExpertDecorations();
       const activePeriod = periodRef.current;
-      if (activePeriod.mode !== "timeline") {
-        const visibleTimeRange = chart.timeScale().getVisibleRange();
-        const visibleSpan = visibleTimeRange
-          ? Math.max(0, Number(visibleTimeRange.to) - Number(visibleTimeRange.from))
-          : 0;
-        const nextDateOnlyAxis = activePeriod.aggregation.kind === "fixed"
-          && visibleSpan >= DATE_ONLY_AXIS_THRESHOLD_SECONDS;
-        visibleCandleSpanRef.current = visibleSpan;
-        if (candleDateOnlyAxisRef.current !== nextDateOnlyAxis) {
-          candleDateOnlyAxisRef.current = nextDateOnlyAxis;
-          chart.applyOptions({ timeScale: { tickMarkFormatter: axisTickFormatter } });
-        }
+      const visibleTimeRange = chart.timeScale().getVisibleRange();
+      const visibleSpan = visibleTimeRange
+        ? Math.max(0, Number(visibleTimeRange.to) - Number(visibleTimeRange.from))
+        : 0;
+      const nextDateOnlyAxis = activePeriod.aggregation.kind === "fixed"
+        && visibleSpan >= DATE_ONLY_AXIS_THRESHOLD_SECONDS;
+      visibleCandleSpanRef.current = visibleSpan;
+      if (candleDateOnlyAxisRef.current !== nextDateOnlyAxis) {
+        candleDateOnlyAxisRef.current = nextDateOnlyAxis;
+        chart.applyOptions({ timeScale: { tickMarkFormatter: axisTickFormatter } });
       }
       if (!range || returningRef.current || dataLengthRef.current === 0) return;
-      if (activePeriod.mode === "timeline" && !timelineViewportApplyingRef.current) {
-        const windowState = timelineDayWindowAtLogicalRange(
-          timelineLogicalDayRangesRef.current,
-          range,
-        );
-        if (windowState) {
-          timelineViewportSpanRef.current = timelineLogicalSpanAtRange(
-            timelineLogicalDayRangesRef.current,
-            range,
-          ) ?? timelineViewportSpanRef.current;
-          timelineViewportEndKeyRef.current = windowState.endKey;
-          rendererRef.current?.setAttribute(
-            "data-timeline-visible-days",
-            String(windowState.dayCount),
-          );
-        }
-      }
-      if (timelineViewportApplyingRef.current) return;
       updateFollowing(range.to >= latestLogicalIndexRef.current - 1.15);
       evaluateHistoryDemand(
         window.performance.now() <= historyInteractionUntilRef.current,
@@ -1660,69 +1566,14 @@ export function MarketChart({
       scheduleLiveMarker();
       if (event.buttons > 0) {
         markHistoryInteraction();
-        if (periodRef.current.mode === "timeline") timelineViewportManagedRef.current = false;
         refreshExpertDecorations();
       }
     };
-    const handlePointerDown = (event: PointerEvent) => {
+    const handlePointerDown = () => {
       markHistoryInteraction();
-      if (event.pointerType === "touch" && periodRef.current.mode === "timeline") {
-        timelineViewportManagedRef.current = false;
-      }
     };
-    const handleWheel = (event: WheelEvent) => {
+    const handleWheel = () => {
       markHistoryInteraction();
-      if (
-        periodRef.current.mode === "timeline"
-        && Math.abs(event.deltaY) >= Math.abs(event.deltaX)
-        && event.deltaY !== 0
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        const ranges = timelineLogicalDayRangesRef.current;
-        if (ranges.length === 0) return;
-        const visibleRange = chart.timeScale().getVisibleLogicalRange();
-        const currentWindow = timelineViewportManagedRef.current
-          ? {
-            endKey: timelineViewportEndKeyRef.current ?? ranges[ranges.length - 1].key,
-          }
-          : timelineDayWindowAtLogicalRange(ranges, visibleRange);
-        const currentDaySpan = timelineViewportManagedRef.current
-          ? timelineViewportSpanRef.current
-          : timelineLogicalSpanAtRange(ranges, visibleRange) ?? 1;
-        const requestedDaySpan = timelineZoomSpanAfterWheel(
-          currentDaySpan,
-          event.deltaY,
-          event.deltaMode,
-        );
-        const endKey = followingRef.current
-          ? ranges[ranges.length - 1].key
-          : currentWindow?.endKey;
-        const requestedEndIndex = endKey
-          ? ranges.findIndex((range) => range.key === endKey)
-          : -1;
-        const endIndex = requestedEndIndex >= 0 ? requestedEndIndex : ranges.length - 1;
-        const availableDaySpan = endIndex + 1;
-        const nextDaySpan = Math.min(requestedDaySpan, availableDaySpan + 1);
-        if (Math.abs(nextDaySpan - currentDaySpan) > 1e-4) {
-          applyTimelineDayViewport(chart, nextDaySpan, endKey);
-        }
-        if (
-          event.deltaY > 0
-          && nextDaySpan > availableDaySpan
-        ) {
-          historyDemandActiveRef.current = true;
-          if (timelineHasUnmaterializedHistoryRef.current) {
-            ensureTimelineMaterializedDays(Math.ceil(nextDaySpan));
-          } else {
-            runOlderHistoryRequest();
-          }
-        }
-        scheduleLiveMarker();
-        refreshTimelineDecorations();
-        refreshExpertDecorations();
-        return;
-      }
       scheduleLiveMarker();
       refreshExpertDecorations();
     };
@@ -1733,7 +1584,7 @@ export function MarketChart({
     container.addEventListener("pointerdown", handlePointerDown, true);
     container.addEventListener("pointermove", handlePointerMove, true);
     container.addEventListener("pointerup", handlePointerUp, true);
-    container.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    container.addEventListener("wheel", handleWheel, { passive: true, capture: true });
 
     const resizeObserver = new ResizeObserver(() => {
       chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
@@ -1747,12 +1598,6 @@ export function MarketChart({
       if (returnTimerRef.current !== null) window.clearTimeout(returnTimerRef.current);
       if (markerFrameRef.current !== null) window.cancelAnimationFrame(markerFrameRef.current);
       if (hoverFrameRef.current !== null) window.cancelAnimationFrame(hoverFrameRef.current);
-      if (timelineDecorationFrameRef.current !== null) {
-        window.cancelAnimationFrame(timelineDecorationFrameRef.current);
-      }
-      if (timelineViewportReleaseFrameRef.current !== null) {
-        window.cancelAnimationFrame(timelineViewportReleaseFrameRef.current);
-      }
       if (expertDecorationFrameRef.current !== null) {
         window.cancelAnimationFrame(expertDecorationFrameRef.current);
       }
@@ -1761,9 +1606,6 @@ export function MarketChart({
       }
       markerFrameRef.current = null;
       hoverFrameRef.current = null;
-      timelineDecorationFrameRef.current = null;
-      timelineViewportReleaseFrameRef.current = null;
-      timelineViewportApplyingRef.current = false;
       expertDecorationFrameRef.current = null;
       paneMeasureFrameRef.current = null;
       paneResizeReportRef.current = false;
@@ -1781,6 +1623,7 @@ export function MarketChart({
       referenceLineRef.current = null;
       eventMarkersRef.current = null;
       drawingLayerRuntimeRef.current.clear();
+      systemLineRuntimeRef.current.series = [];
       indicatorRuntimeRef.current.clear();
       strategyPriceLinesRef.current = [];
       strategyPriceLineOwnerRef.current = null;
@@ -1796,25 +1639,15 @@ export function MarketChart({
       timelineSeriesRenderStateRef.current = null;
       candleSeriesRenderStateRef.current = null;
       renderedCandlesRef.current = null;
-      timelineLogicalDayRangesRef.current = [];
-      timelineViewportSpanRef.current = 1;
-      timelineViewportEndKeyRef.current = null;
-      timelineViewportManagedRef.current = true;
       historyDemandActiveRef.current = false;
       historyRequestPendingRef.current = false;
       emptyHistoryAdvanceMinutesRef.current = 0;
       evaluateHistoryDemandRef.current = null;
-      rendererRef.current?.removeAttribute("data-timeline-visible-days");
-      rendererRef.current?.removeAttribute("data-timeline-window-start");
-      rendererRef.current?.removeAttribute("data-timeline-window-end");
     };
   }, [
-    applyTimelineDayViewport,
-    actualTimeAtProjectedPoint,
     appearance,
     axisTickFormatter,
     axisTimeFormatter,
-    ensureTimelineMaterializedDays,
     period.mode,
     refreshExpertDecorations,
     refreshTimelineDecorations,
@@ -1834,7 +1667,58 @@ export function MarketChart({
     chartData.length,
     historyLoading,
     period.id,
-    timelineMaterializedDayCount,
+  ]);
+
+  useEffect(() => {
+    if (replayMode) return;
+    return realtimeBarStream.subscribe(({ datasetKey, bar }) => {
+      if (datasetKey !== realtimeBarStreamKey) return;
+      const price = Number(bar.close);
+      if (!Number.isFinite(price)) return;
+
+      const activePeriod = periodRef.current;
+      if (activePeriod.mode === "timeline") {
+        const sample = timelineSampleFromCandle(bar);
+        const series = timelineSeriesRef.current;
+        if (!sample || !series) return;
+        const time = projectTimeForChinaAxis(sample.time);
+        if (previousLastTimeRef.current !== null && time < previousLastTimeRef.current) return;
+        series.update({ time: time as Time, value: sample.value });
+      } else {
+        const series = candlestickSeriesRef.current;
+        const value = barsFromCandles([bar])[0];
+        if (!series || !value) return;
+        const time = projectTimeForChinaAxis(value.time);
+        if (previousLastTimeRef.current !== null && time < previousLastTimeRef.current) return;
+        series.update({ ...value, time: time as Time });
+      }
+
+      latestPriceRef.current = price;
+      if (livePriceValueRef.current) {
+        livePriceValueRef.current.textContent = price.toFixed(priceDigits);
+      }
+      const comparison = activePeriod.mode === "timeline"
+        ? referencePrice
+        : Number(bar.open);
+      const layer = liveLayerRef.current;
+      if (layer) {
+        layer.style.setProperty(
+          "--live-color",
+          comparison !== null && Number.isFinite(comparison) && price >= comparison
+            ? UP_COLOR
+            : DOWN_COLOR,
+        );
+        layer.setAttribute("aria-label", `当前价 ${price.toFixed(priceDigits)}`);
+      }
+      scheduleLiveMarker();
+    });
+  }, [
+    priceDigits,
+    realtimeBarStream,
+    realtimeBarStreamKey,
+    referencePrice,
+    replayMode,
+    scheduleLiveMarker,
   ]);
 
   useEffect(() => {
@@ -1853,22 +1737,22 @@ export function MarketChart({
         secondsVisible: period.mode === "timeline" && timelineResolutionSeconds < 60,
         rightOffset: 0,
         rightOffsetPixels: 56,
-        barSpacing: period.mode === "timeline" ? 5 : 10,
-        minBarSpacing: period.mode === "timeline" ? 0.001 : 3,
+        barSpacing: period.mode === "timeline" ? 4 : 10,
+        minBarSpacing: period.mode === "timeline" ? 0.5 : 3,
         tickMarkFormatter: axisTickFormatter,
         enableConflation: false,
         uniformDistribution: false,
       },
       handleScroll: {
-        mouseWheel: period.mode !== "timeline",
+        mouseWheel: true,
         pressedMouseMove: true,
         horzTouchDrag: true,
         vertTouchDrag: false,
       },
       handleScale: {
-        axisPressedMouseMove: period.mode !== "timeline",
-        mouseWheel: period.mode !== "timeline",
-        pinch: period.mode !== "timeline",
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
       },
       localization: { locale: "zh-CN", timeFormatter: axisTimeFormatter },
     });
@@ -1921,25 +1805,18 @@ export function MarketChart({
       : "reset";
     const visibleRangeBeforeUpdate = chart.timeScale().getVisibleLogicalRange();
     const previousDataLength = previousDataLengthRef.current;
-    const activeSeries = chartData;
+    const activeSeries = period.mode === "timeline" ? timelineSeriesData : chartData;
     const activeDataLength = period.mode === "timeline"
       ? visibleTimelineSeriesCount
       : visibleChartDataCount;
-    const logicalDataLength = period.mode === "timeline"
-      ? visibleTimelineLogicalCount
-      : activeDataLength;
-    const nextFirstTime = period.mode === "timeline"
-      ? timelineLogicalDayRanges[0]?.chartFrom ?? Number.NaN
-      : activeDataLength > 0 ? Number(activeSeries[0]?.time) : Number.NaN;
-    const timelineLastTime = visibleTimelineCount > 0
-      ? projectedTimelineData[visibleTimelineCount - 1]?.time
+    const logicalDataLength = activeDataLength;
+    const nextFirstTime = activeDataLength > 0
+      ? Number(activeSeries[0]?.time)
+      : Number.NaN;
+    const nextLastTime = activeDataLength > 0
+      ? Number(activeSeries[activeDataLength - 1]?.time)
       : null;
-    const nextLastTime = period.mode === "timeline"
-      ? typeof timelineLastTime === "number" ? timelineLastTime : null
-      : latestBar?.time ?? null;
-    const nextLatestLogicalIndex = period.mode === "timeline"
-      ? latestTimelineLogicalIndex ?? -1
-      : activeDataLength - 1;
+    const nextLatestLogicalIndex = activeDataLength - 1;
     dataLengthRef.current = logicalDataLength;
     latestLogicalIndexRef.current = nextLatestLogicalIndex;
     const previousCandleState = candleSeriesRenderStateRef.current;
@@ -1950,81 +1827,65 @@ export function MarketChart({
       activeDataLength,
       MAX_INCREMENTAL_REPLAY_POINTS,
     );
+    const realtimeTailOwnedByStream = !replayMode
+      && (candleMutation === "tail-update" || candleMutation === "tail-append");
     const canUpdateCandleIncrementally = period.mode !== "timeline"
+      && replayMode
       && candleUpdateStart !== null
       && previousLastTime !== null
       && nextLastTime !== null
-      && nextLastTime >= previousLastTime;
+      && nextLastTime >= previousLastTime
+      && (
+        candleMutation !== "tail-append"
+        || activeDataLength === previousCandleDataLength + 1
+      );
     const candleLastPoint = activeDataLength > 0 ? chartData[activeDataLength - 1] : null;
     if (period.mode === "timeline" && timelineSeries) {
-      const nextTimelineState: TimelineSeriesRenderState = {
-        domain: timelineClockDomain,
-        pointCount: visibleTimelineCount,
-        dataLength: visibleTimelineSeriesCount,
+      const previousTimelineState = timelineSeriesRenderStateRef.current;
+      const previousTimelineDataLength = previousTimelineState?.dataLength ?? 0;
+      const timelineUpdateStart = candleSeriesUpdateStart(
+        candleMutation,
+        previousTimelineDataLength,
+        activeDataLength,
+        MAX_INCREMENTAL_REPLAY_POINTS,
+      );
+      const canUpdateTimelineIncrementally = timelineUpdateStart !== null
+        && replayMode
+        && previousTimelineState?.periodId === period.id
+        && previousLastTime !== null
+        && nextLastTime !== null
+        && nextLastTime >= previousLastTime
+        && (
+          candleMutation !== "tail-append"
+          || activeDataLength === previousTimelineDataLength + 1
+        );
+      const timelineDataAlreadyCurrent = realtimeTailOwnedByStream || (
+        candleMutation === "unchanged"
+        && previousTimelineState?.data === timelineSeriesData
+        && previousTimelineDataLength === activeDataLength
+      );
+      if (!timelineDataAlreadyCurrent && canUpdateTimelineIncrementally) {
+        for (let index = timelineUpdateStart; index < activeDataLength; index += 1) {
+          timelineSeries.update(timelineSeriesData[index]);
+        }
+      } else if (!timelineDataAlreadyCurrent) {
+        timelineSeries.setData(
+          activeDataLength === timelineSeriesData.length
+            ? timelineSeriesData
+            : timelineSeriesData.slice(0, activeDataLength),
+        );
+      }
+      timelineSeriesRenderStateRef.current = {
+        data: timelineSeriesData,
+        dataLength: activeDataLength,
         periodId: period.id,
       };
-      const previousTimelineState = timelineSeriesRenderStateRef.current;
-      const sharedPointCount = candleMutation === "tail-update"
-        ? Math.max(0, Math.min(previousTimelineState?.pointCount ?? 0, visibleTimelineCount) - 1)
-        : Math.min(previousTimelineState?.pointCount ?? 0, visibleTimelineCount);
-      const sharedPrefix = previousTimelineState !== null
-        && previousTimelineState.periodId === period.id
-        && (
-          previousTimelineState.domain === timelineClockDomain
-          || timelineClockDomainsSharePrefix(
-            previousTimelineState.domain,
-            timelineClockDomain,
-            sharedPointCount,
-          )
-        );
-      const pointDelta = previousTimelineState === null
-        ? Number.POSITIVE_INFINITY
-        : Math.abs(visibleTimelineCount - previousTimelineState.pointCount);
-      if (!previousTimelineState || !sharedPrefix || pointDelta > MAX_INCREMENTAL_REPLAY_POINTS) {
-        timelineSeries.setData(materializeTimelineClockData(
-          timelineClockDomain,
-          visibleTimelineCount,
-        ));
-      } else {
-        if (visibleTimelineSeriesCount < previousTimelineState.dataLength) {
-          timelineSeries.pop(previousTimelineState.dataLength - visibleTimelineSeriesCount);
-        }
-        if (visibleTimelineSeriesCount > previousTimelineState.dataLength) {
-          for (
-            let dataIndex = previousTimelineState.dataLength;
-            dataIndex < visibleTimelineSeriesCount;
-            dataIndex += 1
-          ) {
-            timelineSeries.update(timelineClockDataItemAt(
-              timelineClockDomain,
-              dataIndex,
-              visibleTimelineCount,
-            ));
-          }
-        }
-        const changedIndexes = new Set(changedTimelineClockDataIndexes(
-          timelineClockDomain,
-          previousTimelineState.pointCount,
-          visibleTimelineCount,
-        ));
-        if (candleMutation === "tail-update" && visibleTimelineCount > 0) {
-          const tailDataIndex = timelineClockDomain.pointDataIndexes[visibleTimelineCount - 1];
-          if (tailDataIndex >= 0) changedIndexes.add(tailDataIndex);
-        }
-        for (const dataIndex of changedIndexes) {
-          if (dataIndex >= visibleTimelineSeriesCount) continue;
-          timelineSeries.update(timelineClockDataItemAt(
-            timelineClockDomain,
-            dataIndex,
-            visibleTimelineCount,
-          ), true);
-        }
-      }
-      timelineSeriesRenderStateRef.current = nextTimelineState;
     }
     if (period.mode !== "timeline" && candlestickSeries) {
-      const candleDataAlreadyCurrent = candleMutation === "unchanged"
-        && previousCandleDataLength === activeDataLength;
+      const candleDataAlreadyCurrent = realtimeTailOwnedByStream || (
+        candleMutation === "unchanged"
+        && previousCandleDataLength === activeDataLength
+      );
       if (!candleDataAlreadyCurrent && canUpdateCandleIncrementally && candleLastPoint) {
         for (let index = candleUpdateStart; index < activeDataLength; index += 1) {
           candlestickSeries.update(chartData[index]);
@@ -2045,13 +1906,7 @@ export function MarketChart({
       && Number.isFinite(nextFirstTime)
       && nextFirstTime < previousFirstTime
     )
-      ? period.mode === "timeline"
-        ? Math.max(
-          0,
-          (timelineLogicalDayRanges.find((range) => range.chartFrom === previousFirstTime)?.from ?? -0.5)
-            + 0.5,
-        )
-        : activeSeries.findIndex((point) => Number(point.time) === previousFirstTime)
+      ? activeSeries.findIndex((point) => Number(point.time) === previousFirstTime)
       : 0;
     const prependedCount = prependedPointCount(
       previousFirstTime,
@@ -2063,32 +1918,7 @@ export function MarketChart({
       && previousLastTime !== null
       && nextLastTime !== null
       && nextLastTime < previousLastTime;
-    const resetTimelineViewport = period.mode === "timeline"
-      && logicalDataLength > 0
-      && (firstDataArrival || previousPeriod === null || previousPeriod !== period.id);
-    if (resetTimelineViewport) {
-      timelineViewportSpanRef.current = 1;
-      timelineViewportEndKeyRef.current = null;
-      timelineViewportManagedRef.current = true;
-    }
-    const refreshManagedTimelineViewport = period.mode === "timeline"
-      && logicalDataLength > 0
-      && timelineViewportManagedRef.current
-      && (
-        resetTimelineViewport
-        || historyWasPrepended
-        || logicalDataLength !== previousDataLength
-      );
-    const timelineViewportHandled = refreshManagedTimelineViewport
-      ? applyTimelineDayViewport(
-        chart,
-        timelineViewportSpanRef.current,
-        followingRef.current || resetTimelineViewport ? null : timelineViewportEndKeyRef.current,
-      ) !== null
-      : false;
-    if (timelineViewportHandled) {
-      // The managed trading-day viewport already preserves its exact anchor.
-    } else if (
+    if (
       historyWasPrepended
       && visibleRangeBeforeUpdate
       && !followingRef.current
@@ -2100,7 +1930,7 @@ export function MarketChart({
     } else if (historyWasPrepended && followingRef.current) {
       scrollToLatest(chart);
       updateFollowing(true);
-    } else if (tailMovedBackward && logicalDataLength > 0 && period.mode !== "timeline") {
+    } else if (tailMovedBackward && logicalDataLength > 0) {
       scrollToLatest(chart);
       updateFollowing(true);
     } else if (
@@ -2115,8 +1945,7 @@ export function MarketChart({
       followingRef.current &&
       previousLastTime !== null &&
       nextLastTime !== null &&
-      nextLastTime > previousLastTime &&
-      period.mode !== "timeline"
+      nextLastTime > previousLastTime
     ) {
       returningRef.current = true;
       scrollToLatest(chart);
@@ -2136,25 +1965,18 @@ export function MarketChart({
     refreshTimelineDecorations();
     refreshExpertDecorations();
   }, [
-    applyTimelineDayViewport,
     chartData,
     candles,
-    displayTimeZone,
-    latestBar?.time,
-    latestTimelineLogicalIndex,
     period.id,
     period.mode,
     refreshExpertDecorations,
     refreshTimelineDecorations,
+    replayMode,
     scheduleLiveMarker,
     scrollToLatest,
-    projectedTimelineData,
-    timelineClockDomain,
-    timelineLogicalDayRanges,
+    timelineSeriesData,
     updateFollowing,
     visibleChartDataCount,
-    visibleTimelineLogicalCount,
-    visibleTimelineCount,
     visibleTimelineSeriesCount,
   ]);
 
@@ -2212,7 +2034,7 @@ export function MarketChart({
       .filter((marker): marker is SeriesMarker<Time> => marker !== null)
       .sort((left, right) => Number(left.time) - Number(right.time));
     plugin.setMarkers(markers);
-  }, [chartData, displayTimeZone, eventMarkers, nearestChartTimeForActual, period.id, timelineClockDomain]);
+  }, [chartData, displayTimeZone, eventMarkers, nearestChartTimeForActual, period.id]);
 
   useEffect(() => {
     const series = activeMainSeries();
@@ -2284,12 +2106,7 @@ export function MarketChart({
     ): Time | null => {
       const actualTime = view.bars[view.offset + localIndex]?.time;
       if (!Number.isFinite(actualTime)) return null;
-      if (period.mode !== "timeline") return projectTimeForChinaAxis(actualTime) as Time;
-      const projected = projectTimelineTime(timelineLayout, actualTime);
-      const bucketTime = projected === null
-        ? null
-        : timelineClockBucketTime(timelineLayout, projected);
-      return bucketTime === null ? null : bucketTime as Time;
+      return projectTimeForChinaAxis(actualTime) as Time;
     };
     const gapTimeAt = (
       view: ExpertIndicatorSeriesView,
@@ -2299,21 +2116,29 @@ export function MarketChart({
       // Scheduled closures are compressed to zero width in every chart mode.
       // Only an unexpected in-session data hole gets a whitespace separator.
       if (!gap || gap.kind !== "missing-trade") return null;
-      if (period.mode !== "timeline") return gap.time;
-      const projected = projectTimelineTime(timelineLayout, gap.actualTime);
-      const bucketTime = projected === null
-        ? null
-        : timelineClockBucketTime(timelineLayout, projected);
-      return bucketTime === null ? null : bucketTime as Time;
+      return gap.time;
     };
 
     const setFullData = (runtime: IndicatorRuntime, view: ExpertIndicatorSeriesView) => {
       const gapsByIndex = new Map<number, Time>();
       for (const gap of candleSeriesGaps) {
-        const localNextIndex = gap.nextIndex - view.offset;
+        const localNextIndex = gap.nextIndex;
         if (localNextIndex <= 0 || localNextIndex >= view.visibleLength) continue;
         const time = gapTimeAt(view, gap.nextIndex);
         if (time !== null) gapsByIndex.set(localNextIndex, time);
+      }
+      if (runtime.kind === "rsi") {
+        const values: Array<LineData<Time> | WhitespaceData<Time>> = [];
+        for (let index = 0; index < view.visibleLength; index += 1) {
+          const gapTime = gapsByIndex.get(index);
+          if (gapTime !== undefined) values.push({ time: gapTime });
+          const time = projectedTimeAt(view, index);
+          if (time === null) continue;
+          const value = view.rsi.value[view.offset + index];
+          values.push(value === null || !Number.isFinite(value) ? { time } : { time, value });
+        }
+        runtime.value.setData(values);
+        return;
       }
       if (runtime.kind === "kdj") {
         const k: Array<LineData<Time> | WhitespaceData<Time>> = [];
@@ -2370,21 +2195,14 @@ export function MarketChart({
       view: ExpertIndicatorSeriesView,
       localIndex: number,
     ) => {
-      const gapTime = gapTimeAt(view, view.offset + localIndex);
-      if (gapTime !== null) {
-        if (runtime.kind === "kdj") {
-          runtime.k.update({ time: gapTime });
-          runtime.d.update({ time: gapTime });
-          runtime.j.update({ time: gapTime });
-        } else {
-          runtime.value.update({ time: gapTime });
-          runtime.signal.update({ time: gapTime });
-          runtime.histogram.update({ time: gapTime });
-        }
-      }
       const time = projectedTimeAt(view, localIndex);
       if (time === null) return;
       const sourceIndex = view.offset + localIndex;
+      if (runtime.kind === "rsi") {
+        const value = view.rsi.value[sourceIndex];
+        runtime.value.update(value === null || !Number.isFinite(value) ? { time } : { time, value });
+        return;
+      }
       if (runtime.kind === "kdj") {
         runtime.k.update({ time, value: view.kdj.k[sourceIndex] });
         runtime.d.update({ time, value: view.kdj.d[sourceIndex] });
@@ -2437,6 +2255,11 @@ export function MarketChart({
         ) {
           incrementalIndex = view.changedFrom;
         }
+      }
+      if (incrementalIndex !== null && gapTimeAt(view, incrementalIndex) !== null) {
+        // A separator is older than the Bar it precedes and cannot be inserted
+        // with update(). Rebuild this bounded indicator page atomically instead.
+        incrementalIndex = null;
       }
       if (incrementalIndex === null) setFullData(runtime, view);
       else updateSinglePoint(runtime, view, incrementalIndex);
@@ -2495,8 +2318,124 @@ export function MarketChart({
   }, [activeMainSeries, displayTimeZone, drawingDataRangeKey, drawingLayerSignature, nearestChartTimeForActual, period.id, refreshExpertDecorations]);
 
   useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !activeMainSeries()) return;
+    for (const series of systemLineRuntimeRef.current.series) chart.removeSeries(series);
+    const runtime: SystemLineRuntime = { series: [] };
+    const projectPoints = (points: readonly { time: number; value: number }[]): LineData<Time>[] => {
+      const byTime = new Map<number, LineData<Time>>();
+      for (const point of points) {
+        const chartTime = nearestChartTimeForActual(point.time);
+        if (chartTime === null || !Number.isFinite(point.value)) continue;
+        byTime.set(chartTime, { time: chartTime as Time, value: point.value });
+      }
+      return [...byTime.values()].sort((left, right) => Number(left.time) - Number(right.time));
+    };
+    for (const overlay of technicalOverlaySeries) {
+      const values = projectPoints(overlay.points);
+      if (values.length < 2) continue;
+      const series = chart.addSeries(LineSeries, {
+        title: overlay.label,
+        color: overlay.color,
+        lineWidth: overlay.lineWidth,
+        lineStyle: chartLineStyle(overlay.lineStyle),
+        priceLineVisible: false,
+        lastValueVisible: overlay.lastValueVisible,
+        crosshairMarkerVisible: false,
+      });
+      series.setData(values);
+      runtime.series.push(series);
+    }
+    for (const trendLine of smartTrendLines) {
+      const values = projectPoints([
+        { time: trendLine.start.time, value: trendLine.start.price },
+        { time: trendLine.anchor.time, value: trendLine.anchor.price },
+        { time: trendLine.end.time, value: trendLine.end.price },
+      ]);
+      if (values.length < 2) continue;
+      const appearance = trendLineAppearance(trendLine);
+      const series = chart.addSeries(LineSeries, {
+        title: trendLine.direction === "support" ? "智能支撑" : "智能压力",
+        color: appearance.color,
+        lineWidth: appearance.lineWidth,
+        lineStyle: appearance.lineStyle,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      series.setData(values);
+      runtime.series.push(series);
+    }
+    for (const pattern of pricePatterns) {
+      const values = projectPoints([
+        { time: pattern.first.time, value: pattern.first.price },
+        ...(pattern.neckline
+          ? [{ time: pattern.neckline.time, value: pattern.neckline.price }]
+          : []),
+        { time: pattern.second.time, value: pattern.second.price },
+        { time: pattern.confirmation.time, value: pattern.confirmation.price },
+      ]);
+      if (values.length < 2) continue;
+      const appearance = pricePatternAppearance(pattern);
+      const series = chart.addSeries(LineSeries, {
+        title: pattern.label,
+        color: appearance.color,
+        lineWidth: appearance.lineWidth,
+        lineStyle: appearance.lineStyle,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      series.setData(values);
+      runtime.series.push(series);
+    }
+    for (const event of marketStructureEvents) {
+      const values = projectPoints([
+        { time: event.reference.time, value: event.reference.price },
+        { time: event.confirmation.time, value: event.confirmation.price },
+      ]);
+      if (values.length < 2) continue;
+      const appearance = marketStructureAppearance(event);
+      const series = chart.addSeries(LineSeries, {
+        title: event.label,
+        color: appearance.color,
+        lineWidth: appearance.lineWidth,
+        lineStyle: appearance.lineStyle,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      series.setData(values);
+      runtime.series.push(series);
+    }
+    systemLineRuntimeRef.current = runtime;
     refreshExpertDecorations();
-  }, [eventMarkers, openingGapVisible, refreshExpertDecorations, sessionBands, timelineSessionGaps, valueZones]);
+  }, [
+    activeMainSeries,
+    displayTimeZone,
+    drawingDataRangeKey,
+    nearestChartTimeForActual,
+    period.id,
+    refreshExpertDecorations,
+    smartTrendLineSignature,
+    structureMarkSignature,
+    technicalOverlaySeries,
+    technicalOverlaySignature,
+  ]);
+
+  useEffect(() => {
+    refreshExpertDecorations();
+  }, [
+    eventMarkers,
+    marketStructureEvents,
+    openingGapVisible,
+    pricePatterns,
+    refreshExpertDecorations,
+    sessionBands,
+    smartTrendLines,
+    timelineSessionGaps,
+    valueZones,
+  ]);
 
   useEffect(() => {
     const refreshCountdown = () => {
@@ -2683,24 +2622,14 @@ export function MarketChart({
       data-drawing-snap-mode={drawingSnapMode}
       data-layer-count={layers.length}
       data-indicator-pane-count={visibleIndicatorLayers.length}
-      data-timeline-available-days={period.mode === "timeline" ? timelineLogicalDayRanges.length : undefined}
+      data-timeline-available-days={period.mode === "timeline" ? timelineLayout.days.length : undefined}
       data-timeline-point-count={period.mode === "timeline" ? visibleTimelineCount : undefined}
-      data-timeline-materialized-day-limit={period.mode === "timeline" ? timelineMaterializedDayCount : undefined}
-      data-timeline-has-unmaterialized-history={period.mode === "timeline"
-        ? String(timelineHasUnmaterializedHistory)
-        : undefined}
     >
       <div className="chart-renderer" ref={rendererRef} />
       <div
         ref={expertOverlayLayerRef}
         className="expert-chart-overlays"
         aria-label="专家分析图层"
-      />
-      <div
-        ref={tradingDayLayerRef}
-        className="timeline-trading-days"
-        role="group"
-        aria-label="交易时段标注"
       />
       {drawingsVisible && drawingTool ? (
         <div
@@ -2750,7 +2679,7 @@ export function MarketChart({
           <div className="live-price-line" />
           <div className="live-price-tag-track">
             <div className="live-price-tag" key={`${marketPhase}-${livePrice.toFixed(priceDigits)}`}>
-              <strong>{livePrice.toFixed(priceDigits)}</strong>
+              <strong ref={livePriceValueRef}>{livePrice.toFixed(priceDigits)}</strong>
               <span ref={countdownRef}>{renderedCountdown}</span>
             </div>
           </div>

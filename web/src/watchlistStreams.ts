@@ -81,7 +81,11 @@ export function startWatchlistQuoteStream({
       } catch {
         return;
       }
-      if (event.kind === "quote" && event.quote) onQuote(code, event.quote);
+      if (event.kind === "gap") {
+        nextSocket.close();
+      } else if (event.kind === "quote" && event.quote) {
+        onQuote(code, event.quote);
+      }
     };
     nextSocket.onerror = () => nextSocket.close();
     nextSocket.onclose = () => {

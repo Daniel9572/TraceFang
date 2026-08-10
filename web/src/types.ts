@@ -155,7 +155,7 @@ export interface InstrumentSourceSelection {
 }
 
 export interface QuoteStreamEvent {
-  kind: "bar" | "quote" | "sample" | "status";
+  kind: "bar" | "gap" | "quote" | "sample" | "status";
   state: "connecting" | "live" | "unavailable";
   emitted_at: string;
   period_id: BarPeriodId;
@@ -163,6 +163,43 @@ export interface QuoteStreamEvent {
   quote: QuoteView | null;
   sample: QuoteSample | null;
   error: string | null;
+  delivery_sequence?: number | null;
+  gap_from_sequence?: number | null;
+  gap_to_sequence?: number | null;
+}
+
+export interface ReplayFrameBounds {
+  state: "ready" | "empty" | "unavailable";
+  first_sequence: number | null;
+  last_sequence: number | null;
+  message_count: number;
+  first_received_at: string | null;
+  last_received_at: string | null;
+  detail: string | null;
+}
+
+export interface ReplayFrameCursor {
+  sequence: number;
+  received_at: string;
+  channel: string;
+  connection_id: string;
+  provider_sequence: number;
+}
+
+export interface ReplayStreamEvent {
+  kind: "bar" | "decode_error" | "frame" | "quote" | "status";
+  state?: "playing" | "completed" | "unavailable";
+  stream_sequence?: number | null;
+  frame_received_at?: string;
+  frame_channel?: string;
+  period_id?: string;
+  source_id?: SourceId;
+  quote?: QuoteSnapshot | null;
+  bar?: Candle | null;
+  error?: string | null;
+  start_sequence?: number;
+  end_sequence?: number;
+  speed?: number;
 }
 
 export interface ChartBarPage {

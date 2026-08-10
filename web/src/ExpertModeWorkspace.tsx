@@ -1,5 +1,6 @@
 import {
   Activity,
+  BookOpen,
   Bot,
   BrainCircuit,
   CalendarClock,
@@ -11,6 +12,9 @@ import {
   Magnet,
   Minus,
   MousePointer2,
+  Pause,
+  Play,
+  Radio,
   RotateCcw,
   Sparkles,
   Trash2,
@@ -22,6 +26,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { marketApi } from "./api";
 import {
   buildExpertAnalysisAt,
+  buildExpertIndicatorSeriesAt,
   createExpertBacktestRunner,
   DEFAULT_EXPERT_STRATEGIES,
   EXPERT_INDICATOR_HISTORY_VERSION,
@@ -32,6 +37,13 @@ import {
   projectExpertEventStrategies,
 } from "./expertEvents";
 import { buildExpertEventAssessments } from "./expertEventScoring";
+import {
+  buildSmartTrendLines,
+  buildTechnicalOverlaySeries,
+  candlePrefixRevisionKey,
+  latestFinalCandleIndex,
+} from "./expertTechnical";
+import { completedReplayHistory, formatReplayTimecode } from "./expertReplay";
 import { ChartLayerManager } from "./ChartLayerManager";
 import {
   buildExpertOptionStrikeRows,
@@ -69,16 +81,32 @@ import type {
   ExpertEventAssessment,
   ExpertIndicatorSeriesView,
   ExpertMarketEvent,
+  ExpertMultiTimeframeContext,
   ExpertOptionContract,
   ExpertOptionsStatus,
+  ExpertShfePositioningContext,
   ExpertStrategyId,
+  ExpertVolatilityContext,
 } from "./expertTypes";
 import { formatDateInTimeZone, formatDateTimeInTimeZone } from "./chartTimeAxis";
 import { barDataPeriodId, chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
+import type { RealtimeBarStream } from "./realtimeBarStream";
+import { StrategyDetailDrawer } from "./StrategyDetailDrawer";
+import { strategyById } from "./strategyCatalog";
 import type { HistoryLoadOutcome, HistoryWindow } from "./historyLoading";
-import type { Candle, HoverCandle, MarketPhase, MarketSchedule } from "./types";
+import type {
+  Candle,
+  HoverCandle,
+  MarketPhase,
+  MarketSchedule,
+  ReplayFrameBounds,
+  ReplayFrameCursor,
+  ReplayStreamEvent,
+  SourceId,
+} from "./types";
+import { upsertRealtimeBar } from "./chartModel";
 
 import "./expert-mode.css";
 
@@ -87,6 +115,8 @@ interface ExpertModeWorkspaceProps {
   instrumentName: string;
   unit: string;
   candles: Candle[];
+  realtimeBarStream: RealtimeBarStream;
+  realtimeBarStreamKey: string;
   periodId: ChartPeriodId;
   livePrice: number | null;
   change: number | null;
@@ -98,6 +128,7 @@ interface ExpertModeWorkspaceProps {
   marketPhase: MarketPhase;
   marketSchedule: MarketSchedule | null | undefined;
   sourceLabel: string;
+  sourceId: SourceId;
   sourceState: "connecting" | "live" | "waiting" | "unavailable";
   liveIndicatorSeries: ExpertIndicatorSeriesView;
   marketEvents: readonly ExpertMarketEvent[];
@@ -122,7 +153,12 @@ const TIME_ZONES = [
   { id: "America/New_York", label: "纽约" },
 ] as const;
 
-const STRATEGY_STORAGE_KEY = "market-expert-strategies-v1";
+const STRATEGY_STORAGE_KEY = "market-expert-strategies-v3";
+const LEGACY_STRATEGY_STORAGE_KEYS = [
+  "market-expert-strategies-v2",
+  "market-expert-strategies-v1",
+] as const;
+const V3_DEFAULT_ADDITIONS: ExpertStrategyId[] = ["rsi", "multi-timeframe", "smart-money"];
 const CAPITAL_DOMINANCE_STORAGE_KEY = "market-expert-capital-dominance-v1";
 const OPENING_GAP_STRATEGY = {
   shortName: "跳空标注",
@@ -133,12 +169,19 @@ const OPTION_QUANTITY_FORMATTER = new Intl.NumberFormat("zh-CN", { maximumFracti
 
 function readStrategies(): ExpertStrategyId[] {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(STRATEGY_STORAGE_KEY) ?? "null");
+    const current = window.localStorage.getItem(STRATEGY_STORAGE_KEY);
+    const stored = current ?? LEGACY_STRATEGY_STORAGE_KEYS
+      .map((key) => window.localStorage.getItem(key))
+      .find((value) => value !== null);
+    const parsed = JSON.parse(stored ?? "null");
     if (!Array.isArray(parsed)) return DEFAULT_EXPERT_STRATEGIES;
     const known = new Set(EXPERT_STRATEGIES.map((strategy) => strategy.id));
     const values = parsed.filter((value): value is ExpertStrategyId => known.has(value));
     if (parsed.length === 0) return [];
-    return values.length > 0 ? values : DEFAULT_EXPERT_STRATEGIES;
+    if (values.length === 0) return DEFAULT_EXPERT_STRATEGIES;
+    return current === null
+      ? [...new Set([...values, ...V3_DEFAULT_ADDITIONS])]
+      : values;
   } catch {
     return DEFAULT_EXPERT_STRATEGIES;
   }
@@ -161,6 +204,12 @@ function formatPrice(value: number | null, digits: number): string {
   return value === null || !Number.isFinite(value) ? "—" : value.toFixed(digits);
 }
 
+function finiteNumber(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function signalDirectionLabel(direction: "bullish" | "bearish" | "neutral"): string {
   if (direction === "bullish") return "偏多";
   if (direction === "bearish") return "偏空";
@@ -172,6 +221,79 @@ function regimeLabel(regime: string): string {
   if (regime === "trend-down") return "趋势下行";
   if (regime === "balanced") return "均衡震荡";
   return "等待样本";
+}
+
+function movingAverageAlignmentLabel(
+  alignment: "bullish" | "bearish" | "mixed" | "insufficient" | undefined,
+): string {
+  if (alignment === "bullish") return "多排";
+  if (alignment === "bearish") return "空排";
+  if (alignment === "mixed") return "缠绕";
+  return "—";
+}
+
+function bollingerStateLabel(state: "squeeze" | "expanding" | "normal" | undefined): string {
+  if (state === "squeeze") return "压缩";
+  if (state === "expanding") return "扩张";
+  if (state === "normal") return "常态";
+  return "—";
+}
+
+function timeframeDirectionLabel(direction: "up" | "down" | "mixed" | "unavailable"): string {
+  if (direction === "up") return "上行";
+  if (direction === "down") return "下行";
+  if (direction === "mixed") return "混合";
+  return "不足";
+}
+
+function timeframeLimitationLabel(value: string | null): string {
+  if (value === null) return "当前周期不可比较";
+  if (value === "non_positive_close_not_comparable") return "存在非正收盘价，拒绝比较";
+  if (value === "history_scan_limit_before_required_sample") return "历史扫描上限内样本仍不足";
+  if (value.startsWith("requires_")) return "合格已收盘 Bar 不足 20 根";
+  return value;
+}
+
+function multiTimeframeOpportunity(context: ExpertMultiTimeframeContext | null): {
+  tone: "bullish" | "bearish" | "neutral";
+  title: string;
+  detail: string;
+} | null {
+  if (context === null || !context.comparison.comparable) return null;
+  const short = context.timeframes.find((item) => item.horizon === "short");
+  const medium = context.timeframes.find((item) => item.horizon === "medium");
+  const long = context.timeframes.find((item) => item.horizon === "long");
+  if (!short || !long) return null;
+  if (long.direction === "up" && short.direction === "down") {
+    return {
+      tone: "bullish",
+      title: "长多 × 短空：回撤候选",
+      detail: medium?.direction === "up"
+        ? "中长周期保持上行；等待短周期 RSI 回穿、W 底或 2B 底部再确认。"
+        : "长期上行而短期回撤；只标记相对低位观察窗，不直接视为买点。",
+    };
+  }
+  if (long.direction === "down" && short.direction === "up") {
+    return {
+      tone: "bearish",
+      title: "长空 × 短多：反弹候选",
+      detail: medium?.direction === "down"
+        ? "中长周期保持下行；等待短周期 RSI 回落、M 顶或 2B 顶部再确认。"
+        : "长期下行而短期反弹；只标记相对高位观察窗，不直接视为卖点。",
+    };
+  }
+  if (context.comparison.state === "aligned") {
+    return {
+      tone: context.comparison.aligned_direction === "up" ? "bullish" : "bearish",
+      title: context.comparison.aligned_direction === "up" ? "周期同向上行" : "周期同向下行",
+      detail: "同向不代表追价优势；等待波动收敛、结构回踩或风险收益改善。",
+    };
+  }
+  return {
+    tone: "neutral",
+    title: "周期张力尚无清晰优势",
+    detail: "方向混合但未形成明确长短反向组合，继续等待确认。",
+  };
 }
 
 function eventDirectionLabel(direction: ExpertEventAssessment["observedDirection"]): string {
@@ -197,6 +319,17 @@ function formatOptionMetric(value: number | null, digits = 2): string {
 
 function formatOptionQuantity(value: number): string {
   return Number.isFinite(value) ? OPTION_QUANTITY_FORMATTER.format(value) : "—";
+}
+
+function formatSignedQuantity(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return `${value > 0 ? "+" : ""}${OPTION_QUANTITY_FORMATTER.format(value)}`;
+}
+
+function volumePriceStateLabel(state: "confirming" | "diverging" | "unavailable"): string {
+  if (state === "confirming") return "量价确认";
+  if (state === "diverging") return "量价背离";
+  return "量价样本不足";
 }
 
 function formatOptionObservedAt(value: string | null, timeZone: string): string {
@@ -225,18 +358,21 @@ export function ExpertModeWorkspace({
   code,
   instrumentName,
   unit,
-  candles,
+  candles: liveCandles,
+  realtimeBarStream,
+  realtimeBarStreamKey,
   periodId,
-  livePrice,
+  livePrice: currentLivePrice,
   change,
   changePercent,
-  observedAt,
+  observedAt: liveObservedAt,
   referencePrice,
   timelineResolutionSeconds,
   priceDigits,
   marketPhase,
   marketSchedule,
   sourceLabel,
+  sourceId,
   sourceState,
   liveIndicatorSeries,
   marketEvents,
@@ -256,6 +392,7 @@ export function ExpertModeWorkspace({
   const expertBarPeriodId = barDataPeriodId(period);
   const [displayTimeZone, setDisplayTimeZone] = useState("Asia/Shanghai");
   const [enabledStrategies, setEnabledStrategies] = useState<ExpertStrategyId[]>(readStrategies);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<ExpertStrategyId | null>(null);
   const [capitalDominanceEnabled, setCapitalDominanceEnabled] = useState(readCapitalDominanceStrategy);
   const setLayerWorkspace = onLayerWorkspaceChange;
   const sessionLayerNormalizedRef = useRef(false);
@@ -269,10 +406,43 @@ export function ExpertModeWorkspace({
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [selectedOptionExpiryKey, setSelectedOptionExpiryKey] = useState<string | null>(null);
   const optionChainScrollRef = useRef<HTMLDivElement | null>(null);
+  const [volatilityContext, setVolatilityContext] = useState<ExpertVolatilityContext | null>(null);
+  const [volatilityContextError, setVolatilityContextError] = useState<string | null>(null);
+  const [multiTimeframeContext, setMultiTimeframeContext] = useState<ExpertMultiTimeframeContext | null>(null);
+  const [multiTimeframeError, setMultiTimeframeError] = useState<string | null>(null);
+  const [positioningContext, setPositioningContext] = useState<ExpertShfePositioningContext | null>(null);
+  const [positioningContextError, setPositioningContextError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<ExpertAiStatus | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<ExpertAiAnalysis | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const replaySocketRef = useRef<WebSocket | null>(null);
+  const replayNextSequenceRef = useRef<number | null>(null);
+  const [replayBounds, setReplayBounds] = useState<ReplayFrameBounds | null>(null);
+  const [replayCursor, setReplayCursor] = useState<number | null>(null);
+  const [replayCursorFrame, setReplayCursorFrame] = useState<ReplayFrameCursor | null>(null);
+  const [replayState, setReplayState] = useState<"live" | "paused" | "playing" | "completed">("live");
+  const [replayCandles, setReplayCandles] = useState<Candle[]>([]);
+  const [replayPrice, setReplayPrice] = useState<number | null>(null);
+  const [replaySpeed, setReplaySpeed] = useState(1);
+  const [replayError, setReplayError] = useState<string | null>(null);
+  const [replayWarning, setReplayWarning] = useState<string | null>(null);
+  const [replayNeedsSeed, setReplayNeedsSeed] = useState(true);
+  const replayActive = replayState !== "live";
+  const replaySupported = sourceId === "jin10_client";
+  const candles = replayActive ? replayCandles : liveCandles;
+  const livePrice = replayActive ? replayPrice : currentLivePrice;
+  const observedAt = replayActive
+    ? replayCursorFrame?.received_at ?? liveObservedAt
+    : liveObservedAt;
+  const replayCutoff = replayActive && replayCursorFrame
+    ? Date.parse(replayCursorFrame.received_at) / 1_000
+    : null;
+  const goldOptionsApplicable = code === "XAUUSD" || code === "AU8888";
+  const volatilityContextEnabled = enabledStrategies.includes("vix-gvz");
+  const multiTimeframeEnabled = enabledStrategies.includes("multi-timeframe");
+  const positioningContextEnabled = enabledStrategies.includes("volume-open-interest");
+  const positioningProduct = code === "AU8888" ? "au" : code === "AG8888" ? "ag" : null;
   const currentDrawingLayer = activeDrawingLayer(layerWorkspace);
   const importantEventsEnabled = layerWorkspace.layers.some((layer) => (
     layer.kind === "annotation"
@@ -284,6 +454,210 @@ export function ExpertModeWorkspace({
     && layer.annotationId === "gaps"
     && layer.visible
   ));
+
+  const closeReplaySocket = useCallback(() => {
+    const socket = replaySocketRef.current;
+    replaySocketRef.current = null;
+    socket?.close();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void marketApi.replayFrameBounds()
+      .then((value) => {
+        if (controller.signal.aborted) return;
+        setReplayBounds(value);
+        setReplayError(value.state === "unavailable" ? value.detail : null);
+        if (value.state === "ready" && value.first_sequence !== null) {
+          setReplayCursor((current) => {
+            const next = current === null
+              ? value.first_sequence
+              : Math.min(value.last_sequence ?? current, Math.max(value.first_sequence!, current));
+            replayNextSequenceRef.current = next;
+            return next;
+          });
+        }
+      })
+      .catch((requestError) => {
+        if (!controller.signal.aborted) {
+          setReplayError(requestError instanceof Error ? requestError.message : String(requestError));
+        }
+      });
+    return () => controller.abort();
+  }, [code]);
+
+  useEffect(() => {
+    if (replayCursor === null || replayState === "playing") return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void marketApi.replayFrameCursor(replayCursor, controller.signal)
+        .then((value) => {
+          if (controller.signal.aborted) return;
+          setReplayCursorFrame(value);
+          setReplayError(null);
+          if (replayActive && replayNeedsSeed) {
+            const cutoff = Date.parse(value.received_at) / 1_000;
+            setReplayCandles(completedReplayHistory(liveCandles, cutoff));
+            setReplayPrice(null);
+            setReplayNeedsSeed(false);
+          }
+        })
+        .catch((requestError) => {
+          if (!controller.signal.aborted) {
+            setReplayError(requestError instanceof Error ? requestError.message : String(requestError));
+          }
+        });
+    }, 80);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [liveCandles, replayActive, replayCursor, replayNeedsSeed, replayState]);
+
+  useEffect(() => () => closeReplaySocket(), [closeReplaySocket]);
+
+  useEffect(() => {
+    closeReplaySocket();
+    setReplayState("live");
+    setReplayCandles([]);
+    setReplayPrice(null);
+    setReplayNeedsSeed(true);
+    setReplayWarning(null);
+  }, [closeReplaySocket, code, periodId]);
+
+  const pauseReplay = useCallback(() => {
+    closeReplaySocket();
+    setReplayState("paused");
+  }, [closeReplaySocket]);
+
+  const seekReplayCursor = useCallback((requested: number) => {
+    if (
+      replayBounds?.state !== "ready"
+      || replayBounds.first_sequence === null
+      || replayBounds.last_sequence === null
+    ) return;
+    const next = Math.min(
+      replayBounds.last_sequence,
+      Math.max(replayBounds.first_sequence, Math.round(requested)),
+    );
+    closeReplaySocket();
+    replayNextSequenceRef.current = next;
+    setReplayCursor(next);
+    setReplayNeedsSeed(true);
+    setReplayWarning(null);
+    if (replayActive) setReplayState("paused");
+  }, [closeReplaySocket, replayActive, replayBounds]);
+
+  const seekReplayPointer = useCallback((clientX: number, element: HTMLInputElement) => {
+    if (
+      replayBounds?.state !== "ready"
+      || replayBounds.first_sequence === null
+      || replayBounds.last_sequence === null
+    ) return;
+    const rect = element.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width)));
+    seekReplayCursor(
+      replayBounds.first_sequence
+      + ratio * (replayBounds.last_sequence - replayBounds.first_sequence),
+    );
+  }, [replayBounds, seekReplayCursor]);
+
+  const returnToLive = useCallback(() => {
+    closeReplaySocket();
+    setReplayState("live");
+    setReplayCandles([]);
+    setReplayPrice(null);
+    setReplayError(null);
+    setReplayWarning(null);
+    setReplayNeedsSeed(true);
+    if (replayCursor !== null) replayNextSequenceRef.current = replayCursor;
+  }, [closeReplaySocket, replayCursor]);
+
+  const startReplay = useCallback(async () => {
+    if (
+      replayBounds?.state !== "ready"
+      || replayBounds.last_sequence === null
+      || replayCursor === null
+    ) return;
+    let cursorFrame = replayCursorFrame?.sequence === replayCursor ? replayCursorFrame : null;
+    try {
+      const latestBounds = await marketApi.replayFrameBounds();
+      if (latestBounds.state !== "ready" || latestBounds.last_sequence === null) {
+        throw new Error(latestBounds.detail ?? "真实行情回放暂不可用");
+      }
+      setReplayBounds(latestBounds);
+      if (cursorFrame === null) cursorFrame = await marketApi.replayFrameCursor(replayCursor);
+      if (replayNeedsSeed || replayState === "live" || replayState === "completed") {
+        const cutoff = Date.parse(cursorFrame.received_at) / 1_000;
+        setReplayCandles(completedReplayHistory(liveCandles, cutoff));
+        setReplayPrice(null);
+        replayNextSequenceRef.current = replayCursor;
+        setReplayNeedsSeed(false);
+      }
+      const startSequence = replayNextSequenceRef.current ?? replayCursor;
+      if (startSequence > latestBounds.last_sequence) {
+        setReplayState("completed");
+        return;
+      }
+      closeReplaySocket();
+      const socket = marketApi.openReplayStream(code, {
+        period: period.id,
+        startSequence,
+        endSequence: latestBounds.last_sequence,
+        speed: replaySpeed,
+      });
+      replaySocketRef.current = socket;
+      setReplayState("playing");
+      setReplayError(null);
+      setReplayWarning(null);
+      socket.onmessage = (message) => {
+        const event = JSON.parse(String(message.data)) as ReplayStreamEvent;
+        if (event.kind === "frame" && event.stream_sequence !== undefined && event.frame_received_at) {
+          const sequence = event.stream_sequence ?? startSequence;
+          replayNextSequenceRef.current = sequence + 1;
+          setReplayCursor(sequence);
+          setReplayCursorFrame({
+            sequence,
+            received_at: event.frame_received_at,
+            channel: event.frame_channel ?? "unknown",
+            connection_id: "",
+            provider_sequence: 0,
+          });
+        } else if (event.kind === "bar" && event.bar) {
+          setReplayCandles((current) => upsertRealtimeBar(current, event.bar as Candle));
+        } else if (event.kind === "quote" && event.quote) {
+          setReplayPrice(finiteNumber(event.quote.last));
+        } else if (event.kind === "decode_error") {
+          setReplayWarning(event.error ?? "原始帧无法解码");
+        } else if (event.kind === "status" && event.state === "completed") {
+          setReplayState("completed");
+        } else if (event.kind === "status" && event.state === "unavailable") {
+          setReplayError(event.error ?? "真实行情回放不可用");
+          setReplayState("paused");
+        }
+      };
+      socket.onerror = () => socket.close();
+      socket.onclose = () => {
+        if (replaySocketRef.current !== socket) return;
+        replaySocketRef.current = null;
+        setReplayState((current) => current === "playing" ? "paused" : current);
+      };
+    } catch (requestError) {
+      setReplayError(requestError instanceof Error ? requestError.message : String(requestError));
+      setReplayState("paused");
+    }
+  }, [
+    closeReplaySocket,
+    code,
+    liveCandles,
+    period.id,
+    replayBounds,
+    replayCursor,
+    replayCursorFrame,
+    replayNeedsSeed,
+    replaySpeed,
+    replayState,
+  ]);
 
   useEffect(() => {
     try {
@@ -335,7 +709,7 @@ export function ExpertModeWorkspace({
   }, []);
 
   useEffect(() => {
-    if (intelligenceTab !== "options") return;
+    if (intelligenceTab !== "options" || !goldOptionsApplicable) return;
     let disposed = false;
     let timer: number | null = null;
     const schedule = (seconds: number) => {
@@ -371,22 +745,180 @@ export function ExpertModeWorkspace({
       if (timer !== null) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [intelligenceTab]);
+  }, [goldOptionsApplicable, intelligenceTab]);
 
-  const analysisIndex = candles.length - 1;
-  const indicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${code}:${candles.at(-1)?.source.provider ?? "pending"}:${expertBarPeriodId}`;
-  const analysis = useMemo(
-    () => buildExpertAnalysisAt(candles, enabledStrategies, analysisIndex, indicatorHistoryKey),
-    [analysisIndex, candles, enabledStrategies, indicatorHistoryKey],
+  useEffect(() => {
+    if (!volatilityContextEnabled) {
+      setVolatilityContext(null);
+      setVolatilityContextError(null);
+      return;
+    }
+    let disposed = false;
+    let timer: number | null = null;
+    const load = async () => {
+      try {
+        const value = await marketApi.expertVolatilityContext();
+        if (disposed) return;
+        setVolatilityContext(value);
+        setVolatilityContextError(null);
+        timer = window.setTimeout(
+          () => void load(),
+          Math.max(60, value.refresh_after_seconds) * 1_000,
+        );
+      } catch (requestError) {
+        if (disposed) return;
+        setVolatilityContextError(
+          requestError instanceof Error ? requestError.message : String(requestError),
+        );
+        timer = window.setTimeout(() => void load(), 5 * 60 * 1_000);
+      }
+    };
+    void load();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [volatilityContextEnabled]);
+
+  useEffect(() => {
+    if (!multiTimeframeEnabled) {
+      setMultiTimeframeContext(null);
+      setMultiTimeframeError(null);
+      return;
+    }
+    let disposed = false;
+    let timer: number | null = null;
+    setMultiTimeframeContext(null);
+    const load = async () => {
+      try {
+        const value = await marketApi.expertMultiTimeframe(code);
+        if (disposed) return;
+        setMultiTimeframeContext(value);
+        setMultiTimeframeError(null);
+        timer = window.setTimeout(() => void load(), 60 * 1_000);
+      } catch (requestError) {
+        if (disposed) return;
+        setMultiTimeframeError(
+          requestError instanceof Error ? requestError.message : String(requestError),
+        );
+        timer = window.setTimeout(() => void load(), 60 * 1_000);
+      }
+    };
+    void load();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [code, multiTimeframeEnabled, realtimeBarStreamKey]);
+
+  useEffect(() => {
+    if (!positioningContextEnabled || positioningProduct === null) {
+      setPositioningContext(null);
+      setPositioningContextError(null);
+      return;
+    }
+    let disposed = false;
+    let timer: number | null = null;
+    const load = async () => {
+      try {
+        const value = await marketApi.expertShfePositioning(positioningProduct);
+        if (disposed) return;
+        setPositioningContext(value);
+        setPositioningContextError(null);
+        timer = window.setTimeout(
+          () => void load(),
+          Math.max(30, value.refresh_after_seconds) * 1_000,
+        );
+      } catch (requestError) {
+        if (disposed) return;
+        setPositioningContextError(
+          requestError instanceof Error ? requestError.message : String(requestError),
+        );
+        timer = window.setTimeout(() => void load(), 60 * 1_000);
+      }
+    };
+    void load();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [positioningContextEnabled, positioningProduct]);
+
+  const finalCandleIndex = useMemo(() => latestFinalCandleIndex(candles), [candles]);
+  const firstEvidenceCandle = candles[0];
+  const finalEvidenceCandle = finalCandleIndex >= 0 ? candles[finalCandleIndex] : undefined;
+  const confirmedPrefixRevisionKey = useMemo(
+    () => candlePrefixRevisionKey(candles, finalCandleIndex),
+    [candles, finalCandleIndex],
   );
-  const indicatorSeries = liveIndicatorSeries;
+  const confirmedHistoryRevisionKey = [
+    code,
+    expertBarPeriodId,
+    finalCandleIndex,
+    confirmedPrefixRevisionKey,
+    firstEvidenceCandle?.open_time ?? "empty",
+    firstEvidenceCandle?.revision ?? 0,
+    finalEvidenceCandle?.open_time ?? "empty",
+    finalEvidenceCandle?.revision ?? 0,
+  ].join(":");
+  const confirmedCandles = useMemo(
+    () => finalCandleIndex < 0 ? [] : candles.slice(0, finalCandleIndex + 1),
+    // The revision key deliberately ignores repeated updates to the unclosed tail Bar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [confirmedHistoryRevisionKey],
+  );
+  const analysisIndex = confirmedCandles.length - 1;
   const enabledStrategyKey = [...enabledStrategies].sort().join(":");
-  const backtestLastIndex = candles.at(-1)?.state === "final" ? candles.length - 1 : candles.length - 2;
+  const indicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${code}:${finalEvidenceCandle?.source.provider ?? "pending"}:${expertBarPeriodId}:confirmed`;
+  const analysis = useMemo(
+    () => buildExpertAnalysisAt(
+      confirmedCandles,
+      enabledStrategies,
+      analysisIndex,
+      indicatorHistoryKey,
+    ),
+    [analysisIndex, confirmedCandles, enabledStrategies, indicatorHistoryKey],
+  );
+  const technicalOverlaySeries = useMemo(
+    () => buildTechnicalOverlaySeries(confirmedCandles, enabledStrategies, analysisIndex),
+    [analysisIndex, confirmedCandles, enabledStrategies],
+  );
+  const smartTrendLines = useMemo(
+    () => enabledStrategies.includes("auto-trend")
+      ? buildSmartTrendLines(confirmedCandles, analysisIndex)
+      : [],
+    [analysisIndex, confirmedCandles, enabledStrategies],
+  );
+  const trendLineStats = useMemo(() => ({
+    active: smartTrendLines.filter((line) => line.status !== "invalidated").length,
+    invalidated: smartTrendLines.filter((line) => line.status === "invalidated").length,
+  }), [smartTrendLines]);
+  const patternStats = useMemo(() => ({
+    active: analysis.pricePatterns.filter((pattern) => pattern.status === "confirmed").length
+      + analysis.marketStructureEvents.filter((event) => event.status === "confirmed").length,
+    invalidated: analysis.pricePatterns.filter((pattern) => pattern.status === "invalidated").length
+      + analysis.marketStructureEvents.filter((event) => event.status === "invalidated").length,
+  }), [analysis.marketStructureEvents, analysis.pricePatterns]);
+  const timeframeOpportunity = useMemo(
+    () => multiTimeframeOpportunity(multiTimeframeContext),
+    [multiTimeframeContext],
+  );
+  const indicatorSeries = useMemo(
+    () => replayActive
+      ? buildExpertIndicatorSeriesAt(
+        confirmedCandles,
+        analysisIndex,
+        `${indicatorHistoryKey}:replay`,
+      )
+      : liveIndicatorSeries,
+    [analysisIndex, confirmedCandles, indicatorHistoryKey, liveIndicatorSeries, replayActive],
+  );
+  const backtestLastIndex = analysisIndex;
   const backtestRunner = useMemo(
-    () => createExpertBacktestRunner(candles, enabledStrategies, indicatorHistoryKey),
+    () => createExpertBacktestRunner(confirmedCandles, enabledStrategies, indicatorHistoryKey),
     // Strategy identity, rather than array order, owns the causal backtest index.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [candles, enabledStrategyKey, indicatorHistoryKey],
+    [confirmedCandles, enabledStrategyKey, indicatorHistoryKey],
   );
   useEffect(() => {
     if (historyLoading) return;
@@ -443,10 +975,10 @@ export function ExpertModeWorkspace({
   const eventStrategyProjection = useMemo(
     () => projectExpertEventStrategies(
       importantEventsEnabled,
-      null,
+      replayCutoff,
       marketEvents,
     ),
-    [importantEventsEnabled, marketEvents],
+    [importantEventsEnabled, marketEvents, replayCutoff],
   );
   const capitalDriverEvents = eventStrategyProjection.capitalDrivers;
   const sessionBands = useMemo(
@@ -545,7 +1077,7 @@ export function ExpertModeWorkspace({
     }
   }, [code, enabledStrategies, period.id, period.mode]);
 
-  const eventReferenceTime = Date.now() / 1_000;
+  const eventReferenceTime = replayCutoff ?? Date.now() / 1_000;
   const latestEvent = !importantEventsEnabled || eventReferenceTime === null
     ? undefined
     : marketEvents.find((event) => event.time >= eventReferenceTime);
@@ -581,12 +1113,30 @@ export function ExpertModeWorkspace({
       eventMarkers: visibleEvents,
       priceLevels: analysis.levels,
       valueZones: analysis.valueZones,
+      trendLines: smartTrendLines,
+      overlaySeries: technicalOverlaySeries,
+      pricePatterns: analysis.pricePatterns,
+      marketStructureEvents: analysis.marketStructureEvents,
     }),
-    [analysis.levels, analysis.valueZones, indicatorSeries, layerWorkspace, sessionBands, visibleEvents],
+    [
+      analysis.levels,
+      analysis.marketStructureEvents,
+      analysis.pricePatterns,
+      analysis.valueZones,
+      indicatorSeries,
+      layerWorkspace,
+      sessionBands,
+      smartTrendLines,
+      technicalOverlaySeries,
+      visibleEvents,
+    ],
   );
+  const selectedStrategy = selectedStrategyId === null
+    ? null
+    : strategyById(selectedStrategyId);
 
   return (
-    <div className="expert-workspace" data-replay="live">
+    <div className="expert-workspace" data-replay={replayState}>
       <header className="expert-command-deck">
         <button
           type="button"
@@ -634,7 +1184,10 @@ export function ExpertModeWorkspace({
         </div>
         <div className="expert-feed-state">
           <span className={`expert-feed-dot is-${sourceState}`} />
-          <div><strong>{marketPhase === "closed" ? "休市" : "实时"}</strong><small>{historyLoading ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small></div>
+          <div>
+            <strong>{replayActive ? (replayState === "playing" ? "回放中" : "回放暂停") : marketPhase === "closed" ? "休市" : "实时"}</strong>
+            <small>{replayActive ? `原始帧 · ${replaySpeed}×` : historyLoading ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small>
+          </div>
         </div>
       </header>
 
@@ -726,6 +1279,8 @@ export function ExpertModeWorkspace({
         {layerManagerOpen ? (
           <ChartLayerManager
             workspace={layerWorkspace}
+            trendLineStats={trendLineStats}
+            patternStats={patternStats}
             onClose={() => setLayerManagerOpen(false)}
             onAddDrawingLayer={() => {
               setLayerWorkspace((current) => addDrawingLayer(
@@ -754,6 +1309,8 @@ export function ExpertModeWorkspace({
         ) : null}
         <MarketChart
           candles={candles}
+          realtimeBarStream={realtimeBarStream}
+          realtimeBarStreamKey={realtimeBarStreamKey}
           period={period}
           livePrice={livePrice}
           referencePrice={referencePrice}
@@ -761,12 +1318,17 @@ export function ExpertModeWorkspace({
           priceDigits={priceDigits}
           marketPhase={marketPhase}
           marketSchedule={marketSchedule}
-          historyLoading={historyLoading}
-          onRequestOlderHistory={onRequestOlderHistory}
-          onRequestHistoryGap={onRequestHistoryGap}
+          historyLoading={replayActive ? false : historyLoading}
+          onRequestOlderHistory={replayActive
+            ? async () => ({ state: "exhausted", added: 0, advancedMinutes: 0 })
+            : onRequestOlderHistory}
+          onRequestHistoryGap={replayActive ? () => undefined : onRequestHistoryGap}
           onHover={setHover}
           appearance="expert"
           displayTimeZone={displayTimeZone}
+          replayMode={replayActive}
+          replayIndex={replayActive ? candles.length - 1 : null}
+          replayCutoff={replayCutoff}
           layers={chartLayers}
           drawingTool={drawingTool}
           drawingSnapMode={drawingSnapMode}
@@ -778,7 +1340,7 @@ export function ExpertModeWorkspace({
             setLayerWorkspace((current) => resizeIndicatorLayer(current, layerId, height));
           }}
         />
-        {loading && candles.length === 0 ? <div className="expert-chart-message"><RotateCcw className="spin" size={18} />正在读取现货黄金</div> : null}
+        {loading && candles.length === 0 ? <div className="expert-chart-message"><RotateCcw className="spin" size={18} />正在读取{instrumentName}</div> : null}
         {error ? <div className="expert-chart-message is-error">{error}</div> : null}
         {drawingTool ? (
           <div className="expert-drawing-hint">
@@ -857,23 +1419,37 @@ export function ExpertModeWorkspace({
                 ? "原生K线"
                 : strategy.evidenceMode === "proxy"
                   ? "估算"
-                  : "需成交量";
+                  : "条件数据";
               return (
-                <button
-                  type="button"
+                <article
                   key={strategy.id}
-                  className={enabled ? "is-enabled" : ""}
-                  aria-pressed={enabled}
-                  title={`数据：${strategy.dataSource}；口径：${evidenceLabel}`}
-                  onClick={() => toggleStrategy(strategy.id)}
+                  className={`expert-strategy-row ${enabled ? "is-enabled" : ""}`}
                 >
-                  <span className={`strategy-quality is-${strategy.evidenceMode}`} />
-                  <div><strong>{strategy.shortName}</strong><small>{strategy.description}</small></div>
-                  <span className="strategy-provenance">
-                    <small>数据 · {strategy.dataSource}</small>
-                    <em>{evidenceLabel}</em>
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    className="expert-strategy-toggle"
+                    aria-pressed={enabled}
+                    title={`数据：${strategy.dataSource}；口径：${evidenceLabel}`}
+                    onClick={() => toggleStrategy(strategy.id)}
+                  >
+                    <span className={`strategy-quality is-${strategy.evidenceMode}`} />
+                    <div><strong>{strategy.shortName}</strong><small>{strategy.description}</small></div>
+                    <span className="strategy-provenance">
+                      <small>数据 · {strategy.dataSource}</small>
+                      <em>{evidenceLabel}</em>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="expert-strategy-detail-button"
+                    aria-label={`查看${strategy.name}策略详情`}
+                    aria-haspopup="dialog"
+                    title="查看原理、参考依据与边界条件"
+                    onClick={() => setSelectedStrategyId(strategy.id)}
+                  >
+                    <BookOpen size={13} />
+                  </button>
+                </article>
               );
             })}
           </div>
@@ -893,6 +1469,8 @@ export function ExpertModeWorkspace({
             type="button"
             id="expert-intelligence-tab-options"
             role="tab"
+            disabled={!goldOptionsApplicable}
+            title={goldOptionsApplicable ? "黄金期权结构" : "当前只接入黄金期权，白银不复用黄金期权数据"}
             aria-selected={intelligenceTab === "options"}
             aria-controls="expert-intelligence-panel"
             className={intelligenceTab === "options" ? "is-active" : ""}
@@ -918,12 +1496,128 @@ export function ExpertModeWorkspace({
           {intelligenceTab === "signals" ? (
             <>
               <div className="expert-signal-summary">
+                <span>MA <b>{movingAverageAlignmentLabel(analysis.indicators.movingAverage?.alignment)}</b></span>
+                <span>BOLL <b>{bollingerStateLabel(analysis.indicators.bollinger?.state)}</b></span>
+                <span>九转 <b>{analysis.indicators.nineCount === null ? "—" : `${analysis.indicators.nineCount.count}/9`}</b></span>
                 <span>MACD <b>{analysis.indicators.macd?.histogram.toFixed(2) ?? "—"}</b></span>
                 <span>KDJ <b>{analysis.indicators.kdj?.j.toFixed(1) ?? "—"}</b></span>
+                <span>RSI <b>{analysis.indicators.rsi?.value.toFixed(1) ?? "—"}</b></span>
                 <span>POC≈ <b>{analysis.indicators.pocPrice?.toFixed(priceDigits) ?? "—"}</b></span>
               </div>
+              {multiTimeframeEnabled ? (
+                <section className="expert-context-card is-timeframe" aria-label="1小时、日线与周线周期张力">
+                  <header>
+                    <div><TrendingUp size={13} /><strong>周期张力</strong></div>
+                    <span>1H · 1D · 1W</span>
+                  </header>
+                  {multiTimeframeContext ? (
+                    <>
+                      <div className="expert-timeframe-ladder">
+                        {multiTimeframeContext.timeframes.map((item) => (
+                          <article key={item.horizon} className={`is-${item.direction}`}>
+                            <span>{item.horizon === "short" ? "短" : item.horizon === "medium" ? "中" : "长"}</span>
+                            <div>
+                              <strong>{item.period_id.toUpperCase()}</strong>
+                              <small>{item.state === "ready"
+                                ? `SMA5 ${item.sma_fast?.toFixed(priceDigits) ?? "—"} / SMA20 ${item.sma_slow?.toFixed(priceDigits) ?? "—"}`
+                                : item.state === "insufficient_data"
+                                  ? `${item.used_bar_count}/${item.required_final_bars} 根已收盘 Bar`
+                                  : timeframeLimitationLabel(item.limitation)}</small>
+                            </div>
+                            <b>{timeframeDirectionLabel(item.direction)}</b>
+                            <em>{formatSigned(item.window_return_percent, 1, "%")}</em>
+                          </article>
+                        ))}
+                      </div>
+                      {timeframeOpportunity ? (
+                        <div className={`expert-timeframe-opportunity is-${timeframeOpportunity.tone}`}>
+                          <strong>{timeframeOpportunity.title}</strong>
+                          <span>{timeframeOpportunity.detail}</span>
+                        </div>
+                      ) : (
+                        <div className="expert-context-empty">
+                          {multiTimeframeContext.comparison.incomparable_reasons.length > 0
+                            ? multiTimeframeContext.comparison.incomparable_reasons
+                              .map((reason) => timeframeLimitationLabel(reason.split(":").slice(1).join(":")))
+                              .join(" · ")
+                            : "暂不可比较：三个周期均需至少 20 根在共同 as-of 前可用的已收盘 Bar。"}
+                        </div>
+                      )}
+                      <footer className="expert-context-source">
+                        <span>同品种 · 同数据源 · 已收盘</span>
+                        <time dateTime={multiTimeframeContext.decision_as_of}>
+                          {formatOptionObservedAt(multiTimeframeContext.decision_as_of, displayTimeZone)}
+                        </time>
+                      </footer>
+                    </>
+                  ) : <div className="expert-context-empty">{multiTimeframeError ?? "正在比较 1H / 1D / 1W 已收盘走势"}</div>}
+                  {multiTimeframeError && multiTimeframeContext ? <small className="expert-context-warning">刷新失败，保留上一份快照：{multiTimeframeError}</small> : null}
+                  <p>周期差异只定位相对优势观察窗；必须等待短周期结构或 RSI 确认，不输出胜率或保证入场。</p>
+                </section>
+              ) : null}
+              {volatilityContextEnabled ? (
+                <section className="expert-context-card is-volatility" aria-label="VIX 与 GVZ 日终波动率背景">
+                  <header>
+                    <div><Activity size={13} /><strong>隐含波动背景</strong></div>
+                    <span>EOD · 不判方向</span>
+                  </header>
+                  {volatilityContext ? (
+                    <div className="expert-volatility-grid">
+                      {volatilityContext.indices.map((index) => {
+                        const percentile = index.trailing_percentile_252;
+                        return (
+                          <article key={index.index_code}>
+                            <header><b>{index.index_code}</b><strong>{index.value.toFixed(2)}</strong></header>
+                            <small>{index.underlying} 期权 · 未来约 {index.expected_horizon_days} 日波动</small>
+                            <i className="expert-context-meter" aria-hidden="true">
+                              <span style={{ width: `${Math.min(100, Math.max(0, percentile ?? 0))}%` }} />
+                            </i>
+                            <footer>
+                              <span>252日分位 {percentile === null ? "—" : `${percentile.toFixed(0)}%`}</span>
+                              <time dateTime={index.as_of}>{index.as_of}</time>
+                            </footer>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : <div className="expert-context-empty">{volatilityContextError ?? "正在读取 Cboe 日终数据"}</div>}
+                  {volatilityContextError && volatilityContext ? <small className="expert-context-warning">刷新失败，保留上一份 EOD：{volatilityContextError}</small> : null}
+                  <p>VIX 是 SPX 风险波动；GVZ 才是 GLD 期权隐含波动。两者只作风险背景，不直接推断金价涨跌。</p>
+                </section>
+              ) : null}
+              {positioningContextEnabled ? (
+                <section className="expert-context-card is-positioning" aria-label="沪金沪银成交量与持仓量背景">
+                  <header>
+                    <div><Layers3 size={13} /><strong>量价与持仓</strong></div>
+                    <span>SHFE · 延迟快照</span>
+                  </header>
+                  {positioningProduct === null ? (
+                    <div className="expert-context-empty">仅在沪金加权 AU8888 / 沪银加权 AG8888 读取交易所量仓。</div>
+                  ) : positioningContext ? (
+                    <>
+                      <dl className="expert-positioning-metrics">
+                        <div><dt>成交量</dt><dd>{formatOptionQuantity(positioningContext.volume)}</dd></div>
+                        <div><dt>总持仓</dt><dd>{formatOptionQuantity(positioningContext.open_interest)}</dd></div>
+                        <div><dt>持仓变化</dt><dd>{formatSignedQuantity(positioningContext.open_interest_change)}</dd></div>
+                        <div><dt>真实合约</dt><dd>{positioningContext.contract_count}</dd></div>
+                      </dl>
+                      <div className="expert-positioning-readout">
+                        <strong>{volumePriceStateLabel(analysis.indicators.volumePriceState)}</strong>
+                        <span>{positioningContext.open_interest_change === null
+                          ? "官方快照未给完整 ΔOI，不补 0、不推断多空"
+                          : "ΔOI 仅表示未平仓参与变化，仍不等于净多或净空"}</span>
+                      </div>
+                      <footer className="expert-context-source">
+                        <time dateTime={positioningContext.as_of}>{formatOptionObservedAt(positioningContext.as_of, displayTimeZone)}</time>
+                        <a href={positioningContext.source.source_url} target="_blank" rel="noreferrer">交易所源</a>
+                      </footer>
+                    </>
+                  ) : <div className="expert-context-empty">{positioningContextError ?? "正在读取 SHFE 延迟量仓"}</div>}
+                  {positioningContextError && positioningContext ? <small className="expert-context-warning">刷新失败，保留上一份快照：{positioningContextError}</small> : null}
+                </section>
+              ) : null}
               <div className="expert-signal-feed">
-                {analysis.signals.slice(0, 5).map((signal) => (
+                {analysis.signals.slice(0, 8).map((signal) => (
                   <article key={signal.id} className={`is-${signal.direction}`}>
                     <header><strong>{signal.title}</strong><span>{signalDirectionLabel(signal.direction)} · {Math.round(signal.confidence * 100)}</span></header>
                     <p>{signal.detail}</p>
@@ -1094,8 +1788,84 @@ export function ExpertModeWorkspace({
         </div>
       </aside>
 
+      <StrategyDetailDrawer
+        strategy={selectedStrategy}
+        onClose={() => setSelectedStrategyId(null)}
+      />
+
       <footer className="expert-replay-deck">
-        <span className="expert-replay-time">真实实时流回放重构中</span>
+        <button
+          type="button"
+          className={replayActive ? "is-active" : ""}
+          disabled={!replaySupported || replayBounds?.state !== "ready" || replayCursor === null}
+          onClick={() => replayState === "playing" ? pauseReplay() : void startReplay()}
+          title={!replaySupported
+            ? "当前行情源尚未接入原始帧回放"
+            : replayError ?? "按原始提供商帧顺序回放，并复用实时 Bar 归约链路"}
+        >
+          {replayState === "playing" ? <Pause size={13} /> : <Play size={13} />}
+          {replayState === "playing" ? "暂停回放" : replayActive ? "继续回放" : "行情回放"}
+        </button>
+        <button
+          type="button"
+          disabled={!replayActive}
+          onClick={returnToLive}
+          title="关闭隔离回放并回到实时行情"
+          aria-label="回到实时行情"
+        >
+          <Radio size={13} />
+        </button>
+        <input
+          type="range"
+          aria-label="真实行情回放游标"
+          min={replayBounds?.first_sequence ?? 0}
+          max={replayBounds?.last_sequence ?? 0}
+          step={1}
+          value={replayCursor ?? replayBounds?.first_sequence ?? 0}
+          disabled={replayBounds?.state !== "ready"}
+          onInput={(event) => seekReplayCursor(Number(event.currentTarget.value))}
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.currentTarget.focus();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            seekReplayPointer(event.clientX, event.currentTarget);
+          }}
+          onPointerMove={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              seekReplayPointer(event.clientX, event.currentTarget);
+            }
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+        />
+        <span
+          className={`expert-replay-time ${replayBounds?.state === "unavailable" ? "is-error" : ""}`}
+          title={replayError ?? replayWarning ?? undefined}
+        >
+          {replayBounds?.state === "unavailable" || replayBounds?.state === "empty"
+            ? replayBounds.detail
+            : replayCursorFrame?.sequence === replayCursor
+              ? formatReplayTimecode(replayCursorFrame.received_at)
+              : "正在定位精确帧时间…"}
+          {replayWarning ? <i aria-label={`帧解码警告：${replayWarning}`}>!</i> : null}
+        </span>
+        <label>
+          速度
+          <select
+            value={replaySpeed}
+            onChange={(event) => {
+              if (replayState === "playing") pauseReplay();
+              setReplaySpeed(Number(event.currentTarget.value));
+            }}
+          >
+            {[0.25, 0.5, 1, 2, 4, 8, 16, 32, 64].map((speed) => (
+              <option key={speed} value={speed}>{speed}×</option>
+            ))}
+          </select>
+        </label>
         <div className="expert-backtest-strip" title={backtest.caveat}>
           <span>{backtestReady ? "实验回测" : `回测计算中 ${backtestProgress}%`}</span>
           {backtestReady ? (

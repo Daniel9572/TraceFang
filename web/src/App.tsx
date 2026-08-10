@@ -51,6 +51,7 @@ import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
 import { ExpertModeWorkspace } from "./ExpertModeWorkspace";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
+import { RealtimeBarStream, realtimeBarDatasetKey } from "./realtimeBarStream";
 import { SourcePicker, type SourceTestFeedback } from "./SourcePicker";
 import { startWatchlistQuoteStream, watchlistQuoteStreamTargets } from "./watchlistStreams";
 import type { ExpertMarketEvent } from "./expertTypes";
@@ -120,6 +121,10 @@ function digitsFor(code: string, instrument?: InstrumentEntry): number {
   if (code === "XAGUSD") return 3;
   if (code === "USDCNH") return 4;
   return 2;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function unitFor(code: string, instrument?: InstrumentEntry): string {
@@ -298,6 +303,7 @@ export default function App() {
   const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteView>>({});
   const [watchPriceSeries, setWatchPriceSeries] = useState<Record<string, number[]>>({});
   const [candles, setCandles] = useState<Candle[]>([]);
+  const [realtimeBarStream] = useState(() => new RealtimeBarStream());
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
@@ -327,6 +333,9 @@ export default function App() {
   const [historyRepairingCount, setHistoryRepairingCount] = useState(0);
   const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "waiting" | "unavailable">("connecting");
   const candleRequestRef = useRef(0);
+  const candleSnapshotAbortRef = useRef<AbortController | null>(null);
+  const historyPageAbortRef = useRef<AbortController | null>(null);
+  const historyGapAbortRef = useRef(new Map<string, AbortController>());
   const candlesRef = useRef<Candle[]>([]);
   const historyCursorRef = useRef<number | null>(null);
   const historyLoadInFlightRef = useRef(false);
@@ -335,6 +344,13 @@ export default function App() {
   const watchlistQuoteStreamsRef = useRef(
     new Map<string, { sourceId: SourceId; stop: () => void }>(),
   );
+
+  useEffect(() => () => {
+    candleSnapshotAbortRef.current?.abort();
+    historyPageAbortRef.current?.abort();
+    for (const controller of historyGapAbortRef.current.values()) controller.abort();
+    historyGapAbortRef.current.clear();
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -394,6 +410,11 @@ export default function App() {
   const selectedSource = instrumentSources[selectedCode] ?? "jin10_client";
   const selectedPeriod = chartPeriodById(periodId);
   const selectedBarPeriodId = barDataPeriodId(selectedPeriod);
+  const selectedBarStreamKey = realtimeBarDatasetKey(
+    selectedCode,
+    selectedSource,
+    selectedBarPeriodId,
+  );
   const chartHistoryLoading = historySyncing || historyRepairingCount > 0;
   const sourceById = useMemo(
     () => new Map(sources.map((source) => [source.source_id, source])),
@@ -436,6 +457,12 @@ export default function App() {
   }, []);
 
   const loadCandles = useCallback(async () => {
+    candleSnapshotAbortRef.current?.abort();
+    historyPageAbortRef.current?.abort();
+    for (const controller of historyGapAbortRef.current.values()) controller.abort();
+    historyGapAbortRef.current.clear();
+    const controller = new AbortController();
+    candleSnapshotAbortRef.current = controller;
     const requestId = ++candleRequestRef.current;
     historyCursorRef.current = null;
     historyLoadInFlightRef.current = false;
@@ -450,6 +477,7 @@ export default function App() {
         selectedCode,
         selectedSource,
         selectedBarPeriodId,
+        { signal: controller.signal },
       );
       if (requestId !== candleRequestRef.current) return;
       // The period stream may win the race against the initial snapshot.
@@ -461,10 +489,14 @@ export default function App() {
         historyCursorRef.current = firstCursor;
       }
     } catch (error) {
+      if (isAbortError(error)) return;
       if (requestId !== candleRequestRef.current) return;
       setCandles([]);
       setCandleError(translateError(error));
     } finally {
+      if (candleSnapshotAbortRef.current === controller) {
+        candleSnapshotAbortRef.current = null;
+      }
       if (requestId === candleRequestRef.current) setLoadingCandles(false);
     }
   }, [selectedBarPeriodId, selectedCode, selectedSource]);
@@ -478,6 +510,8 @@ export default function App() {
     if (before === null) return historyOutcome("exhausted");
 
     const requestId = candleRequestRef.current;
+    const controller = new AbortController();
+    historyPageAbortRef.current = controller;
     historyLoadInFlightRef.current = true;
     setHistorySyncing(true);
     setHistoryError(null);
@@ -486,7 +520,7 @@ export default function App() {
         selectedCode,
         selectedSource,
         selectedBarPeriodId,
-        before,
+        { before, signal: controller.signal },
       );
       if (requestId !== candleRequestRef.current) return historyOutcome("exhausted");
       if (localPage.items.length > 0) {
@@ -513,13 +547,14 @@ export default function App() {
         selectedSource,
         before,
         historyBatchMinutes(selectedPeriod),
+        controller.signal,
       );
       if (requestId !== candleRequestRef.current) return historyOutcome("exhausted");
       const page = await marketApi.barPage(
         selectedCode,
         selectedSource,
         selectedBarPeriodId,
-        before,
+        { before, signal: controller.signal, cache: "reload" },
       );
       if (requestId !== candleRequestRef.current) return historyOutcome("exhausted");
       const filledStart = epochSeconds(filled.result.start);
@@ -539,11 +574,15 @@ export default function App() {
         Math.max(0, Math.ceil((before - cursor) / 60)),
       );
     } catch (error) {
+      if (isAbortError(error)) return historyOutcome("exhausted");
       if (requestId === candleRequestRef.current) {
         setHistoryError(`更早行情加载失败：${translateError(error)}`);
       }
       return historyOutcome("failed");
     } finally {
+      if (historyPageAbortRef.current === controller) {
+        historyPageAbortRef.current = null;
+      }
       if (requestId === candleRequestRef.current) {
         historyLoadInFlightRef.current = false;
         setHistorySyncing(false);
@@ -560,6 +599,8 @@ export default function App() {
     const key = `${selectedSource}:${selectedCode}:${window.start}:${window.count}`;
     if (historyGapAttemptsRef.current.has(key)) return;
     historyGapAttemptsRef.current.add(key);
+    const controller = new AbortController();
+    historyGapAbortRef.current.set(key, controller);
     const requestId = candleRequestRef.current;
     setHistoryRepairingCount((current) => current + 1);
     setHistoryError(null);
@@ -568,6 +609,7 @@ export default function App() {
         selectedCode,
         selectedSource,
         window,
+        controller.signal,
       );
       if (requestId !== candleRequestRef.current) return;
       const periodSeconds = selectedPeriod.aggregation.minutes * 60;
@@ -579,8 +621,12 @@ export default function App() {
         selectedCode,
         selectedSource,
         selectedBarPeriodId,
-        window.end + periodSeconds,
-        pageSize,
+        {
+          before: window.end + periodSeconds,
+          pageSize,
+          signal: controller.signal,
+          cache: "reload",
+        },
       );
       if (requestId !== candleRequestRef.current) return;
       setCandles((current) => mergeCandleRows(page.items, current));
@@ -596,10 +642,14 @@ export default function App() {
         );
       }
     } catch (error) {
+      if (isAbortError(error)) return;
       if (requestId === candleRequestRef.current) {
         setHistoryError(`可见缺口复核失败：${translateError(error)}`);
       }
     } finally {
+      if (historyGapAbortRef.current.get(key) === controller) {
+        historyGapAbortRef.current.delete(key);
+      }
       setHistoryRepairingCount((current) => Math.max(0, current - 1));
     }
   }, [
@@ -674,6 +724,7 @@ export default function App() {
     let socket: WebSocket | null = null;
     let retryTimer: number | null = null;
     let retryCount = 0;
+    let resyncPromise: Promise<void> | null = null;
 
     setLoadingQuote(true);
     setQuote(null);
@@ -703,12 +754,25 @@ export default function App() {
         if (disposed || selectedCodeRef.current !== selectedCode) return;
         const event = JSON.parse(String(message.data)) as QuoteStreamEvent;
         const marketClosed = marketPhaseRef.current === "closed";
-        if (event.kind === "bar" && event.bar) {
+        if (event.kind === "gap") {
+          if (resyncPromise === null) {
+            const from = event.gap_from_sequence ?? "?";
+            const to = event.gap_to_sequence ?? "?";
+            setQuoteStreamState("connecting");
+            setQuoteError(`检测到实时序列缺口 ${from}–${to}，正在读取有限快照重同步`);
+            const pendingResync = loadCandles().then(() => undefined);
+            resyncPromise = pendingResync;
+            void pendingResync.finally(() => {
+              if (resyncPromise === pendingResync) resyncPromise = null;
+            });
+          }
+        } else if (event.kind === "bar" && event.bar) {
           setQuoteStreamState(marketClosed ? "waiting" : "live");
           if (
             event.period_id === selectedBarPeriodId
             && event.bar.source.provider === selectedSource
           ) {
+            realtimeBarStream.publish(selectedBarStreamKey, event.bar);
             setCandles((current) => upsertRealtimeBar(current, event.bar!));
             setCandleError(null);
           }
@@ -737,9 +801,20 @@ export default function App() {
         setQuoteStreamState("unavailable");
         setQuoteError("实时报价连接已断开，正在重连");
         setLoadingQuote(false);
-        const delay = Math.min(1_000, 100 * 2 ** retryCount);
-        retryCount += 1;
-        retryTimer = window.setTimeout(connect, delay);
+        const scheduleReconnect = () => {
+          if (disposed) return;
+          const delay = Math.min(1_000, 100 * 2 ** retryCount);
+          retryCount += 1;
+          retryTimer = window.setTimeout(connect, delay);
+        };
+        if (resyncPromise === null) {
+          scheduleReconnect();
+        } else {
+          void resyncPromise.finally(() => {
+            resyncPromise = null;
+            scheduleReconnect();
+          });
+        }
       };
     };
 
@@ -751,11 +826,14 @@ export default function App() {
     };
   }, [
     instrumentSourcesLoaded,
+    loadCandles,
     selectedBarPeriodId,
     selectedCode,
     selectedSource,
     selectedSourceDescriptor?.display_name,
     selectedSourceReady,
+    selectedBarStreamKey,
+    realtimeBarStream,
     sourcesLoaded,
   ]);
 
@@ -1058,6 +1136,10 @@ export default function App() {
       eventMarkers: sharedEventMarkers,
       priceLevels: [],
       valueZones: [],
+      trendLines: [],
+      pricePatterns: [],
+      marketStructureEvents: [],
+      overlaySeries: [],
     }),
     [layerWorkspace, sharedEventMarkers, sharedIndicatorSeries],
   );
@@ -1082,6 +1164,8 @@ export default function App() {
         instrumentName={selectedInstrument.name}
         unit={unitFor(selectedCode, selectedInstrument) || "美元/盎司"}
         candles={candles}
+        realtimeBarStream={realtimeBarStream}
+        realtimeBarStreamKey={selectedBarStreamKey}
         periodId={periodId}
         livePrice={livePrice}
         change={numeric(priceQuote?.change)}
@@ -1093,6 +1177,7 @@ export default function App() {
         marketPhase={marketSession.phase}
         marketSchedule={selectedInstrument.market_schedule}
         sourceLabel={selectedSourceDescriptor?.display_name ?? sourceLabels[selectedSource] ?? selectedSource}
+        sourceId={selectedSource}
         sourceState={quoteStreamState}
         liveIndicatorSeries={sharedIndicatorSeries}
         marketEvents={goldEvents ?? []}
@@ -1140,20 +1225,6 @@ export default function App() {
             type="button"
             className="accent"
             onClick={() => {
-              if (selectedCode !== "XAUUSD") {
-                selectedCodeRef.current = "XAUUSD";
-                candleRequestRef.current += 1;
-                historyCursorRef.current = null;
-                historyLoadInFlightRef.current = false;
-                setQuote(null);
-                setCandles([]);
-                setQuoteError(null);
-                setCandleError(null);
-                setHistorySyncing(false);
-                setLoadingQuote(true);
-                setLoadingCandles(true);
-              }
-              setSelectedCode("XAUUSD");
               setHover(null);
               setExpertMode(true);
             }}
@@ -1475,6 +1546,8 @@ export default function App() {
           ) : null}
           <MarketChart
             candles={candles}
+            realtimeBarStream={realtimeBarStream}
+            realtimeBarStreamKey={selectedBarStreamKey}
             period={selectedPeriod}
             livePrice={livePrice}
             referencePrice={timelineReferencePrice}
