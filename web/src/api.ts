@@ -5,7 +5,6 @@ import type {
   InstrumentEntry,
   InstrumentSourceSelection,
   QuoteView,
-  QuoteSamplePage,
   SourceConnectionTest,
   SourceDescriptor,
   SourceId,
@@ -16,6 +15,8 @@ import type {
   ExpertGoldEventCatalogSnapshot,
   ExpertOptionsStatus,
 } from "./expertTypes";
+import type { BarPeriodId } from "./chartPeriods";
+import { sameCandleVersion } from "./chartModel.ts";
 import { historyWindowBefore, type HistoryWindow } from "./historyLoading.ts";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -54,24 +55,6 @@ interface CandleHistoryBackfill {
 }
 
 const candleBackfillRequests = new Map<string, Promise<CandleHistoryBackfill>>();
-
-function sameCandleVersion(left: Candle, right: Candle): boolean {
-  return left === right || (
-    left.open_time === right.open_time
-    && left.revision === right.revision
-    && left.state === right.state
-    && left.open === right.open
-    && left.high === right.high
-    && left.low === right.low
-    && left.close === right.close
-    && left.volume === right.volume
-    && left.finalized_at === right.finalized_at
-    && left.source.provider === right.source.provider
-    && left.source.observed_at === right.source.observed_at
-    && left.source.received_at === right.source.received_at
-    && left.source.raw_payload?.bucket_end === right.source.raw_payload?.bucket_end
-  );
-}
 
 export function mergeCandleRows(...pages: Candle[][]): Candle[] {
   const rows = new Map<string, Candle>();
@@ -262,21 +245,10 @@ export const marketApi = {
   },
   olderCandleHistory: loadOlderCandleHistory,
   revalidateCandleHistory,
-  timelineSamplePage: (code: string, sourceId: SourceId, cursor?: number) => {
-    const params = new URLSearchParams({ page_size: "20000" });
-    if (cursor !== undefined) params.set("cursor", String(cursor));
-    return request<QuoteSamplePage>(
-      `/api/timeline/${encodeURIComponent(code)}?${params}`,
-    ).then((page) => {
-      if (page.items.some((item) => item.source_id !== sourceId)) {
-        throw new Error("合约实时数据源已变化，请重新读取分时事件");
-      }
-      return page;
-    });
-  },
-  openQuoteStream: (code: string) => {
+  openQuoteStream: (code: string, period: BarPeriodId = "1m") => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}`;
+    const params = new URLSearchParams({ period });
+    const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}?${params}`;
     return new WebSocket(url);
   },
   testSource: (sourceId: SourceId, code: string) =>

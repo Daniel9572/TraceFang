@@ -139,7 +139,10 @@ test("updates an unselected watchlist row from its quote stream", () => {
     kind: "quote",
     state: "live",
     emitted_at: "2026-08-08T08:00:00Z",
+    period_id: "1m",
+    bar: null,
     quote,
+    sample: null,
     error: null,
   };
 

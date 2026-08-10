@@ -424,7 +424,7 @@ _SELECT_RECENT_QUOTE_CANDLES = """
 SELECT *
 FROM (
     SELECT
-        date_trunc('minute', observed_at) AS open_time,
+        date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0)) AS open_time,
         (array_agg(provider_symbol ORDER BY observed_at, id))[1] AS provider_symbol,
         (array_agg(last ORDER BY observed_at, id))[1] AS open,
         max(last) AS high,
@@ -433,17 +433,17 @@ FROM (
         max(observed_at) AS observed_at,
         max(received_at) AS received_at
     FROM quote_events
-    WHERE instrument_symbol = $1 AND source_id = $2 AND observed_at >= $3
-    GROUP BY date_trunc('minute', observed_at)
+    WHERE instrument_symbol = $1 AND source_id = $2 AND observed_at >= $4
+    GROUP BY date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0))
     ORDER BY open_time DESC
-    LIMIT $4
+    LIMIT $5
 ) AS recent
 ORDER BY open_time
 """
 
 _SELECT_RANGE_QUOTE_CANDLES = """
 SELECT
-    date_trunc('minute', observed_at) AS open_time,
+    date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0)) AS open_time,
     (array_agg(provider_symbol ORDER BY observed_at, id))[1] AS provider_symbol,
     (array_agg(last ORDER BY observed_at, id))[1] AS open,
     max(last) AS high,
@@ -454,18 +454,18 @@ SELECT
 FROM quote_events
 WHERE instrument_symbol = $1
   AND source_id = $2
-  AND observed_at >= $3
-  AND observed_at < $4
-GROUP BY date_trunc('minute', observed_at)
+  AND observed_at >= $4
+  AND observed_at < $5
+GROUP BY date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0))
 ORDER BY open_time
-LIMIT $5
+LIMIT $6
 """
 
 _SELECT_QUOTE_CANDLES_BEFORE = """
 SELECT *
 FROM (
     SELECT
-        date_trunc('minute', observed_at) AS open_time,
+        date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0)) AS open_time,
         (array_agg(provider_symbol ORDER BY observed_at, id))[1] AS provider_symbol,
         (array_agg(last ORDER BY observed_at, id))[1] AS open,
         max(last) AS high,
@@ -474,10 +474,10 @@ FROM (
         max(observed_at) AS observed_at,
         max(received_at) AS received_at
     FROM quote_events
-    WHERE instrument_symbol = $1 AND source_id = $2 AND observed_at < $3
-    GROUP BY date_trunc('minute', observed_at)
+    WHERE instrument_symbol = $1 AND source_id = $2 AND observed_at < $4
+    GROUP BY date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0))
     ORDER BY open_time DESC
-    LIMIT $4
+    LIMIT $5
 ) AS recent
 ORDER BY open_time
 """
@@ -1651,6 +1651,7 @@ class PostgresMarketDataStore:
         instrument: Instrument,
         *,
         source_id: str,
+        interval: timedelta = timedelta(minutes=1),
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]:
@@ -1658,14 +1659,20 @@ class PostgresMarketDataStore:
             raise ValueError("count must be between 1 and 10000")
         if start is not None and (start.tzinfo is None or start.utcoffset() is None):
             raise ValueError("start must be timezone-aware")
+        interval_seconds = int(interval.total_seconds())
+        if interval_seconds <= 0:
+            raise ValueError("interval must be positive")
         pool = self._require_pool()
         async with pool.acquire() as connection:
             if start is None:
-                cutoff = datetime.now(UTC) - timedelta(minutes=max(180, count * 3))
+                cutoff = datetime.now(UTC) - timedelta(
+                    seconds=max(180 * 60, count * interval_seconds * 3)
+                )
                 rows = await connection.fetch(
                     _SELECT_RECENT_QUOTE_CANDLES,
                     instrument.symbol,
                     source_id,
+                    interval_seconds,
                     cutoff,
                     count,
                 )
@@ -1674,14 +1681,15 @@ class PostgresMarketDataStore:
                     _SELECT_RANGE_QUOTE_CANDLES,
                     instrument.symbol,
                     source_id,
+                    interval_seconds,
                     start,
-                    start + timedelta(minutes=count),
+                    start + interval * count,
                     count,
                 )
         return tuple(
             Candle(
                 instrument=instrument,
-                interval=timedelta(minutes=1),
+                interval=interval,
                 open_time=row["open_time"],
                 open=row["open"],
                 high=row["high"],
@@ -1704,19 +1712,26 @@ class PostgresMarketDataStore:
         instrument: Instrument,
         *,
         source_id: str,
+        interval: timedelta = timedelta(minutes=1),
         before: datetime | None = None,
         count: int = 2_000,
     ) -> tuple[Candle, ...]:
         if not 1 <= count <= 10_000:
             raise ValueError("count must be between 1 and 10000")
+        interval_seconds = int(interval.total_seconds())
+        if interval_seconds <= 0:
+            raise ValueError("interval must be positive")
         pool = self._require_pool()
         async with pool.acquire() as connection:
             if before is None:
-                cutoff = datetime.now(UTC) - timedelta(minutes=max(180, count * 3))
+                cutoff = datetime.now(UTC) - timedelta(
+                    seconds=max(180 * 60, count * interval_seconds * 3)
+                )
                 rows = await connection.fetch(
                     _SELECT_RECENT_QUOTE_CANDLES,
                     instrument.symbol,
                     source_id,
+                    interval_seconds,
                     cutoff,
                     count,
                 )
@@ -1725,13 +1740,14 @@ class PostgresMarketDataStore:
                     _SELECT_QUOTE_CANDLES_BEFORE,
                     instrument.symbol,
                     source_id,
+                    interval_seconds,
                     before,
                     count,
                 )
         return tuple(
             Candle(
                 instrument=instrument,
-                interval=timedelta(minutes=1),
+                interval=interval,
                 open_time=row["open_time"],
                 open=row["open"],
                 high=row["high"],

@@ -3,10 +3,11 @@ import test from "node:test";
 
 import { mergeCandleRows } from "../src/api.ts";
 import {
-  appendTimelineSample,
   buildTimelineSeries,
+  candleSeriesUpdateStart,
+  classifyCandleSeriesMutation,
   formatBarCountdown,
-  mergeTimelineSamples,
+  upsertRealtimeBar,
 } from "../src/chartModel.ts";
 import { chartPeriodById, secondsUntilPeriodClose } from "../src/chartPeriods.ts";
 import type { Candle } from "../src/types.ts";
@@ -41,129 +42,68 @@ test("formats a stable exchange-style countdown", () => {
   assert.equal(formatBarCountdown(750), "00:12:30");
 });
 
-test("uses native quote samples instead of a synthetic minute close for the same minute", () => {
-  const minuteTime = Math.floor(Date.parse("2026-08-06T01:47:00Z") / 1_000);
-  const samples = appendTimelineSample(
-    [],
-    { time: minuteTime + 1, value: 101.25 },
-  );
-  const series = buildTimelineSeries(
-    [candle("2026-08-06T01:47:00Z", 100, 102, 99, 101)],
-    samples,
-    101.5,
-    "2026-08-06T01:47:02Z",
-  );
+test("projects standard one-second Bars into the timeline without a second quote model", () => {
+  const first = { ...candle("2026-08-06T01:47:02Z", 100, 102, 99, 101), interval: 1 };
+  const second = { ...candle("2026-08-06T01:47:03Z", 101, 103, 100, 102), interval: 1 };
+  const series = buildTimelineSeries([first, second]);
 
-  assert.deepEqual(series.map((point) => point.value), [101.25, 101.5]);
+  assert.deepEqual(series.map((point) => point.value), [101, 102]);
+  assert.deepEqual(series.map((point) => point.resolutionSeconds), [1, 1]);
 });
 
-test("retains an authoritative bar's native coverage for timeline gap detection", () => {
-  const [point] = buildTimelineSeries(
-    [candle("2026-08-06T01:47:00Z", 100, 102, 99, 101)],
-    [],
-    null,
-    null,
-  );
+test("replaces the complete current Bar while preserving the immutable history prefix", () => {
+  const first = candle("2026-08-06T01:46:59Z", 99, 101, 98, 100);
+  const current = candle("2026-08-06T01:47:00Z", 100, 102, 99, 101);
+  const incoming = {
+    ...current,
+    high: 104,
+    close: 103,
+    revision: 2,
+    source: { ...current.source, received_at: "2026-08-06T01:47:01Z" },
+  };
+  const previous = [first, current];
+  const next = upsertRealtimeBar(previous, incoming);
 
-  assert.equal(point.resolutionSeconds, 60);
+  assert.equal(next.length, 2);
+  assert.equal(next[0], first);
+  assert.equal(next[1], incoming);
+  assert.equal(classifyCandleSeriesMutation(previous, next), "tail-update");
+  assert.deepEqual(buildTimelineSeries(next).map((point) => point.value), [100, 103]);
 });
 
-test("preserves every distinct price revision inside the same source second", () => {
-  const sourceSecond = Date.parse("2026-08-06T01:47:02Z") / 1_000;
-  const first = appendTimelineSample([], {
-    time: sourceSecond + 0.125,
-    observedTime: sourceSecond,
-    value: 101.25,
-    eventId: "first",
-  });
-  const second = appendTimelineSample(first, {
-    time: sourceSecond + 0.125,
-    observedTime: sourceSecond,
-    value: 99.75,
-    eventId: "second",
-  });
+test("appends only a newer complete Bar and classifies it for chart update", () => {
+  const current = candle("2026-08-06T01:47:00Z", 100, 102, 99, 101);
+  const incoming = candle("2026-08-06T01:48:00Z", 101, 103, 100, 102);
+  const previous = [current];
+  const next = upsertRealtimeBar(previous, incoming);
 
-  assert.equal(second.length, 2);
-  assert.equal(second[0].value, 101.25);
-  assert.equal(second[1].value, 99.75);
-  assert.equal(second[0].time, sourceSecond + 0.125);
-  assert.equal(second[1].time, sourceSecond + 0.125);
+  assert.deepEqual(next, [current, incoming]);
+  assert.equal(classifyCandleSeriesMutation(previous, next), "tail-append");
 });
 
-test("drops a repeated poll when only the local receipt time changed", () => {
-  const observed = Date.parse("2026-08-06T01:47:02Z") / 1_000;
-  const first = appendTimelineSample([], {
-    time: observed + 0.1,
-    observedTime: observed,
-    value: 101.25,
-    eventId: "poll-1",
-  });
-  const duplicate = appendTimelineSample(first, {
-    time: observed + 5.1,
-    observedTime: observed,
-    value: 101.25,
-    eventId: "poll-2",
-  });
+test("ignores older timestamps and stale revisions on the realtime path", () => {
+  const current = { ...candle("2026-08-06T01:47:00Z", 100, 102, 99, 101), revision: 2 };
+  const older = candle("2026-08-06T01:46:00Z", 99, 100, 98, 99.5);
+  const stale = { ...current, close: 90, revision: 1 };
+  const bars = [current];
 
-  assert.equal(duplicate, first);
+  assert.equal(upsertRealtimeBar(bars, older), bars);
+  assert.equal(upsertRealtimeBar(bars, stale), bars);
+  assert.equal(classifyCandleSeriesMutation(bars, bars), "unchanged");
 });
 
-test("keeps a repeated price after an intervening same-second revision", () => {
-  const observed = Date.parse("2026-08-06T01:47:02Z") / 1_000;
-  const samples = mergeTimelineSamples([
-    { time: observed + 0.1, observedTime: observed, value: 100, eventId: "one" },
-    { time: observed + 0.2, observedTime: observed, value: 101, eventId: "two" },
-    { time: observed + 0.3, observedTime: observed, value: 100, eventId: "three" },
-  ]);
+test("classifies history prepend as a reset instead of a realtime tail update", () => {
+  const current = candle("2026-08-06T01:47:00Z", 100, 102, 99, 101);
+  const older = candle("2026-08-06T01:46:00Z", 99, 100, 98, 99.5);
 
-  assert.deepEqual(samples.map((sample) => sample.value), [100, 101, 100]);
+  assert.equal(classifyCandleSeriesMutation([current], [older, current]), "reset");
 });
 
-test("collapses received-only duplicates across history page boundaries", () => {
-  const observed = Date.parse("2026-08-06T01:47:02Z") / 1_000;
-  const merged = mergeTimelineSamples(
-    [{ time: observed + 0.1, observedTime: observed, value: 100, eventId: "older" }],
-    [{ time: observed + 0.2, observedTime: observed, value: 100, eventId: "newer" }],
-  );
-
-  assert.equal(merged.length, 1);
-  assert.equal(merged[0].eventId, "older");
-});
-
-test("does not truncate the timeline after twenty thousand events", () => {
-  const samples = Array.from({ length: 20_000 }, (_, index) => ({
-    time: index,
-    value: index,
-    eventId: `event-${index}`,
-  }));
-  const result = appendTimelineSample(samples, {
-    time: 20_000,
-    value: 20_000,
-    eventId: "event-20000",
-  });
-
-  assert.equal(result.length, 20_001);
-  assert.equal(mergeTimelineSamples(result).length, 20_001);
-});
-
-test("linearly merges sorted history pages without dropping their boundary event", () => {
-  const older = Array.from({ length: 10_000 }, (_, index) => ({
-    time: index,
-    observedTime: index,
-    value: index,
-    eventId: `event-${index}`,
-  }));
-  const newer = Array.from({ length: 10_001 }, (_, index) => ({
-    time: 9_999 + index,
-    observedTime: 9_999 + index,
-    value: 9_999 + index,
-    eventId: `event-${9_999 + index}`,
-  }));
-  const merged = mergeTimelineSamples(older, newer);
-
-  assert.equal(merged.length, 20_000);
-  assert.equal(merged[9_999].eventId, "event-9999");
-  assert.equal(merged.at(-1)?.eventId, "event-19999");
+test("routes only realtime tail changes to the chart update API", () => {
+  assert.equal(candleSeriesUpdateStart("reset", 0, 500, 2_000), null);
+  assert.equal(candleSeriesUpdateStart("tail-update", 500, 500, 2_000), 499);
+  assert.equal(candleSeriesUpdateStart("tail-append", 500, 501, 2_000), 500);
+  assert.equal(candleSeriesUpdateStart("reset", 500, 1_000, 2_000), null);
 });
 
 test("merges backend Bar revisions without letting an older page overwrite a correction", () => {

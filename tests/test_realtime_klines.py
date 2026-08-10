@@ -169,7 +169,16 @@ class FakeStore:
         del interval
         return self._window(self.realtime_rows_by_source.get(source_id, ()), start, count)
 
-    async def load_quote_candles(self, _instrument, *, source_id, start=None, count=100):
+    async def load_quote_candles(
+        self,
+        _instrument,
+        *,
+        source_id,
+        interval=timedelta(minutes=1),
+        start=None,
+        count=100,
+    ):
+        del interval
         self.quote_calls.append(source_id)
         return self._window(self.quote_rows_by_source.get(source_id, ()), start, count)
 
@@ -440,6 +449,87 @@ class RealtimeBarServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[1].high, Decimal("4210"))
         self.assertEqual(rows[1].low, Decimal("4210"))
         self.assertEqual(rows[1].state, BarState.PROVISIONAL_QUOTE)
+
+    async def test_each_quote_returns_complete_one_second_and_minute_upserts(self) -> None:
+        service = RealtimeBarService(None, contracts=(binding(),))
+        first_event = service.normalize_quote(
+            quote("live-a", "4200", START + timedelta(milliseconds=100))
+        )
+        assert first_event is not None
+
+        first = service.apply(first_event)
+
+        self.assertEqual([item.interval for item in first], [
+            timedelta(seconds=1),
+            timedelta(minutes=1),
+        ])
+        self.assertTrue(all(item.open == item.close == Decimal("4200") for item in first))
+
+        second_event = service.normalize_quote(
+            quote("live-a", "4210", START + timedelta(milliseconds=800))
+        )
+        assert second_event is not None
+        second = service.apply(second_event)
+        second_bar = next(item for item in second if item.interval == timedelta(seconds=1))
+
+        self.assertEqual(second_bar.open, Decimal("4200"))
+        self.assertEqual(second_bar.high, Decimal("4210"))
+        self.assertEqual(second_bar.low, Decimal("4200"))
+        self.assertEqual(second_bar.close, Decimal("4210"))
+        self.assertEqual(second_bar.revision, 2)
+
+    async def test_new_second_replaces_closed_bar_then_appends_new_bar(self) -> None:
+        service = RealtimeBarService(None, contracts=(binding(),))
+        first_event = service.normalize_quote(
+            quote("live-a", "4200", START + timedelta(milliseconds=900))
+        )
+        assert first_event is not None
+        service.apply(first_event)
+        second_event = service.normalize_quote(
+            quote("live-a", "4210", START + timedelta(seconds=1, milliseconds=100))
+        )
+        assert second_event is not None
+
+        transitions = service.apply(second_event)
+
+        self.assertEqual(len(transitions), 3)
+        closed, opened, minute = transitions
+        self.assertEqual(closed.interval, timedelta(seconds=1))
+        self.assertEqual(closed.open_time, START)
+        self.assertEqual(closed.state, BarState.FINAL)
+        self.assertEqual(closed.revision, 2)
+        self.assertIsNotNone(closed.finalized_at)
+        self.assertEqual(opened.interval, timedelta(seconds=1))
+        self.assertEqual(opened.open_time, START + timedelta(seconds=1))
+        self.assertEqual(opened.state, BarState.PROVISIONAL_QUOTE)
+        self.assertEqual(minute.interval, timedelta(minutes=1))
+
+        second_rows = await service.get_bars(
+            INSTRUMENT,
+            source_id="source-a",
+            interval=timedelta(seconds=1),
+        )
+        before_rows = await service.get_bars_before(
+            INSTRUMENT,
+            source_id="source-a",
+            interval=timedelta(seconds=1),
+            before=START + timedelta(seconds=2),
+        )
+        self.assertEqual(second_rows, before_rows)
+        self.assertEqual([row.state for row in second_rows], [
+            BarState.FINAL,
+            BarState.PROVISIONAL_QUOTE,
+        ])
+
+    async def test_unsupported_projection_interval_is_rejected(self) -> None:
+        service = RealtimeBarService(None, contracts=(binding(),))
+
+        with self.assertRaisesRegex(ValueError, "not part of the realtime Bar contract"):
+            await service.get_bars(
+                INSTRUMENT,
+                source_id="source-a",
+                interval=timedelta(seconds=5),
+            )
 
     async def test_out_of_order_quote_does_not_rewind_current_bar(self) -> None:
         service = RealtimeBarService(None, contracts=(binding(),))

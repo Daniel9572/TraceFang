@@ -32,6 +32,7 @@ class SourceCandleStore(Protocol):
         instrument: Instrument,
         *,
         source_id: str,
+        interval: timedelta = timedelta(minutes=1),
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]: ...

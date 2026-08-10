@@ -85,6 +85,7 @@ class SourceBarStore(Protocol):
         instrument: Instrument,
         *,
         source_id: str,
+        interval: timedelta = timedelta(minutes=1),
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[Candle, ...]: ...
@@ -94,6 +95,7 @@ class SourceBarStore(Protocol):
         instrument: Instrument,
         *,
         source_id: str,
+        interval: timedelta = timedelta(minutes=1),
         before: datetime | None = None,
         count: int = 2_000,
     ) -> tuple[Candle, ...]: ...
@@ -151,6 +153,10 @@ class RealtimeBarContract:
     quote_channel_ids: tuple[str, ...]
     history_provider: HistoricalBarProvider | None = None
     interval: timedelta = timedelta(minutes=1)
+    quote_projection_intervals: tuple[timedelta, ...] = (
+        timedelta(seconds=1),
+        timedelta(minutes=1),
+    )
     finality_policy: BarFinalityPolicy = BarFinalityPolicy.NEXT_AUTHORITATIVE_BAR
 
     def __post_init__(self) -> None:
@@ -164,6 +170,14 @@ class RealtimeBarContract:
             raise ValueError("realtime Bar quote channels must be unique")
         if self.interval <= timedelta(0):
             raise ValueError("interval must be positive")
+        if not self.quote_projection_intervals:
+            raise ValueError("a realtime Bar contract requires quote projection intervals")
+        if len(set(self.quote_projection_intervals)) != len(self.quote_projection_intervals):
+            raise ValueError("quote projection intervals must be unique")
+        if any(interval <= timedelta(0) for interval in self.quote_projection_intervals):
+            raise ValueError("quote projection intervals must be positive")
+        if self.interval not in self.quote_projection_intervals:
+            raise ValueError("the authoritative interval must be quote-projected")
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,11 +286,16 @@ class RealtimeBarService:
             finalized_at=(candle.source.received_at if state is BarState.FINAL else None),
         )
 
-    def accept(self, event: MarketEvent) -> bool:
-        transitions = self._apply(event)
+    def apply(self, event: MarketEvent) -> tuple[RealtimeBar, ...]:
+        """Reduces one event and returns complete Bar upserts in delivery order."""
+
+        transitions = self._coalesce(self._apply(event))
         if transitions and self._writer is not None:
-            self._writer.submit_realtime_bars(self._coalesce(transitions))
-        return bool(transitions)
+            self._writer.submit_realtime_bars(transitions)
+        return transitions
+
+    def accept(self, event: MarketEvent) -> bool:
+        return bool(self.apply(event))
 
     def accept_quote(self, quote: QuoteSnapshot) -> bool:
         event = self.normalize_quote(quote)
@@ -373,8 +392,13 @@ class RealtimeBarService:
     def accept_view(self, view: QuoteView) -> bool:
         """Adapts an application-derived quote without adding source-specific Bar logic."""
 
+        return bool(self.apply_view(view))
+
+    def apply_view(self, view: QuoteView) -> tuple[RealtimeBar, ...]:
+        """Returns complete Bar upserts for one application-derived quote view."""
+
         if view.source_id not in self._contracts:
-            return False
+            return ()
         value = view.quote
         quote = QuoteSnapshot(
             instrument=value.instrument,
@@ -387,7 +411,7 @@ class RealtimeBarService:
             change_percent=value.change_percent,
             source=value.source,
         )
-        return self.accept(
+        return self.apply(
             QuoteEvent(
                 source_id=view.source_id,
                 channel_id=value.source.provider,
@@ -408,12 +432,37 @@ class RealtimeBarService:
             and event.channel_id != event.source_id
         ):
             raise ValueError("quote event channel is not part of the realtime Bar contract")
+        transitions: list[RealtimeBar] = []
+        for interval in contract.quote_projection_intervals:
+            transitions.extend(self._apply_quote_interval(event, interval=interval))
+        return transitions
+
+    def _apply_quote_interval(
+        self,
+        event: QuoteEvent,
+        *,
+        interval: timedelta,
+    ) -> list[RealtimeBar]:
         quote = event.quote
-        open_time = self._floor_time(quote.source.observed_at, contract.interval)
-        series_key = (event.source_id, quote.instrument, contract.interval)
+        open_time = self._floor_time(quote.source.observed_at, interval)
+        series_key = (event.source_id, quote.instrument, interval)
         watermark = self._watermarks.get(series_key)
         if watermark is not None and open_time < watermark:
             return []
+
+        transitions: list[RealtimeBar] = []
+        if watermark is None or open_time > watermark:
+            if interval == timedelta(seconds=1):
+                transitions.extend(
+                    self._finalize_quote_before(
+                        event.source_id,
+                        quote.instrument,
+                        interval,
+                        open_time,
+                        finalized_at=quote.source.received_at,
+                    )
+                )
+            self._watermarks[series_key] = open_time
 
         key = (*series_key, open_time)
         current = self._bars.get(key)
@@ -425,7 +474,7 @@ class RealtimeBarService:
         if current is None:
             value = RealtimeBar(
                 instrument=quote.instrument,
-                interval=contract.interval,
+                interval=interval,
                 open_time=open_time,
                 open=quote.last,
                 high=quote.last,
@@ -444,8 +493,6 @@ class RealtimeBarService:
         else:
             high = max(current.high, quote.last)
             low = min(current.low, quote.last)
-            if high == current.high and low == current.low and quote.last == current.close:
-                return []
             authoritative = current.state is BarState.PROVISIONAL_AUTHORITATIVE
             value = replace(
                 current,
@@ -469,8 +516,39 @@ class RealtimeBarService:
                 revision=current.revision + 1,
             )
         self._bars[key] = value
-        self._trim(event.source_id, quote.instrument, contract.interval)
-        return [value]
+        self._trim(event.source_id, quote.instrument, interval)
+        transitions.append(value)
+        return transitions
+
+    def _finalize_quote_before(
+        self,
+        source_id: str,
+        instrument: Instrument,
+        interval: timedelta,
+        before: datetime,
+        *,
+        finalized_at: datetime,
+    ) -> list[RealtimeBar]:
+        values: list[RealtimeBar] = []
+        for key, current in tuple(self._bars.items()):
+            candidate_source, candidate_instrument, candidate_interval, open_time = key
+            if (
+                candidate_source != source_id
+                or candidate_instrument != instrument
+                or candidate_interval != interval
+                or open_time >= before
+                or current.state is not BarState.PROVISIONAL_QUOTE
+            ):
+                continue
+            value = replace(
+                current,
+                state=BarState.FINAL,
+                revision=current.revision + 1,
+                finalized_at=finalized_at,
+            )
+            self._bars[key] = value
+            values.append(value)
+        return values
 
     def _apply_bar(self, event: BarEvent) -> list[RealtimeBar]:
         contract = self._contract(event.source_id)
@@ -575,6 +653,7 @@ class RealtimeBarService:
         instrument: Instrument,
         *,
         source_id: str,
+        interval: timedelta | None = None,
         start: datetime | None = None,
         count: int = 100,
     ) -> tuple[RealtimeBar, ...]:
@@ -582,13 +661,14 @@ class RealtimeBarService:
 
         self._validate_window(start, count)
         contract = self._contract(source_id)
+        selected_interval = self._projection_interval(contract, interval)
         rows: dict[datetime, RealtimeBar] = {}
         authoritative_times: list[datetime] = []
         if self._store is not None:
             projected = await self._store.load_realtime_bars(
                 instrument,
                 source_id=source_id,
-                interval=contract.interval,
+                interval=selected_interval,
                 start=start,
                 count=count,
             )
@@ -599,27 +679,31 @@ class RealtimeBarService:
                 if value.state is not BarState.PROVISIONAL_QUOTE:
                     authoritative_times.append(value.open_time)
 
-            raw_bars = await self._store.load_source_candles(
-                instrument,
-                source_id=contract.authoritative_bar_channel_id,
-                interval=contract.interval,
-                start=start,
-                count=count,
-            )
-            for candle in raw_bars:
-                if (
-                    candle.instrument != instrument
-                    or candle.source.provider != contract.authoritative_bar_channel_id
-                ):
-                    raise RuntimeError("source-bound Bar cache returned foreign evidence")
-                value = self._projection_from_raw_bar(source_id, candle)
-                rows[candle.open_time] = self._merge_for_read(rows.get(candle.open_time), value)
-                authoritative_times.append(candle.open_time)
+            if selected_interval == contract.interval:
+                raw_bars = await self._store.load_source_candles(
+                    instrument,
+                    source_id=contract.authoritative_bar_channel_id,
+                    interval=selected_interval,
+                    start=start,
+                    count=count,
+                )
+                for candle in raw_bars:
+                    if (
+                        candle.instrument != instrument
+                        or candle.source.provider != contract.authoritative_bar_channel_id
+                    ):
+                        raise RuntimeError("source-bound Bar cache returned foreign evidence")
+                    value = self._projection_from_raw_bar(source_id, candle)
+                    rows[candle.open_time] = self._merge_for_read(
+                        rows.get(candle.open_time), value
+                    )
+                    authoritative_times.append(candle.open_time)
 
             for channel_id in contract.quote_channel_ids:
                 quote_bars = await self._store.load_quote_candles(
                     instrument,
                     source_id=channel_id,
+                    interval=selected_interval,
                     start=start,
                     count=count,
                 )
@@ -632,14 +716,14 @@ class RealtimeBarService:
                         value,
                     )
 
-        end = start + contract.interval * count if start is not None else None
+        end = start + selected_interval * count if start is not None else None
         for (candidate_source, candidate_instrument, candidate_interval, open_time), value in (
             self._bars.items()
         ):
             if (
                 candidate_source != source_id
                 or candidate_instrument != instrument
-                or candidate_interval != contract.interval
+                or candidate_interval != selected_interval
             ):
                 continue
             if start is not None and open_time < start:
@@ -667,6 +751,17 @@ class RealtimeBarService:
                         finalized_at=value.source.received_at,
                     )
 
+        if selected_interval != contract.interval and rows:
+            latest_open_time = max(rows)
+            for open_time, value in tuple(rows.items()):
+                if open_time < latest_open_time and value.state is BarState.PROVISIONAL_QUOTE:
+                    rows[open_time] = replace(
+                        value,
+                        state=BarState.FINAL,
+                        revision=value.revision + 1,
+                        finalized_at=value.source.received_at,
+                    )
+
         ordered = sorted(rows.values(), key=lambda item: item.open_time)
         return tuple(ordered[:count] if start is not None else ordered[-count:])
 
@@ -687,6 +782,7 @@ class RealtimeBarService:
         instrument: Instrument,
         *,
         source_id: str,
+        interval: timedelta | None = None,
         before: datetime | None = None,
         count: int = 2_000,
     ) -> tuple[RealtimeBar, ...]:
@@ -697,13 +793,14 @@ class RealtimeBarService:
         if before is not None and (before.tzinfo is None or before.utcoffset() is None):
             raise ValueError("before must be timezone-aware")
         contract = self._contract(source_id)
+        selected_interval = self._projection_interval(contract, interval)
         rows: dict[datetime, RealtimeBar] = {}
         authoritative_times: list[datetime] = []
         if self._store is not None:
             projected = await self._store.load_realtime_bars_before(
                 instrument,
                 source_id=source_id,
-                interval=contract.interval,
+                interval=selected_interval,
                 before=before,
                 count=count,
             )
@@ -712,22 +809,26 @@ class RealtimeBarService:
                 if value.state is not BarState.PROVISIONAL_QUOTE:
                     authoritative_times.append(value.open_time)
 
-            raw_bars = await self._store.load_source_candles_before(
-                instrument,
-                source_id=contract.authoritative_bar_channel_id,
-                interval=contract.interval,
-                before=before,
-                count=count,
-            )
-            for candle in raw_bars:
-                value = self._projection_from_raw_bar(source_id, candle)
-                rows[candle.open_time] = self._merge_for_read(rows.get(candle.open_time), value)
-                authoritative_times.append(candle.open_time)
+            if selected_interval == contract.interval:
+                raw_bars = await self._store.load_source_candles_before(
+                    instrument,
+                    source_id=contract.authoritative_bar_channel_id,
+                    interval=selected_interval,
+                    before=before,
+                    count=count,
+                )
+                for candle in raw_bars:
+                    value = self._projection_from_raw_bar(source_id, candle)
+                    rows[candle.open_time] = self._merge_for_read(
+                        rows.get(candle.open_time), value
+                    )
+                    authoritative_times.append(candle.open_time)
 
             for channel_id in contract.quote_channel_ids:
                 quote_bars = await self._store.load_quote_candles_before(
                     instrument,
                     source_id=channel_id,
+                    interval=selected_interval,
                     before=before,
                     count=count,
                 )
@@ -744,7 +845,7 @@ class RealtimeBarService:
             if (
                 candidate_source != source_id
                 or candidate_instrument != instrument
-                or candidate_interval != contract.interval
+                or candidate_interval != selected_interval
                 or (before is not None and open_time >= before)
             ):
                 continue
@@ -766,6 +867,17 @@ class RealtimeBarService:
                         finalized_at=value.source.received_at,
                     )
 
+        if selected_interval != contract.interval and rows:
+            latest_open_time = max(rows)
+            for open_time, value in tuple(rows.items()):
+                if open_time < latest_open_time and value.state is BarState.PROVISIONAL_QUOTE:
+                    rows[open_time] = replace(
+                        value,
+                        state=BarState.FINAL,
+                        revision=value.revision + 1,
+                        finalized_at=value.source.received_at,
+                    )
+
         return tuple(sorted(rows.values(), key=lambda item: item.open_time)[-count:])
 
     async def hydrate(
@@ -777,19 +889,29 @@ class RealtimeBarService:
     ) -> tuple[RealtimeBar, ...]:
         """Restores the hot state machine from local storage before acquisition starts."""
 
-        rows = await self.get_bars(instrument, source_id=source_id, count=count)
         contract = self._contract(source_id)
-        for value in rows:
-            self._bars[(source_id, instrument, contract.interval, value.open_time)] = value
-            if value.state is not BarState.PROVISIONAL_QUOTE:
-                series_key = (source_id, instrument, contract.interval)
+        authoritative_rows: tuple[RealtimeBar, ...] = ()
+        hydrated: list[RealtimeBar] = []
+        for interval in contract.quote_projection_intervals:
+            rows = await self.get_bars(
+                instrument,
+                source_id=source_id,
+                interval=interval,
+                count=count,
+            )
+            if interval == contract.interval:
+                authoritative_rows = rows
+            for value in rows:
+                self._bars[(source_id, instrument, interval, value.open_time)] = value
+                series_key = (source_id, instrument, interval)
                 watermark = self._watermarks.get(series_key)
                 if watermark is None or value.open_time > watermark:
                     self._watermarks[series_key] = value.open_time
-        if rows and self._store is not None:
-            await self._store.save_realtime_bars(rows)
-        self._trim(source_id, instrument, contract.interval)
-        return rows
+            hydrated.extend(rows)
+            self._trim(source_id, instrument, interval)
+        if hydrated and self._store is not None:
+            await self._store.save_realtime_bars(hydrated)
+        return authoritative_rows
 
     async def backfill(
         self,
@@ -1119,6 +1241,16 @@ class RealtimeBarService:
         if contract is None:
             raise ProviderUnavailableError(f"{source_id} has no source-bound Bar capability")
         return contract
+
+    @staticmethod
+    def _projection_interval(
+        contract: RealtimeBarContract,
+        interval: timedelta | None,
+    ) -> timedelta:
+        selected = interval or contract.interval
+        if selected not in contract.quote_projection_intervals:
+            raise ValueError("interval is not part of the realtime Bar contract")
+        return selected
 
     def _trim(self, source_id: str, instrument: Instrument, interval: timedelta) -> None:
         keys = sorted(

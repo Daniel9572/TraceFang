@@ -602,6 +602,35 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     runtime.quote_stream = QuoteStreamCoordinator(load_quote=runtime.quote_views.get)
 
+    def publish_bar_transitions(transitions):
+        stream = runtime.quote_stream
+        period_bars = runtime.period_bars
+        if stream is None:
+            return
+        for bar in transitions:
+            interval_seconds = int(bar.interval.total_seconds())
+            if interval_seconds == 1:
+                stream.publish_bar_update(bar, period_id="1s")
+                continue
+            if interval_seconds != 60:
+                continue
+            stream.publish_bar_update(bar, period_id="1m")
+            if period_bars is None:
+                continue
+            definition = definition_for_instrument(bar.instrument)
+            schedule = _MARKET_SCHEDULES[definition.market_schedule_id]
+            active_periods = stream.active_periods(
+                bar.instrument,
+                source=bar.source.provider,
+            )
+            derived_periods = active_periods - {"1s", "1m"}
+            for period_id, projected in period_bars.accept_live(
+                bar,
+                schedule=schedule,
+                period_ids=derived_periods,
+            ):
+                stream.publish_bar_update(projected, period_id=period_id)
+
     def accept_raw_quote(value):
         quote_views = runtime.quote_views
         normalized_event = (
@@ -610,11 +639,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             else None
         )
         if runtime.realtime_bars is not None and normalized_event is not None:
-            runtime.realtime_bars.accept(normalized_event)
-            if runtime.quote_stream is not None:
-                sample = runtime.realtime_bars.sample_from_quote_event(normalized_event)
-                if sample is not None:
-                    runtime.quote_stream.publish_sample(sample)
+            publish_bar_transitions(runtime.realtime_bars.apply(normalized_event))
         # Persist every raw channel frame, including late or duplicate deliveries.
         # Only the latest presentation view applies the monotonic timestamp guard;
         # raw evidence must never be filtered by UI-cache semantics.
@@ -645,7 +670,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                     JIN10_CLIENT_SOURCE,
                 )
                 if runtime.realtime_bars is not None:
-                    runtime.realtime_bars.accept_view(derived)
+                    publish_bar_transitions(runtime.realtime_bars.apply_view(derived))
                 stream.publish(derived)
 
     def accept_raw_bar(value):
@@ -655,12 +680,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             else None
         )
         if runtime.realtime_bars is not None and normalized_event is not None:
-            runtime.realtime_bars.accept(normalized_event)
-            if runtime.quote_stream is not None:
-                runtime.quote_stream.publish_bar_update(
-                    value.instrument,
-                    source=normalized_event.source_id,
-                )
+            publish_bar_transitions(runtime.realtime_bars.apply(normalized_event))
         if runtime.persistence is not None:
             runtime.persistence.submit_candles((value,))
 
@@ -730,7 +750,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             (instrument, source_id) for instrument, source_id in initial_routes.items()
         }
         for instrument, source_id in hydration_targets:
-            await runtime.realtime_bars.hydrate(instrument, source_id=source_id)
+            rows = await runtime.realtime_bars.hydrate(instrument, source_id=source_id)
+            if runtime.period_bars is not None:
+                definition = definition_for_instrument(instrument)
+                runtime.period_bars.seed_live(
+                    rows,
+                    schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
+                )
     await runtime.acquisition.start(initial_routes)
     runtime.clear_caches()
     yield
@@ -1367,6 +1393,11 @@ async def timeline_samples(
 
 @app.websocket("/api/stream/quotes/{code}")
 async def quote_stream(websocket: WebSocket, code: str) -> None:
+    requested_period = websocket.query_params.get("period", "1m")
+    period = "1s" if requested_period == "timeline" else requested_period
+    if period not in PERIOD_DEFINITIONS or period == "timeline":
+        await websocket.close(code=1008, reason="chart period is not supported")
+        return
     try:
         _, instrument, source_id = await _instrument_source(code)
     except ProviderError:
@@ -1374,7 +1405,11 @@ async def quote_stream(websocket: WebSocket, code: str) -> None:
         return
     await websocket.accept()
     try:
-        async with _quote_stream().subscribe(instrument, source=source_id) as queue:
+        async with _quote_stream().subscribe(
+            instrument,
+            source=source_id,
+            period=period,
+        ) as queue:
             while True:
                 event = await queue.get()
                 await websocket.send_json(jsonable_encoder(asdict(event)))

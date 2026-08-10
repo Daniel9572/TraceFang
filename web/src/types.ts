@@ -1,3 +1,5 @@
+import type { BarPeriodId } from "./chartPeriods";
+
 export type SourceId = string;
 export type SourceAccessModel = "unmetered" | "limited" | "metered";
 export type QuoteServiceTier = "institutional" | "enhanced" | "standard" | "reference";
@@ -156,6 +158,8 @@ export interface QuoteStreamEvent {
   kind: "bar" | "quote" | "sample" | "status";
   state: "connecting" | "live" | "unavailable";
   emitted_at: string;
+  period_id: BarPeriodId;
+  bar: Candle | null;
   quote: QuoteView | null;
   sample: QuoteSample | null;
   error: string | null;
@@ -178,12 +182,6 @@ export interface QuoteSample {
   received_at: string;
   value: number | string;
   storage_id: number | null;
-}
-
-export interface QuoteSamplePage {
-  items: QuoteSample[];
-  next_cursor: number | null;
-  has_more: boolean;
 }
 
 export interface HoverCandle {

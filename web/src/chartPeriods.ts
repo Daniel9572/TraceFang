@@ -20,6 +20,8 @@ export type ChartPeriodId =
   | "1q"
   | "1y";
 
+export type BarPeriodId = "1s" | Exclude<ChartPeriodId, "timeline">;
+
 type FixedAggregation = {
   kind: "fixed";
   minutes: number;
@@ -64,8 +66,8 @@ export function chartPeriodById(id: ChartPeriodId): ChartPeriod {
   return PERIODS_BY_ID.get(id) ?? CHART_PERIODS[1];
 }
 
-export function barDataPeriodId(period: ChartPeriod): ChartPeriodId {
-  return period.mode === "timeline" ? "1m" : period.id;
+export function barDataPeriodId(period: ChartPeriod): BarPeriodId {
+  return period.id === "timeline" ? "1s" : period.id;
 }
 
 export function periodBucketSeconds(period: ChartPeriod, epochSeconds: number): number {

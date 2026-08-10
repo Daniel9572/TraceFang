@@ -26,122 +26,101 @@ export function barsFromCandles(candles: Candle[]): HoverCandle[] {
     : rows.sort((left, right) => left.time - right.time);
 }
 
-export function appendTimelineSample(
-  samples: TimelineSample[],
-  sample: TimelineSample,
-): TimelineSample[] {
-  if (!Number.isFinite(sample.time) || !Number.isFinite(sample.value)) return samples;
-  const latest = samples.at(-1);
-  if (!latest) return [sample];
-  if (compareTimelineSamples(latest, sample) <= 0) {
-    return sameBusinessSample(latest, sample) ? samples : [...samples, sample];
+const candleStateRank: Record<Candle["state"], number> = {
+  provisional_quote: 0,
+  provisional_authoritative: 1,
+  final: 2,
+};
+
+export function sameCandleVersion(left: Candle, right: Candle): boolean {
+  return left === right || (
+    left.open_time === right.open_time
+    && left.revision === right.revision
+    && left.state === right.state
+    && left.open === right.open
+    && left.high === right.high
+    && left.low === right.low
+    && left.close === right.close
+    && left.volume === right.volume
+    && left.finalized_at === right.finalized_at
+    && left.source.provider === right.source.provider
+    && left.source.observed_at === right.source.observed_at
+    && left.source.received_at === right.source.received_at
+    && left.source.raw_payload?.bucket_end === right.source.raw_payload?.bucket_end
+  );
+}
+
+function realtimeBarCanReplace(current: Candle, incoming: Candle): boolean {
+  if (incoming.revision !== current.revision) return incoming.revision > current.revision;
+  return candleStateRank[incoming.state] >= candleStateRank[current.state];
+}
+
+export function upsertRealtimeBar(candles: Candle[], incoming: Candle): Candle[] {
+  const incomingTime = epochSeconds(incoming.open_time);
+  if (incomingTime === null) return candles;
+  const current = candles.at(-1);
+  if (!current) return [incoming];
+  const currentTime = epochSeconds(current.open_time);
+  if (currentTime === null || incomingTime < currentTime) return candles;
+  if (incomingTime > currentTime) return [...candles, incoming];
+  if (!realtimeBarCanReplace(current, incoming) || sameCandleVersion(current, incoming)) {
+    return candles;
   }
-  let low = 0;
-  let high = samples.length;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (compareTimelineSamples(samples[middle], sample) <= 0) low = middle + 1;
-    else high = middle;
+  return [...candles.slice(0, -1), incoming];
+}
+
+export type CandleSeriesMutation = "unchanged" | "tail-update" | "tail-append" | "reset";
+
+export function classifyCandleSeriesMutation(
+  previous: readonly Candle[] | null,
+  next: readonly Candle[],
+): CandleSeriesMutation {
+  if (previous === next) return "unchanged";
+  if (!previous) return "reset";
+  if (next.length === previous.length && next.length > 0) {
+    for (let index = 0; index < next.length - 1; index += 1) {
+      if (next[index] !== previous[index]) return "reset";
+    }
+    return next[next.length - 1].open_time === previous[previous.length - 1].open_time
+      ? "tail-update"
+      : "reset";
+  }
+  if (next.length === previous.length + 1) {
+    for (let index = 0; index < previous.length; index += 1) {
+      if (next[index] !== previous[index]) return "reset";
+    }
+    return "tail-append";
+  }
+  return "reset";
+}
+
+export function candleSeriesUpdateStart(
+  mutation: CandleSeriesMutation,
+  previousDataLength: number,
+  nextDataLength: number,
+  maxAppendPoints: number,
+): number | null {
+  if (previousDataLength <= 0 || nextDataLength <= 0) return null;
+  if (mutation === "tail-update" && nextDataLength === previousDataLength) {
+    return nextDataLength - 1;
   }
   if (
-    (low > 0 && sameBusinessSample(samples[low - 1], sample))
-    || (low < samples.length && sameBusinessSample(samples[low], sample))
-  ) return samples;
-  return [...samples.slice(0, low), sample, ...samples.slice(low)];
-}
-
-function sameMarketObservation(left: TimelineSample, right: TimelineSample): boolean {
-  return (left.observedTime ?? left.time) === (right.observedTime ?? right.time)
-    && left.value === right.value;
-}
-
-function sameBusinessSample(left: TimelineSample, right: TimelineSample): boolean {
-  return Boolean(left.eventId && right.eventId && left.eventId === right.eventId)
-    || sameMarketObservation(left, right);
-}
-
-function compareTimelineSamples(left: TimelineSample, right: TimelineSample): number {
-  const observedDifference = (left.observedTime ?? left.time) - (right.observedTime ?? right.time);
-  if (observedDifference !== 0) return observedDifference;
-  const receivedDifference = left.time - right.time;
-  if (receivedDifference !== 0) return receivedDifference;
-  return (left.eventId ?? "").localeCompare(right.eventId ?? "");
-}
-
-export function mergeTimelineSamples(...pages: readonly TimelineSample[][]): TimelineSample[] {
-  if (pages.length > 0 && pages.length <= 2) {
-    const left = pages[0];
-    const right = pages[1] ?? [];
-    const validAndSorted = (page: readonly TimelineSample[]) => page.every((sample, index) => (
-      Number.isFinite(sample.time)
-      && Number.isFinite(sample.value)
-      && (index === 0 || compareTimelineSamples(page[index - 1], sample) <= 0)
-    ));
-    if (validAndSorted(left) && validAndSorted(right)) {
-      const rows: TimelineSample[] = [];
-      const eventIds = new Set<string>();
-      let leftIndex = 0;
-      let rightIndex = 0;
-      while (leftIndex < left.length || rightIndex < right.length) {
-        const takeLeft = rightIndex >= right.length || (
-          leftIndex < left.length
-          && compareTimelineSamples(left[leftIndex], right[rightIndex]) <= 0
-        );
-        const sample = takeLeft ? left[leftIndex++] : right[rightIndex++];
-        if (sample.eventId && eventIds.has(sample.eventId)) continue;
-        if (rows.length > 0 && sameMarketObservation(rows[rows.length - 1], sample)) continue;
-        if (sample.eventId) eventIds.add(sample.eventId);
-        rows.push(sample);
-      }
-      return rows;
-    }
+    mutation === "tail-append"
+    && nextDataLength >= previousDataLength
+    && nextDataLength <= previousDataLength + maxAppendPoints
+  ) {
+    return previousDataLength;
   }
+  return null;
+}
+
+export function buildTimelineSeries(candles: Candle[]): TimelineSample[] {
   const rows: TimelineSample[] = [];
-  const eventIds = new Set<string>();
-  for (const page of pages) {
-    for (const sample of page) {
-      if (!Number.isFinite(sample.time) || !Number.isFinite(sample.value)) continue;
-      if (sample.eventId && eventIds.has(sample.eventId)) continue;
-      if (sample.eventId) eventIds.add(sample.eventId);
-      rows.push(sample);
-    }
-  }
-  rows.sort(compareTimelineSamples);
-  const canonical: TimelineSample[] = [];
-  const canonicalEventIds = new Set<string>();
-  for (const sample of rows) {
-    if (sample.eventId && canonicalEventIds.has(sample.eventId)) continue;
-    if (canonical.length > 0 && sameMarketObservation(canonical[canonical.length - 1], sample)) {
-      continue;
-    }
-    if (sample.eventId) canonicalEventIds.add(sample.eventId);
-    canonical.push(sample);
-  }
-  return canonical;
-}
-
-export function buildTimelineSeries(
-  candles: Candle[],
-  samples: TimelineSample[],
-  livePrice: number | null,
-  observedAt: string | null,
-  nowMilliseconds = Date.now(),
-): TimelineSample[] {
-  const candleRows: TimelineSample[] = [];
-  const rawSampleMinutes = new Set(
-    samples
-      .map((sample) => Math.floor((sample.observedTime ?? sample.time) / 60))
-      .filter(Number.isFinite),
-  );
   for (const candle of candles) {
     const time = epochSeconds(candle.open_time);
     const value = numberOf(candle.close);
-    if (
-      time !== null
-      && Number.isFinite(value)
-      && !rawSampleMinutes.has(Math.floor(time / 60))
-    ) {
-      candleRows.push({
+    if (time !== null && Number.isFinite(value)) {
+      rows.push({
         time,
         observedTime: time,
         value,
@@ -150,27 +129,7 @@ export function buildTimelineSeries(
       });
     }
   }
-  const snapshotRows: TimelineSample[] = [];
-  if (livePrice !== null && Number.isFinite(livePrice)) {
-    const observed = epochSeconds(observedAt) ?? Math.floor(nowMilliseconds / 1000);
-    const latest = samples.at(-1) ?? candleRows.at(-1);
-    if (
-      !latest
-      || latest.value !== livePrice
-      || (latest.observedTime ?? latest.time) !== observed
-    ) {
-      snapshotRows.push({
-        time: observed,
-        observedTime: observed,
-        value: livePrice,
-        eventId: `snapshot:${observed}:${livePrice}`,
-      });
-    }
-  }
-  const historicalRows = mergeTimelineSamples(candleRows, samples);
-  return snapshotRows.length > 0
-    ? mergeTimelineSamples(historicalRows, snapshotRows)
-    : historicalRows;
+  return rows;
 }
 
 export function formatBarCountdown(totalSeconds: number): string {

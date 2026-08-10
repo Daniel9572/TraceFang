@@ -10,9 +10,9 @@ import {
   togglePeriodVisibility,
 } from "../src/periodPreferences.ts";
 
-test("reuses one-minute Bar data when switching between 1m and timeline", () => {
+test("maps timeline to standard one-second Bars without changing candle periods", () => {
   assert.equal(barDataPeriodId(chartPeriodById("1m")), "1m");
-  assert.equal(barDataPeriodId(chartPeriodById("timeline")), "1m");
+  assert.equal(barDataPeriodId(chartPeriodById("timeline")), "1s");
   assert.equal(barDataPeriodId(chartPeriodById("15m")), "15m");
 });
 

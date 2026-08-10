@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -21,12 +21,14 @@ from market_analysis.domain.models import Instrument, SourceMetadata
 @dataclass(frozen=True, slots=True)
 class PeriodDefinition:
     period_id: str
+    seconds: int | None = None
     minutes: int | None = None
     calendar_unit: str | None = None
 
 
 PERIOD_DEFINITIONS: dict[str, PeriodDefinition] = {
-    "timeline": PeriodDefinition("timeline", minutes=1),
+    "timeline": PeriodDefinition("timeline", seconds=1),
+    "1s": PeriodDefinition("1s", seconds=1),
     "1m": PeriodDefinition("1m", minutes=1),
     "3m": PeriodDefinition("3m", minutes=3),
     "5m": PeriodDefinition("5m", minutes=5),
@@ -260,15 +262,19 @@ def _bucket_for(
 ) -> _Bucket:
     occurrence = _session_occurrence(value, schedule)
     zone = ZoneInfo(str(schedule["time_zone"])) if schedule else UTC
-    if definition.minutes is not None:
-        duration = timedelta(minutes=definition.minutes)
+    if definition.seconds is not None or definition.minutes is not None:
+        duration = (
+            timedelta(seconds=definition.seconds)
+            if definition.seconds is not None
+            else timedelta(minutes=definition.minutes or 0)
+        )
         if occurrence is not None:
             elapsed = value.astimezone(UTC) - occurrence.start.astimezone(UTC)
             offset = int(elapsed / duration)
             start = occurrence.start + duration * offset
             end = min(occurrence.end, start + duration)
         else:
-            seconds = definition.minutes * 60
+            seconds = int(duration.total_seconds())
             epoch = int(value.timestamp())
             start = datetime.fromtimestamp(epoch - epoch % seconds, tz=UTC)
             end = start + duration
@@ -318,9 +324,13 @@ def project_period_bars(
         )
         volumes = [item.volume for item in members if item.volume is not None]
         interval = (
-            timedelta(minutes=definition.minutes)
-            if definition.minutes is not None
-            else bucket.end - bucket.start
+            timedelta(seconds=definition.seconds)
+            if definition.seconds is not None
+            else (
+                timedelta(minutes=definition.minutes)
+                if definition.minutes is not None
+                else bucket.end - bucket.start
+            )
         )
         projected.append(
             RealtimeBar(
@@ -391,6 +401,114 @@ class PeriodBarService:
         self._realtime_bars = realtime_bars
         self._store = store
         self._locks: dict[tuple[str, Instrument, str, str], asyncio.Lock] = {}
+        self._live_components: dict[
+            tuple[str, Instrument, str, str], dict[datetime, RealtimeBar]
+        ] = {}
+        self._live_buckets: dict[tuple[str, Instrument, str], _Bucket] = {}
+        self._live_minutes: dict[
+            tuple[str, Instrument], dict[datetime, RealtimeBar]
+        ] = {}
+
+    def seed_live(
+        self,
+        rows: Sequence[RealtimeBar],
+        *,
+        schedule: Mapping[str, Any] | None,
+    ) -> None:
+        """Seeds the bounded live projector from canonical minute Bars."""
+
+        for row in sorted(rows, key=lambda item: item.open_time):
+            self.accept_live(row, schedule=schedule, period_ids=())
+
+    def accept_live(
+        self,
+        bar: RealtimeBar,
+        *,
+        schedule: Mapping[str, Any] | None,
+        period_ids: Iterable[str] | None = None,
+    ) -> tuple[tuple[str, RealtimeBar], ...]:
+        """Projects one complete minute-Bar upsert into every chart period.
+
+        The cache retains only the active bucket for each period. Corrections of the
+        active minute replace that component before the aggregate is recomputed, so
+        a lower corrected high/low cannot leak from an earlier revision.
+        """
+
+        if bar.interval != timedelta(minutes=1):
+            return ()
+        source_id = bar.source.provider
+        minute_key = (source_id, bar.instrument)
+        minute_rows = self._live_minutes.setdefault(minute_key, {})
+        previous = minute_rows.get(bar.open_time)
+        if previous is None or (
+            bar.revision > previous.revision
+            or (
+                bar.revision == previous.revision
+                and bar.source.received_at >= previous.source.received_at
+            )
+        ):
+            minute_rows[bar.open_time] = bar
+        overflow = len(minute_rows) - REALTIME_BAR_READ_PAGE_SIZE_MAX
+        if overflow > 0:
+            for open_time in sorted(minute_rows)[:overflow]:
+                minute_rows.pop(open_time, None)
+
+        requested = (
+            tuple(period_ids)
+            if period_ids is not None
+            else tuple(
+                period_id
+                for period_id in PERIOD_DEFINITIONS
+                if period_id not in {"timeline", "1s", "1m"}
+            )
+        )
+        values: list[tuple[str, RealtimeBar]] = []
+        for period_id in requested:
+            definition = PERIOD_DEFINITIONS.get(period_id)
+            if definition is None or period_id in {"timeline", "1s", "1m"}:
+                raise ValueError(f"unsupported live chart period {period_id!r}")
+            bucket = _bucket_for(bar.open_time, definition, schedule)
+            series_key = (source_id, bar.instrument, period_id)
+            active = self._live_buckets.get(series_key)
+            if active is not None and bucket.start < active.start:
+                continue
+            if active is None or bucket.key != active.key:
+                for key in tuple(self._live_components):
+                    if key[:3] == series_key:
+                        self._live_components.pop(key, None)
+                self._live_buckets[series_key] = bucket
+            component_key = (*series_key, bucket.key)
+            components = self._live_components.get(component_key)
+            if components is None:
+                components = {
+                    open_time: value
+                    for open_time, value in minute_rows.items()
+                    if _bucket_for(open_time, definition, schedule).key == bucket.key
+                }
+                self._live_components[component_key] = components
+            current = components.get(bar.open_time)
+            if current is not None and (
+                bar.revision < current.revision
+                or (
+                    bar.revision == current.revision
+                    and bar.source.received_at < current.source.received_at
+                )
+            ):
+                continue
+            components[bar.open_time] = bar
+            projected = project_period_bars(
+                tuple(components.values()),
+                period_id=period_id,
+                schedule=schedule,
+                now=bar.source.received_at,
+            )
+            value = next(
+                (candidate for candidate in projected if candidate.open_time == bucket.start),
+                None,
+            )
+            if value is not None:
+                values.append((period_id, value))
+        return tuple(values)
 
     async def get_page(
         self,
@@ -408,7 +526,7 @@ class PeriodBarService:
             raise ValueError("page_size must be positive")
         if before is not None and (before.tzinfo is None or before.utcoffset() is None):
             raise ValueError("before must be timezone-aware")
-        if self._store is None or period_id in {"timeline", "1m"}:
+        if self._store is None or period_id in {"timeline", "1s", "1m"}:
             return await self._get_unmaterialized_page(
                 instrument,
                 source_id=source_id,
@@ -737,6 +855,21 @@ class PeriodBarService:
         page_size: int,
     ) -> PeriodBarPage:
         definition = PERIOD_DEFINITIONS[period_id]
+        if definition.seconds is not None:
+            values = await self._realtime_bars.get_bars_before(
+                instrument,
+                source_id=source_id,
+                interval=timedelta(seconds=definition.seconds),
+                before=before,
+                count=min(REALTIME_BAR_READ_PAGE_SIZE_MAX, page_size + 1),
+            )
+            items = values[-page_size:]
+            return PeriodBarPage(
+                period_id=period_id,
+                items=items,
+                next_before=items[0].open_time if items else None,
+                has_more=len(values) > page_size,
+            )
         estimated_minutes_per_bar = definition.minutes or 24 * 60
         cursor = before
         minute_rows: dict[datetime, RealtimeBar] = {}

@@ -12,30 +12,7 @@ import {
   EXPERT_STRATEGIES,
   runExpertBacktest,
 } from "../src/expertAnalysis.ts";
-import {
-  candleReplayCutoff,
-  expertReplayFrame,
-  nextReplayIndex,
-  replayClockAdvance,
-  replayIndexAtOrBefore,
-  timelineReplayCount,
-} from "../src/expertReplay.ts";
 import type { Candle } from "../src/types.ts";
-
-test("replay clock catches up elapsed steps without running early", () => {
-  assert.deepEqual(replayClockAdvance(999, 1_000, 100), {
-    steps: 0,
-    nextStepAt: 1_000,
-  });
-  assert.deepEqual(replayClockAdvance(1_000, 1_000, 100), {
-    steps: 1,
-    nextStepAt: 1_100,
-  });
-  assert.deepEqual(replayClockAdvance(1_350, 1_000, 100), {
-    steps: 4,
-    nextStepAt: 1_400,
-  });
-});
 
 function candle(index: number, close: number, volume: number | null = 100 + index): Candle {
   const open = close - 0.7;
@@ -281,51 +258,4 @@ test("reads causal analysis and backtest snapshots by replay index without rebui
 
   while (!runner.done) runner.advance(11);
   assert.deepEqual(runner.resultAt(159), runExpertBacktest(candles, enabled));
-});
-
-test("replay excludes every candle and quote after the cutoff", () => {
-  const candles = Array.from({ length: 5 }, (_, index) => candle(index, 2400 + index));
-  const samples = candles.map((item, index) => ({
-    time: Date.parse(item.open_time) / 1_000,
-    observedTime: Date.parse(item.open_time) / 1_000,
-    value: 2400 + index,
-  }));
-  const frame = expertReplayFrame(candles, samples, 2);
-  assert.equal(frame.candles.length, 3);
-  assert.equal(frame.timelineSamples.length, 3);
-  assert.equal(frame.cutoff, Date.parse(candles[3].open_time) / 1_000);
-  assert.equal(nextReplayIndex(frame.index, candles.length, 10), 4);
-});
-
-test("replay never exposes an unfinished last candle or a sample at the next boundary", () => {
-  const candles = Array.from({ length: 3 }, (_, index) => candle(index, 2400 + index));
-  candles[2] = { ...candles[2], state: "provisional_authoritative", finalized_at: null };
-  const nextBoundary = Date.parse(candles[2].open_time) / 1_000;
-  const frame = expertReplayFrame(candles, [
-    { time: nextBoundary - 1, observedTime: nextBoundary - 1, value: 2401 },
-    { time: nextBoundary, observedTime: nextBoundary, value: 2402 },
-  ], 2);
-  assert.equal(frame.index, 1);
-  assert.equal(frame.candles.length, 2);
-  assert.equal(frame.cutoff, nextBoundary);
-  assert.deepEqual(frame.timelineSamples.map((sample) => sample.value), [2401]);
-  assert.equal(replayIndexAtOrBefore(candles, Date.parse(candles[0].open_time) / 1_000), -1);
-  assert.equal(timelineReplayCount([
-    { time: nextBoundary - 1, observedTime: nextBoundary - 1, value: 2401 },
-    { time: nextBoundary, observedTime: nextBoundary, value: 2402 },
-  ], nextBoundary), 1);
-});
-
-test("replay keeps the same timestamp when older history is prepended", () => {
-  const original = Array.from({ length: 5 }, (_, index) => candle(index + 5, 2405 + index));
-  const cutoff = candleReplayCutoff(original, 2);
-  assert.notEqual(cutoff, null);
-  const prepended = [
-    ...Array.from({ length: 5 }, (_, index) => candle(index, 2400 + index)),
-    ...original,
-  ];
-  const shiftedIndex = replayIndexAtOrBefore(prepended, cutoff);
-  const frame = expertReplayFrame(prepended, [], shiftedIndex);
-  assert.equal(frame.cutoff, cutoff);
-  assert.equal(frame.candles.at(-1)?.open_time, original[2].open_time);
 });

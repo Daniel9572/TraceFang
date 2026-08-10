@@ -4,8 +4,6 @@ import {
   BrainCircuit,
   CalendarClock,
   ChevronLeft,
-  CirclePause,
-  CirclePlay,
   Eye,
   EyeOff,
   Gauge,
@@ -13,7 +11,6 @@ import {
   Magnet,
   Minus,
   MousePointer2,
-  Play,
   RotateCcw,
   Sparkles,
   Trash2,
@@ -25,7 +22,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { marketApi } from "./api";
 import {
   buildExpertAnalysisAt,
-  buildExpertIndicatorSeriesAt,
   createExpertBacktestRunner,
   DEFAULT_EXPERT_STRATEGIES,
   EXPERT_INDICATOR_HISTORY_VERSION,
@@ -37,13 +33,6 @@ import {
 } from "./expertEvents";
 import { buildExpertEventAssessments } from "./expertEventScoring";
 import { ChartLayerManager } from "./ChartLayerManager";
-import {
-  candleReplayCutoff,
-  nextReplayIndex,
-  replayClockAdvance,
-  replayIndexAtOrBefore,
-  timelineReplayCount,
-} from "./expertReplay";
 import {
   buildExpertOptionStrikeRows,
   expertOptionExpiryKey,
@@ -89,7 +78,7 @@ import { barDataPeriodId, chartPeriodById, type ChartPeriodId } from "./chartPer
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
 import type { HistoryLoadOutcome, HistoryWindow } from "./historyLoading";
-import type { Candle, HoverCandle, MarketPhase, MarketSchedule, TimelineSample } from "./types";
+import type { Candle, HoverCandle, MarketPhase, MarketSchedule } from "./types";
 
 import "./expert-mode.css";
 
@@ -98,7 +87,6 @@ interface ExpertModeWorkspaceProps {
   instrumentName: string;
   unit: string;
   candles: Candle[];
-  timelineSamples: TimelineSample[];
   periodId: ChartPeriodId;
   livePrice: number | null;
   change: number | null;
@@ -238,7 +226,6 @@ export function ExpertModeWorkspace({
   instrumentName,
   unit,
   candles,
-  timelineSamples,
   periodId,
   livePrice,
   change,
@@ -276,11 +263,6 @@ export function ExpertModeWorkspace({
   const [drawingTool, setDrawingTool] = useState<ExpertDrawingTool | null>(null);
   const [drawingSnapMode, setDrawingSnapMode] = useState<ExpertDrawingSnapMode>("weak");
   const [hover, setHover] = useState<HoverCandle | null>(null);
-  const [replayEnabled, setReplayEnabled] = useState(false);
-  const [replayCutoff, setReplayCutoff] = useState<number | null>(null);
-  const [replayPlaying, setReplayPlaying] = useState(false);
-  const [replaySpeed, setReplaySpeed] = useState(2);
-  const [replayDraftIndex, setReplayDraftIndex] = useState<number | null>(null);
   const [backtestRevision, setBacktestRevision] = useState(0);
   const [intelligenceTab, setIntelligenceTab] = useState<"signals" | "options" | "ai">("signals");
   const [optionsStatus, setOptionsStatus] = useState<ExpertOptionsStatus | null>(null);
@@ -391,65 +373,23 @@ export function ExpertModeWorkspace({
     };
   }, [intelligenceTab]);
 
-  useEffect(() => {
-    if (!replayEnabled || !replayPlaying || candles.length === 0) return;
-    const stepMilliseconds = 1_000 / Math.max(1, replaySpeed);
-    let nextStepAt = window.performance.now() + stepMilliseconds;
-    const timer = window.setInterval(() => {
-      const now = window.performance.now();
-      const advance = replayClockAdvance(now, nextStepAt, stepMilliseconds);
-      if (advance.steps === 0) return;
-      nextStepAt = advance.nextStepAt;
-      setReplayCutoff((current) => {
-        const currentIndex = replayIndexAtOrBefore(candles, current);
-        const replayableLastIndex = replayIndexAtOrBefore(candles, null);
-        const next = nextReplayIndex(currentIndex, replayableLastIndex + 1, advance.steps);
-        if (next >= replayableLastIndex) setReplayPlaying(false);
-        return candleReplayCutoff(candles, next) ?? current;
-      });
-    }, Math.min(100, stepMilliseconds));
-    return () => window.clearInterval(timer);
-  }, [candles.length, replayEnabled, replayPlaying, replaySpeed]);
-
-  const replayIndex = useMemo(
-    () => replayIndexAtOrBefore(candles, replayCutoff),
-    [candles, replayCutoff],
-  );
-  const replayableLastIndex = useMemo(
-    () => replayIndexAtOrBefore(candles, null),
-    [candles],
-  );
-
-  const replayBoundary = replayEnabled
-    ? candleReplayCutoff(candles, replayIndex)
-    : replayableLastIndex >= 0 ? candleReplayCutoff(candles, replayableLastIndex) : null;
-  useEffect(() => {
-    setHover(null);
-  }, [replayBoundary, replayEnabled]);
-  const analysisIndex = replayEnabled ? replayIndex : candles.length - 1;
+  const analysisIndex = candles.length - 1;
   const indicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${code}:${candles.at(-1)?.source.provider ?? "pending"}:${expertBarPeriodId}`;
   const analysis = useMemo(
     () => buildExpertAnalysisAt(candles, enabledStrategies, analysisIndex, indicatorHistoryKey),
     [analysisIndex, candles, enabledStrategies, indicatorHistoryKey],
   );
-  const indicatorSeries = useMemo(
-    () => replayEnabled
-      ? buildExpertIndicatorSeriesAt(candles, analysisIndex, indicatorHistoryKey)
-      : liveIndicatorSeries,
-    [analysisIndex, candles, indicatorHistoryKey, liveIndicatorSeries, replayEnabled],
-  );
+  const indicatorSeries = liveIndicatorSeries;
   const enabledStrategyKey = [...enabledStrategies].sort().join(":");
-  const backtestLastIndex = replayEnabled
-    ? replayIndex
-    : candles.at(-1)?.state === "final" ? candles.length - 1 : candles.length - 2;
+  const backtestLastIndex = candles.at(-1)?.state === "final" ? candles.length - 1 : candles.length - 2;
   const backtestRunner = useMemo(
     () => createExpertBacktestRunner(candles, enabledStrategies, indicatorHistoryKey),
-    // Strategy identity, rather than array order, owns the causal replay index.
+    // Strategy identity, rather than array order, owns the causal backtest index.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [candles, enabledStrategyKey, indicatorHistoryKey],
   );
   useEffect(() => {
-    if (historyLoading || replayPlaying) return;
+    if (historyLoading) return;
     let disposed = false;
     let lastPublished = window.performance.now();
     const channel = new MessageChannel();
@@ -474,7 +414,7 @@ export function ExpertModeWorkspace({
       channel.port1.close();
       channel.port2.close();
     };
-  }, [backtestRunner, historyLoading, replayPlaying]);
+  }, [backtestRunner, historyLoading]);
   const backtest = useMemo(
     () => backtestRunner.resultAt(backtestLastIndex),
     [backtestLastIndex, backtestRevision, backtestRunner],
@@ -487,30 +427,13 @@ export function ExpertModeWorkspace({
     : Math.min(99, Math.max(0, Math.floor(
       (backtestRunner.completedIndex + 1) / Math.max(1, backtestLastIndex + 1) * 100,
     )));
-  const visibleTimelineCount = replayEnabled
-    ? timelineReplayCount(timelineSamples, replayBoundary)
-    : timelineSamples.length;
   const firstCandleTime = candles[0]
     ? Date.parse(candles[0].open_time) / 1_000
     : null;
-  const firstTimelineSample = visibleTimelineCount > 0 ? timelineSamples[0] : null;
-  const firstTimelineTime = firstTimelineSample?.observedTime
-    ?? firstTimelineSample?.time
-    ?? null;
-  const firstSessionTime = period.mode === "timeline"
-    ? [firstCandleTime, firstTimelineTime]
-      .filter((value): value is number => value !== null && Number.isFinite(value))
-      .reduce<number | null>((minimum, value) => minimum === null ? value : Math.min(minimum, value), null)
-    : firstCandleTime;
-  const lastTimelineSample = visibleTimelineCount > 0
-    ? timelineSamples[visibleTimelineCount - 1]
+  const firstSessionTime = firstCandleTime;
+  const lastSessionTime = candles.at(-1)
+    ? Date.parse(candles.at(-1)!.open_time) / 1_000
     : null;
-  const lastTimelineTime = lastTimelineSample?.observedTime ?? lastTimelineSample?.time ?? null;
-  const lastSessionTime = period.mode === "timeline"
-    ? [replayBoundary, lastTimelineTime]
-      .filter((value): value is number => value !== null && Number.isFinite(value))
-      .reduce<number | null>((maximum, value) => maximum === null ? value : Math.max(maximum, value), null)
-    : replayBoundary;
   const sessionStartDay = firstSessionTime === null
     ? null
     : Math.floor(firstSessionTime / SECONDS_PER_DAY) * SECONDS_PER_DAY;
@@ -520,10 +443,10 @@ export function ExpertModeWorkspace({
   const eventStrategyProjection = useMemo(
     () => projectExpertEventStrategies(
       importantEventsEnabled,
-      replayEnabled ? replayBoundary : null,
+      null,
       marketEvents,
     ),
-    [importantEventsEnabled, marketEvents, replayBoundary, replayEnabled],
+    [importantEventsEnabled, marketEvents],
   );
   const capitalDriverEvents = eventStrategyProjection.capitalDrivers;
   const sessionBands = useMemo(
@@ -539,23 +462,15 @@ export function ExpertModeWorkspace({
     [capitalDominanceEnabled, capitalDriverEvents, marketSchedule, sessionEndDay, sessionStartDay],
   );
 
-  const replayLast = replayEnabled ? candles[replayIndex] ?? null : candles.at(-1) ?? null;
-  const chartLivePrice = replayEnabled
-    ? replayLast ? Number(replayLast.close) : null
-    : livePrice;
-  const chartObservedAt = replayEnabled && replayBoundary !== null
-    ? new Date(replayBoundary * 1_000).toISOString()
-    : observedAt;
-  const displayedBar = hover ?? (replayLast ? {
-    time: Date.parse(replayLast.open_time) / 1_000,
-    open: Number(replayLast.open),
-    high: Number(replayLast.high),
-    low: Number(replayLast.low),
-    close: Number(replayLast.close),
+  const latestBar = candles.at(-1) ?? null;
+  const displayedBar = hover ?? (latestBar ? {
+    time: Date.parse(latestBar.open_time) / 1_000,
+    open: Number(latestBar.open),
+    high: Number(latestBar.high),
+    low: Number(latestBar.low),
+    close: Number(latestBar.close),
   } : null);
-  const priceTone = (replayEnabled
-    ? Boolean(chartLivePrice !== null && replayLast && Number(replayLast.close) >= Number(replayLast.open))
-    : (change ?? 0) >= 0)
+  const priceTone = (change ?? 0) >= 0
     ? "is-up"
     : "is-down";
   const selectedOptionExpiry = useMemo(
@@ -630,40 +545,18 @@ export function ExpertModeWorkspace({
     }
   }, [code, enabledStrategies, period.id, period.mode]);
 
-  const commitReplayPosition = useCallback((requestedIndex: number) => {
-    const nextIndex = Math.min(
-      Math.max(0, replayableLastIndex),
-      Math.max(0, Math.floor(requestedIndex)),
-    );
-    const nextCutoff = candleReplayCutoff(candles, nextIndex);
-    if (nextCutoff !== null) setReplayCutoff(nextCutoff);
-    setReplayDraftIndex(null);
-    setReplayPlaying(false);
-  }, [candles, replayableLastIndex]);
-
-  const displayedReplayIndex = replayDraftIndex ?? replayIndex;
-  const displayedReplayCutoff = replayEnabled && replayDraftIndex !== null
-    ? candleReplayCutoff(candles, replayDraftIndex)
-    : replayBoundary;
-
-  const eventReferenceTime = replayEnabled ? replayBoundary : Date.now() / 1_000;
+  const eventReferenceTime = Date.now() / 1_000;
   const latestEvent = !importantEventsEnabled || eventReferenceTime === null
     ? undefined
-    : replayEnabled
-      ? [...marketEvents].reverse().find((event) => (
-        event.time <= eventReferenceTime && event.sourcePublishedAt <= eventReferenceTime
-      ))
-      : marketEvents.find((event) => event.time >= eventReferenceTime);
-  const eventAssessmentTime = replayEnabled
-    ? replayBoundary
-    : observedAt === null ? null : Date.parse(observedAt) / 1_000;
+    : marketEvents.find((event) => event.time >= eventReferenceTime);
+  const eventAssessmentTime = observedAt === null ? null : Date.parse(observedAt) / 1_000;
   const eventAssessments = useMemo(
     () => importantEventsEnabled
       ? buildExpertEventAssessments(
         candles,
         latestEvent ? [latestEvent] : [],
         eventAssessmentTime,
-        replayEnabled ? replayIndex : candles.length - 1,
+        candles.length - 1,
       )
       : [],
     [
@@ -671,8 +564,6 @@ export function ExpertModeWorkspace({
       eventAssessmentTime,
       importantEventsEnabled,
       latestEvent,
-      replayEnabled,
-      replayIndex,
     ],
   );
   const eventAssessmentById = useMemo(
@@ -695,7 +586,7 @@ export function ExpertModeWorkspace({
   );
 
   return (
-    <div className="expert-workspace" data-replay={replayEnabled ? "active" : "live"}>
+    <div className="expert-workspace" data-replay="live">
       <header className="expert-command-deck">
         <button
           type="button"
@@ -716,8 +607,8 @@ export function ExpertModeWorkspace({
           <em>{unit}</em>
         </div>
         <div className={`expert-live-quote ${priceTone}`}>
-          <strong>{formatPrice(chartLivePrice, priceDigits)}</strong>
-          <span>{replayEnabled ? "回放价格" : `${formatSigned(change, priceDigits)} · ${formatSigned(changePercent, 2, "%")}`}</span>
+          <strong>{formatPrice(livePrice, priceDigits)}</strong>
+          <span>{formatSigned(change, priceDigits)} · {formatSigned(changePercent, 2, "%")}</span>
         </div>
         <div className="expert-periods chart-toolbar">
           <PeriodToolbar
@@ -743,7 +634,7 @@ export function ExpertModeWorkspace({
         </div>
         <div className="expert-feed-state">
           <span className={`expert-feed-dot is-${sourceState}`} />
-          <div><strong>{replayEnabled ? "历史回放" : marketPhase === "closed" ? "休市" : "实时"}</strong><small>{historyLoading ? `完整历史同步中 · ${sourceLabel}` : sourceLabel}</small></div>
+          <div><strong>{marketPhase === "closed" ? "休市" : "实时"}</strong><small>{historyLoading ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small></div>
         </div>
       </header>
 
@@ -864,16 +755,11 @@ export function ExpertModeWorkspace({
         <MarketChart
           candles={candles}
           period={period}
-          timelineSamples={timelineSamples}
-          livePrice={chartLivePrice}
-          observedAt={chartObservedAt}
-          referencePrice={replayEnabled ? null : referencePrice}
+          livePrice={livePrice}
+          referencePrice={referencePrice}
           timelineResolutionSeconds={timelineResolutionSeconds}
           priceDigits={priceDigits}
           marketPhase={marketPhase}
-          replayMode={replayEnabled}
-          replayIndex={replayEnabled ? replayIndex : null}
-          replayCutoff={replayEnabled ? replayBoundary : null}
           marketSchedule={marketSchedule}
           historyLoading={historyLoading}
           onRequestOlderHistory={onRequestOlderHistory}
@@ -1190,9 +1076,9 @@ export function ExpertModeWorkspace({
                 <Bot size={19} />
                 <div><strong>{aiReady ? "本机 ChatGPT 已连接" : "等待本机 GPT"}</strong><span>{aiStatus?.detail ?? "正在检测 Codex 账户状态"}</span></div>
               </div>
-              <button type="button" className="expert-ai-run" disabled={!aiReady || aiBusy || replayEnabled || candles.length === 0} onClick={() => void requestAiAnalysis()}>
+              <button type="button" className="expert-ai-run" disabled={!aiReady || aiBusy || candles.length === 0} onClick={() => void requestAiAnalysis()}>
                 {aiBusy ? <RotateCcw className="spin" size={15} /> : <Sparkles size={15} />}
-                {aiBusy ? "分析行情中" : replayEnabled ? "退出回放后分析" : "用当前账户分析"}
+                {aiBusy ? "分析行情中" : "用当前账户分析"}
               </button>
               <small className="expert-ai-quota-note">只读临时会话；发送来源、截止时间、最近 Bar 与已启用策略，会消耗本机 Codex/ChatGPT 配额。</small>
               {aiError ? <div className="expert-ai-error">{aiError}</div> : null}
@@ -1209,57 +1095,7 @@ export function ExpertModeWorkspace({
       </aside>
 
       <footer className="expert-replay-deck">
-        <button
-          type="button"
-          className={replayEnabled ? "is-active" : ""}
-          aria-pressed={replayEnabled}
-          onClick={() => {
-            const nextEnabled = !replayEnabled;
-            setReplayEnabled(nextEnabled);
-            setReplayPlaying(false);
-            setReplayDraftIndex(null);
-            const nextIndex = Math.max(0, replayableLastIndex - 119);
-            setReplayCutoff(nextEnabled && candles[nextIndex]
-              ? candleReplayCutoff(candles, nextIndex)
-              : null);
-          }}
-        >
-          <Play size={14} />{replayEnabled ? "退出回放" : "行情回放"}
-        </button>
-        <button
-          type="button"
-          disabled={!replayEnabled}
-          onClick={() => setReplayPlaying((current) => !current)}
-          title={replayPlaying ? "暂停" : "播放"}
-          aria-label={replayPlaying ? "暂停行情回放" : "播放行情回放"}
-          aria-pressed={replayPlaying}
-        >
-          {replayPlaying ? <CirclePause size={17} /> : <CirclePlay size={17} />}
-        </button>
-        <input
-          type="range"
-          min={0}
-          max={Math.max(0, replayableLastIndex)}
-          value={Math.max(0, Math.min(displayedReplayIndex, Math.max(0, replayableLastIndex)))}
-          disabled={!replayEnabled || replayableLastIndex < 0}
-          onPointerDown={() => {
-            setReplayPlaying(false);
-            setReplayDraftIndex(Math.max(0, replayIndex));
-          }}
-          onChange={(event) => {
-            setReplayDraftIndex(Number(event.target.value));
-          }}
-          onPointerUp={(event) => commitReplayPosition(Number(event.currentTarget.value))}
-          onKeyUp={(event) => commitReplayPosition(Number(event.currentTarget.value))}
-          onBlur={(event) => commitReplayPosition(Number(event.currentTarget.value))}
-          aria-label="回放位置"
-        />
-        <span className="expert-replay-time">{displayedReplayCutoff ? formatDateTimeInTimeZone(displayedReplayCutoff, displayTimeZone) : "等待历史"}</span>
-        <label>速度
-          <select value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))} disabled={!replayEnabled}>
-            <option value={1}>1×</option><option value={2}>2×</option><option value={5}>5×</option><option value={10}>10×</option>
-          </select>
-        </label>
+        <span className="expert-replay-time">真实实时流回放重构中</span>
         <div className="expert-backtest-strip" title={backtest.caveat}>
           <span>{backtestReady ? "实验回测" : `回测计算中 ${backtestProgress}%`}</span>
           {backtestReady ? (

@@ -32,7 +32,14 @@ import {
   type WhitespaceData,
 } from "lightweight-charts";
 
-import { barsFromCandles, buildTimelineSeries, formatBarCountdown } from "./chartModel";
+import {
+  barsFromCandles,
+  buildTimelineSeries,
+  candleSeriesUpdateStart,
+  classifyCandleSeriesMutation,
+  formatBarCountdown,
+  type CandleSeriesMutation,
+} from "./chartModel";
 import { secondsUntilPeriodClose, type ChartPeriod } from "./chartPeriods";
 import {
   DATE_ONLY_AXIS_THRESHOLD_SECONDS,
@@ -100,9 +107,7 @@ import {
 interface MarketChartProps {
   candles: Candle[];
   period: ChartPeriod;
-  timelineSamples: TimelineSample[];
   livePrice: number | null;
-  observedAt: string | null;
   referencePrice: number | null;
   timelineResolutionSeconds: number;
   priceDigits: number;
@@ -235,10 +240,7 @@ interface TimelineSeriesRenderState {
 interface TimelineSeriesCache {
   datasetKey: string;
   windowCandles: Candle[];
-  windowSamples: TimelineSample[];
   windowStart: number | null;
-  livePrice: number | null;
-  observedAt: string | null;
   data: TimelineSample[];
 }
 
@@ -313,22 +315,6 @@ function lowerBoundCandleTime(candles: readonly Candle[], targetTime: number): n
     const middle = Math.floor((low + high) / 2);
     const candleTime = Date.parse(candles[middle].open_time) / 1_000;
     if (!Number.isFinite(candleTime) || candleTime < targetTime) low = middle + 1;
-    else high = middle;
-  }
-  return low;
-}
-
-function lowerBoundTimelineSampleTime(
-  samples: readonly TimelineSample[],
-  targetTime: number,
-): number {
-  let low = 0;
-  let high = samples.length;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    const sample = samples[middle];
-    const sampleTime = sample.observedTime ?? sample.time;
-    if (sampleTime < targetTime) low = middle + 1;
     else high = middle;
   }
   return low;
@@ -484,9 +470,7 @@ function removeIndicatorRuntime(chart: IChartApi, runtime: IndicatorRuntime): vo
 export function MarketChart({
   candles,
   period,
-  timelineSamples,
   livePrice,
-  observedAt,
   referencePrice,
   timelineResolutionSeconds,
   priceDigits,
@@ -572,8 +556,8 @@ export function MarketChart({
   const timelineSeriesRenderStateRef = useRef<TimelineSeriesRenderState | null>(null);
   const timelineSeriesCacheRef = useRef<TimelineSeriesCache | null>(null);
   const timelineWindowCandlesRef = useRef<Candle[] | null>(null);
-  const timelineWindowSamplesRef = useRef<TimelineSample[] | null>(null);
   const candleSeriesRenderStateRef = useRef<CandleSeriesRenderState | null>(null);
+  const renderedCandlesRef = useRef<Candle[] | null>(null);
   const referenceLineRef = useRef<IPriceLine | null>(null);
   const eventMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const drawingLayerRuntimeRef = useRef<Map<string, DrawingLayerRuntime>>(new Map());
@@ -767,22 +751,10 @@ export function MarketChart({
   const visibleChartDataCount = gapAwarePrefixLength(visibleCandleCount, candleWhitespaceGaps);
   visibleCandleLengthRef.current = visibleCandleCount;
   const latestBar = visibleCandleCount > 0 ? bars[visibleCandleCount - 1] : null;
-  const timelineSnapshotPrice = replayMode ? null : livePrice;
-  const timelineSnapshotObservedAt = replayMode ? null : observedAt;
   const timelineWindowStart = useMemo(() => {
     if (period.mode !== "timeline") return null;
-    if (candleTimes.length > 0) {
-      return recentTimelineWindowStart(
-        candleTimes,
-        timelineMaterializedDayCount,
-        marketSchedule,
-      );
-    }
-    const sampleTimes = timelineSamples.map((sample) => ({
-      actualTime: sample.observedTime ?? sample.time,
-    }));
     return recentTimelineWindowStart(
-      sampleTimes,
+      candleTimes,
       timelineMaterializedDayCount,
       marketSchedule,
     );
@@ -791,7 +763,6 @@ export function MarketChart({
     marketSchedule,
     period.mode,
     timelineMaterializedDayCount,
-    timelineSamples,
   ]);
   const timelineWindowCandles = useMemo(() => {
     if (period.mode !== "timeline" || timelineWindowStart === null) return candles;
@@ -800,19 +771,7 @@ export function MarketChart({
     timelineWindowCandlesRef.current = window;
     return window;
   }, [candles, period.mode, timelineWindowStart]);
-  const timelineWindowSamples = useMemo(() => {
-    if (period.mode !== "timeline" || timelineWindowStart === null) return timelineSamples;
-    const firstIndex = lowerBoundTimelineSampleTime(timelineSamples, timelineWindowStart);
-    const window = stableTailSlice(timelineSamples, firstIndex, timelineWindowSamplesRef.current);
-    timelineWindowSamplesRef.current = window;
-    return window;
-  }, [period.mode, timelineSamples, timelineWindowStart]);
-  const earliestLoadedTimelineTime = Math.min(
-    candleTimes[0]?.actualTime ?? Number.POSITIVE_INFINITY,
-    timelineSamples[0]?.observedTime
-      ?? timelineSamples[0]?.time
-      ?? Number.POSITIVE_INFINITY,
-  );
+  const earliestLoadedTimelineTime = candleTimes[0]?.actualTime ?? Number.POSITIVE_INFINITY;
   const timelineHasUnmaterializedHistory = timelineWindowStart !== null
     && earliestLoadedTimelineTime < timelineWindowStart;
   timelineHasUnmaterializedHistoryRef.current = timelineHasUnmaterializedHistory;
@@ -826,46 +785,28 @@ export function MarketChart({
     if (
       cache?.datasetKey === timelineDatasetKey
       && cache.windowCandles === timelineWindowCandles
-      && cache.windowSamples === timelineWindowSamples
       && cache.windowStart === timelineWindowStart
-      && cache.livePrice === timelineSnapshotPrice
-      && cache.observedAt === timelineSnapshotObservedAt
     ) return cache.data;
-    const data = buildTimelineSeries(
-      timelineWindowCandles,
-      timelineWindowSamples,
-      timelineSnapshotPrice,
-      timelineSnapshotObservedAt,
-    );
+    const data = buildTimelineSeries(timelineWindowCandles);
     timelineSeriesCacheRef.current = {
       datasetKey: timelineDatasetKey,
       windowCandles: timelineWindowCandles,
-      windowSamples: timelineWindowSamples,
       windowStart: timelineWindowStart,
-      livePrice: timelineSnapshotPrice,
-      observedAt: timelineSnapshotObservedAt,
       data,
     };
     return data;
   }, [
     period.mode,
     timelineDatasetKey,
-    timelineSnapshotObservedAt,
-    timelineSnapshotPrice,
     timelineWindowCandles,
-    timelineWindowSamples,
     timelineWindowStart,
   ]);
-  const observedEpoch = timelineSnapshotObservedAt
-    ? Date.parse(timelineSnapshotObservedAt) / 1_000
-    : null;
   const timelineLayout = useMemo(() => {
     const actualTimes = rawTimelineData
       .map((point) => point.observedTime ?? point.time)
       .filter(Number.isFinite);
-    if (observedEpoch !== null && Number.isFinite(observedEpoch)) actualTimes.push(observedEpoch);
     return buildTimelineLayout(actualTimes, marketSchedule);
-  }, [marketSchedule, observedEpoch, rawTimelineData]);
+  }, [marketSchedule, rawTimelineData]);
   timelineLayoutRef.current = timelineLayout;
   const timelineTradingDays = useMemo(
     () => [...timelineLayout.days.reduce((groups, day) => {
@@ -1854,6 +1795,7 @@ export function MarketChart({
       previousChartDataRef.current = null;
       timelineSeriesRenderStateRef.current = null;
       candleSeriesRenderStateRef.current = null;
+      renderedCandlesRef.current = null;
       timelineLogicalDayRangesRef.current = [];
       timelineViewportSpanRef.current = 1;
       timelineViewportEndKeyRef.current = null;
@@ -1974,6 +1916,9 @@ export function MarketChart({
     const previousPeriod = previousPeriodRef.current;
     const previousLastTime = previousLastTimeRef.current;
     const previousFirstTime = previousFirstTimeRef.current;
+    const candleMutation: CandleSeriesMutation = previousPeriod === period.id
+      ? classifyCandleSeriesMutation(renderedCandlesRef.current, candles)
+      : "reset";
     const visibleRangeBeforeUpdate = chart.timeScale().getVisibleLogicalRange();
     const previousDataLength = previousDataLengthRef.current;
     const activeSeries = chartData;
@@ -1999,12 +1944,14 @@ export function MarketChart({
     latestLogicalIndexRef.current = nextLatestLogicalIndex;
     const previousCandleState = candleSeriesRenderStateRef.current;
     const previousCandleDataLength = previousCandleState?.dataLength ?? 0;
-    const sameCandleSeriesData = previousCandleState?.data === chartData;
-    const canAppendCandleIncrementally = period.mode !== "timeline"
-      && sameCandleSeriesData
-      && previousCandleDataLength > 0
-      && activeDataLength >= previousCandleDataLength
-      && activeDataLength <= previousCandleDataLength + MAX_INCREMENTAL_REPLAY_POINTS
+    const candleUpdateStart = candleSeriesUpdateStart(
+      candleMutation,
+      previousCandleDataLength,
+      activeDataLength,
+      MAX_INCREMENTAL_REPLAY_POINTS,
+    );
+    const canUpdateCandleIncrementally = period.mode !== "timeline"
+      && candleUpdateStart !== null
       && previousLastTime !== null
       && nextLastTime !== null
       && nextLastTime >= previousLastTime;
@@ -2017,6 +1964,9 @@ export function MarketChart({
         periodId: period.id,
       };
       const previousTimelineState = timelineSeriesRenderStateRef.current;
+      const sharedPointCount = candleMutation === "tail-update"
+        ? Math.max(0, Math.min(previousTimelineState?.pointCount ?? 0, visibleTimelineCount) - 1)
+        : Math.min(previousTimelineState?.pointCount ?? 0, visibleTimelineCount);
       const sharedPrefix = previousTimelineState !== null
         && previousTimelineState.periodId === period.id
         && (
@@ -2024,7 +1974,7 @@ export function MarketChart({
           || timelineClockDomainsSharePrefix(
             previousTimelineState.domain,
             timelineClockDomain,
-            Math.min(previousTimelineState.pointCount, visibleTimelineCount),
+            sharedPointCount,
           )
         );
       const pointDelta = previousTimelineState === null
@@ -2052,11 +2002,15 @@ export function MarketChart({
             ));
           }
         }
-        const changedIndexes = changedTimelineClockDataIndexes(
+        const changedIndexes = new Set(changedTimelineClockDataIndexes(
           timelineClockDomain,
           previousTimelineState.pointCount,
           visibleTimelineCount,
-        );
+        ));
+        if (candleMutation === "tail-update" && visibleTimelineCount > 0) {
+          const tailDataIndex = timelineClockDomain.pointDataIndexes[visibleTimelineCount - 1];
+          if (tailDataIndex >= 0) changedIndexes.add(tailDataIndex);
+        }
         for (const dataIndex of changedIndexes) {
           if (dataIndex >= visibleTimelineSeriesCount) continue;
           timelineSeries.update(timelineClockDataItemAt(
@@ -2069,13 +2023,10 @@ export function MarketChart({
       timelineSeriesRenderStateRef.current = nextTimelineState;
     }
     if (period.mode !== "timeline" && candlestickSeries) {
-      const candleDataAlreadyCurrent = sameCandleSeriesData
+      const candleDataAlreadyCurrent = candleMutation === "unchanged"
         && previousCandleDataLength === activeDataLength;
-      if (!candleDataAlreadyCurrent && canAppendCandleIncrementally && candleLastPoint) {
-        const firstUpdate = activeDataLength === previousCandleDataLength
-          ? activeDataLength - 1
-          : previousCandleDataLength;
-        for (let index = firstUpdate; index < activeDataLength; index += 1) {
+      if (!candleDataAlreadyCurrent && canUpdateCandleIncrementally && candleLastPoint) {
+        for (let index = candleUpdateStart; index < activeDataLength; index += 1) {
           candlestickSeries.update(chartData[index]);
         }
       } else if (!candleDataAlreadyCurrent) {
@@ -2180,12 +2131,14 @@ export function MarketChart({
     previousLastTimeRef.current = nextLastTime;
     previousDataLengthRef.current = logicalDataLength;
     previousChartDataRef.current = chartData;
+    renderedCandlesRef.current = candles;
     scheduleLiveMarker();
     refreshTimelineDecorations();
     refreshExpertDecorations();
   }, [
     applyTimelineDayViewport,
     chartData,
+    candles,
     displayTimeZone,
     latestBar?.time,
     latestTimelineLogicalIndex,

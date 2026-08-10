@@ -75,7 +75,7 @@ class QuoteEventPersistenceTests(unittest.TestCase):
         ):
             self.assertIn("ORDER BY", query)
             self.assertIn("LIMIT", query)
-        self.assertIn("observed_at < $3", _SELECT_QUOTE_CANDLES_BEFORE)
+        self.assertIn("observed_at < $4", _SELECT_QUOTE_CANDLES_BEFORE)
         self.assertIn("open_time < $4", _SELECT_SOURCE_CANDLES_BEFORE)
         self.assertIn("open_time < $4", _SELECT_REALTIME_BARS_BEFORE)
 
@@ -86,6 +86,7 @@ class QuoteEventPersistenceTests(unittest.TestCase):
             self.assertIn("source_id = $2", query)
             self.assertNotIn("source_id = ANY", query)
             self.assertNotIn("standard_candles", query)
+            self.assertIn("date_bin($3::int * INTERVAL '1 second'", query)
 
     def test_history_rows_and_completed_ranges_are_source_scoped(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS realtime_candle_cache_ranges", SCHEMA_SQL)

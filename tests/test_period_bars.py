@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -57,6 +58,26 @@ def bar(at: str, value: str, *, state: BarState = BarState.FINAL, revision: int 
 
 
 class PeriodBarProjectionTests(unittest.TestCase):
+    def test_one_second_is_a_normal_fixed_resolution(self) -> None:
+        first = replace(
+            bar("2026-08-10T09:00:00+08:00", "100"),
+            interval=timedelta(seconds=1),
+        )
+        second = replace(
+            bar("2026-08-10T09:00:01+08:00", "101"),
+            interval=timedelta(seconds=1),
+        )
+
+        values = project_period_bars(
+            (first, second),
+            period_id="1s",
+            schedule=SHFE_SCHEDULE,
+            now=datetime(2026, 8, 11, tzinfo=UTC),
+        )
+
+        self.assertEqual([item.open_time for item in values], [first.open_time, second.open_time])
+        self.assertTrue(all(item.interval == timedelta(seconds=1) for item in values))
+
     def test_fixed_period_restarts_at_each_trading_session(self) -> None:
         rows = (
             bar("2026-08-10T09:01:00+08:00", "100"),
@@ -135,6 +156,48 @@ class PeriodBarProjectionTests(unittest.TestCase):
         self.assertIsNone(values[0].finalized_at)
 
 
+class LivePeriodBarProjectionTests(unittest.TestCase):
+    def test_active_component_correction_recomputes_complete_period_bar(self) -> None:
+        service = PeriodBarService(object())  # type: ignore[arg-type]
+        service.accept_live(
+            bar("2026-08-10T09:00:00+08:00", "100"),
+            schedule=SHFE_SCHEDULE,
+        )
+        latest = dict(
+            service.accept_live(
+                bar("2026-08-10T09:01:00+08:00", "105"),
+                schedule=SHFE_SCHEDULE,
+            )
+        )["5m"]
+        corrected = dict(
+            service.accept_live(
+                bar("2026-08-10T09:01:00+08:00", "102", revision=2),
+                schedule=SHFE_SCHEDULE,
+            )
+        )["5m"]
+
+        self.assertEqual(latest.high, Decimal("105"))
+        self.assertEqual(corrected.open, Decimal("100"))
+        self.assertEqual(corrected.high, Decimal("102"))
+        self.assertEqual(corrected.close, Decimal("102"))
+
+    def test_late_component_cannot_rewind_an_advanced_period_bucket(self) -> None:
+        service = PeriodBarService(object())  # type: ignore[arg-type]
+        service.accept_live(
+            bar("2026-08-10T09:05:00+08:00", "105"),
+            schedule=SHFE_SCHEDULE,
+        )
+
+        values = dict(
+            service.accept_live(
+                bar("2026-08-10T09:04:00+08:00", "99"),
+                schedule=SHFE_SCHEDULE,
+            )
+        )
+
+        self.assertNotIn("5m", values)
+
+
 class _PagedMinuteReader:
     def __init__(self, rows: tuple[RealtimeBar, ...]) -> None:
         self.rows = rows
@@ -176,6 +239,26 @@ class _TrackedMinuteReader:
         self.rows = [row for row in self.rows if row.open_time != value.open_time]
         self.rows.append(value)
         self.rows.sort(key=lambda row: row.open_time)
+
+
+class _IntervalReader:
+    def __init__(self, rows: tuple[RealtimeBar, ...]) -> None:
+        self.rows = rows
+        self.intervals: list[timedelta] = []
+
+    async def get_bars_before(
+        self,
+        _instrument,
+        *,
+        source_id,
+        interval,
+        before=None,
+        count=10_000,
+    ):
+        del source_id
+        self.intervals.append(interval)
+        candidates = tuple(row for row in self.rows if before is None or row.open_time < before)
+        return candidates[-count:]
 
 
 class _MaterializedPeriodStore:
@@ -285,6 +368,30 @@ class _MaterializedPeriodStore:
 
 
 class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_second_page_reads_the_canonical_one_second_series(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            replace(
+                bar((start + timedelta(seconds=index)).isoformat(), str(100 + index)),
+                interval=timedelta(seconds=1),
+            )
+            for index in range(4)
+        )
+        reader = _IntervalReader(rows)
+        service = PeriodBarService(reader)  # type: ignore[arg-type]
+
+        page = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="1s",
+            schedule=None,
+            page_size=3,
+        )
+
+        self.assertEqual(page.items, rows[-3:])
+        self.assertTrue(page.has_more)
+        self.assertEqual(reader.intervals, [timedelta(seconds=1)])
+
     async def test_partial_transport_pages_continue_until_chart_page_is_complete(self) -> None:
         start = datetime(2026, 1, 1, tzinfo=UTC)
         rows = tuple(

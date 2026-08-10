@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from market_analysis.application.quotes import QuoteView
-from market_analysis.domain.market_events import QuoteSample
+from market_analysis.domain.market_events import QuoteSample, RealtimeBar
 from market_analysis.domain.models import Instrument
 
 
@@ -23,19 +23,22 @@ class QuoteStreamEvent:
     kind: str
     state: QuoteStreamState
     emitted_at: datetime
+    period_id: str = "1m"
     quote: QuoteView | None = None
     sample: QuoteSample | None = None
+    bar: RealtimeBar | None = None
     error: str | None = None
 
 
 LoadQuote = Callable[[Instrument, str], Awaitable[QuoteView]]
-_StreamKey = tuple[str, str]
+_StreamKey = tuple[str, str, str]
 
 
 @dataclass(slots=True)
 class _Pump:
     source: str
     instrument: Instrument
+    period: str
     subscribers: set[asyncio.Queue[QuoteStreamEvent]]
     latest: QuoteStreamEvent | None = None
 
@@ -54,23 +57,32 @@ class QuoteStreamCoordinator:
         instrument: Instrument,
         *,
         source: str,
+        period: str = "1m",
     ) -> AsyncIterator[asyncio.Queue[QuoteStreamEvent]]:
-        key = (source, instrument.symbol)
-        # A bounded queue would silently discard intermediate price changes when a
-        # browser or socket stalls for only a moment. The live path preserves every
-        # accepted frame so application-level buffering never manufactures gaps.
-        queue: asyncio.Queue[QuoteStreamEvent] = asyncio.Queue()
+        if not period.strip():
+            raise ValueError("period cannot be empty")
+        key = (source, instrument.symbol, period)
+        # The durable event log owns lossless replay. A browser connection is a live
+        # projection and must remain bounded; every Bar is a complete replacement, so
+        # dropping the oldest stalled delivery cannot corrupt the next upsert.
+        queue: asyncio.Queue[QuoteStreamEvent] = asyncio.Queue(maxsize=512)
         queue.put_nowait(
             QuoteStreamEvent(
                 kind="status",
                 state=QuoteStreamState.CONNECTING,
                 emitted_at=datetime.now(UTC),
+                period_id=period,
             )
         )
         async with self._lock:
             pump = self._pumps.get(key)
             if pump is None:
-                pump = _Pump(source=source, instrument=instrument, subscribers=set())
+                pump = _Pump(
+                    source=source,
+                    instrument=instrument,
+                    period=period,
+                    subscribers=set(),
+                )
                 self._pumps[key] = pump
             pump.subscribers.add(queue)
             latest = pump.latest
@@ -92,34 +104,46 @@ class QuoteStreamCoordinator:
         async with self._lock:
             self._pumps.clear()
 
-    def publish(self, view: QuoteView) -> None:
-        key = (view.source_id, view.quote.instrument.symbol)
-        pump = self._pumps.get(key)
-        if pump is None:
-            return
-        event = QuoteStreamEvent(
-            kind="quote",
-            state=QuoteStreamState.LIVE,
-            emitted_at=datetime.now(UTC),
-            quote=view,
+    def active_periods(self, instrument: Instrument, *, source: str) -> frozenset[str]:
+        """Returns the resolutions currently consumed by browser connections."""
+
+        return frozenset(
+            period
+            for candidate_source, symbol, period in self._pumps
+            if candidate_source == source and symbol == instrument.symbol
         )
-        pump.latest = event
-        self._broadcast(pump, event)
+
+    def publish(self, view: QuoteView) -> None:
+        for pump in self._matching_pumps(view.source_id, view.quote.instrument):
+            event = QuoteStreamEvent(
+                kind="quote",
+                state=QuoteStreamState.LIVE,
+                emitted_at=datetime.now(UTC),
+                period_id=pump.period,
+                quote=view,
+            )
+            pump.latest = event
+            self._broadcast(pump, event)
 
     def publish_sample(self, sample: QuoteSample) -> None:
-        pump = self._pumps.get((sample.source_id, sample.instrument.symbol))
-        if pump is None:
-            return
-        event = QuoteStreamEvent(
-            kind="sample",
-            state=QuoteStreamState.LIVE,
-            emitted_at=datetime.now(UTC),
-            sample=sample,
-        )
-        self._broadcast(pump, event)
+        for pump in self._matching_pumps(sample.source_id, sample.instrument):
+            event = QuoteStreamEvent(
+                kind="sample",
+                state=QuoteStreamState.LIVE,
+                emitted_at=datetime.now(UTC),
+                period_id=pump.period,
+                sample=sample,
+            )
+            self._broadcast(pump, event)
 
-    def publish_bar_update(self, instrument: Instrument, *, source: str) -> None:
-        pump = self._pumps.get((source, instrument.symbol))
+    def publish_bar_update(
+        self,
+        bar: RealtimeBar,
+        *,
+        period_id: str | None = None,
+    ) -> None:
+        period = period_id or self._period_from_bar(bar)
+        pump = self._pumps.get((bar.source.provider, bar.instrument.symbol, period))
         if pump is None:
             return
         self._broadcast(
@@ -128,21 +152,22 @@ class QuoteStreamCoordinator:
                 kind="bar",
                 state=QuoteStreamState.LIVE,
                 emitted_at=datetime.now(UTC),
+                period_id=period,
+                bar=bar,
             ),
         )
 
     def publish_unavailable(self, instrument: Instrument, source: str, error: Exception) -> None:
-        pump = self._pumps.get((source, instrument.symbol))
-        if pump is None:
-            return
-        event = QuoteStreamEvent(
-            kind="status",
-            state=QuoteStreamState.UNAVAILABLE,
-            emitted_at=datetime.now(UTC),
-            error=self._safe_error(error),
-        )
-        pump.latest = event
-        self._broadcast(pump, event)
+        for pump in self._matching_pumps(source, instrument):
+            event = QuoteStreamEvent(
+                kind="status",
+                state=QuoteStreamState.UNAVAILABLE,
+                emitted_at=datetime.now(UTC),
+                period_id=pump.period,
+                error=self._safe_error(error),
+            )
+            pump.latest = event
+            self._broadcast(pump, event)
 
     async def _seed_from_local_cache(
         self,
@@ -156,6 +181,7 @@ class QuoteStreamCoordinator:
                 kind="status",
                 state=QuoteStreamState.UNAVAILABLE,
                 emitted_at=datetime.now(UTC),
+                period_id=pump.period,
                 error=self._safe_error(error),
             )
         else:
@@ -163,6 +189,7 @@ class QuoteStreamCoordinator:
                 kind="quote",
                 state=QuoteStreamState.LIVE,
                 emitted_at=datetime.now(UTC),
+                period_id=pump.period,
                 quote=view,
             )
         if pump.latest is None:
@@ -173,7 +200,29 @@ class QuoteStreamCoordinator:
     @staticmethod
     def _broadcast(pump: _Pump, event: QuoteStreamEvent) -> None:
         for queue in tuple(pump.subscribers):
+            if queue.full():
+                queue.get_nowait()
             queue.put_nowait(event)
+
+    def _matching_pumps(self, source: str, instrument: Instrument) -> tuple[_Pump, ...]:
+        return tuple(
+            pump
+            for (candidate_source, candidate_symbol, _), pump in self._pumps.items()
+            if candidate_source == source and candidate_symbol == instrument.symbol
+        )
+
+    @staticmethod
+    def _period_from_bar(bar: RealtimeBar) -> str:
+        raw = bar.source.raw_payload
+        raw_period = raw.get("period_id") if raw else None
+        if isinstance(raw_period, str) and raw_period.strip():
+            return raw_period
+        interval_seconds = int(bar.interval.total_seconds())
+        if interval_seconds == 1:
+            return "1s"
+        if interval_seconds == 60:
+            return "1m"
+        raise ValueError("period_id is required for a non-base Bar interval")
 
     @staticmethod
     def _safe_error(error: Exception) -> str:

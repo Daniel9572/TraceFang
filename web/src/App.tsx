@@ -23,7 +23,7 @@ import {
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { marketApi, mergeCandleRows } from "./api";
-import { appendTimelineSample, barsFromCandles, mergeTimelineSamples } from "./chartModel";
+import { barsFromCandles, upsertRealtimeBar } from "./chartModel";
 import {
   buildChartLayers,
   chartLayerStorageKey,
@@ -35,7 +35,7 @@ import {
   type ChartLayerWorkspace,
 } from "./chartLayers";
 import { barDataPeriodId, chartPeriodById, type ChartPeriodId } from "./chartPeriods";
-import { formatBeijingClock, formatChartTimeLabel, tradingDayIdentity } from "./chartTimeAxis";
+import { formatBeijingClock, formatChartTimeLabel } from "./chartTimeAxis";
 import {
   buildExpertIndicatorSeriesAt,
   EXPERT_INDICATOR_HISTORY_VERSION,
@@ -63,7 +63,6 @@ import type {
   QuoteView,
   SourceDescriptor,
   SourceId,
-  TimelineSample,
 } from "./types";
 
 const defaultInstruments: InstrumentEntry[] = [
@@ -299,7 +298,6 @@ export default function App() {
   const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteView>>({});
   const [watchPriceSeries, setWatchPriceSeries] = useState<Record<string, number[]>>({});
   const [candles, setCandles] = useState<Candle[]>([]);
-  const [timelineSamples, setTimelineSamples] = useState<TimelineSample[]>([]);
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
@@ -327,17 +325,12 @@ export default function App() {
   const [loadingCandles, setLoadingCandles] = useState(true);
   const [historySyncing, setHistorySyncing] = useState(false);
   const [historyRepairingCount, setHistoryRepairingCount] = useState(0);
-  const [timelineHistorySyncing, setTimelineHistorySyncing] = useState(false);
-  const [timelineHistoryReady, setTimelineHistoryReady] = useState(false);
   const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "waiting" | "unavailable">("connecting");
   const candleRequestRef = useRef(0);
   const candlesRef = useRef<Candle[]>([]);
   const historyCursorRef = useRef<number | null>(null);
   const historyLoadInFlightRef = useRef(false);
   const historyGapAttemptsRef = useRef(new Set<string>());
-  const barRefreshInFlightRef = useRef(false);
-  const barRefreshRequestedRef = useRef(false);
-  const timelineHistoryLoadedKeyRef = useRef<string | null>(null);
   candlesRef.current = candles;
   const watchlistQuoteStreamsRef = useRef(
     new Map<string, { sourceId: SourceId; stop: () => void }>(),
@@ -401,10 +394,7 @@ export default function App() {
   const selectedSource = instrumentSources[selectedCode] ?? "jin10_client";
   const selectedPeriod = chartPeriodById(periodId);
   const selectedBarPeriodId = barDataPeriodId(selectedPeriod);
-  const chartHistoryLoading = historySyncing
-    || historyRepairingCount > 0
-    || timelineHistorySyncing
-    || (selectedPeriod.mode === "timeline" && !timelineHistoryReady);
+  const chartHistoryLoading = historySyncing || historyRepairingCount > 0;
   const sourceById = useMemo(
     () => new Map(sources.map((source) => [source.source_id, source])),
     [sources],
@@ -462,56 +452,14 @@ export default function App() {
         selectedBarPeriodId,
       );
       if (requestId !== candleRequestRef.current) return;
-      setCandles(recent.items);
+      // The period stream may win the race against the initial snapshot.
+      // Merge once so an already-delivered current Bar is never rolled back.
+      setCandles((current) => mergeCandleRows(recent.items, current));
       setCandleError(null);
       const firstCursor = historyPageCursor(recent);
       if (firstCursor !== null) {
         historyCursorRef.current = firstCursor;
       }
-      if (!recent.has_more || firstCursor === null) return;
-      void (async () => {
-        historyLoadInFlightRef.current = true;
-        setHistorySyncing(true);
-        let page = recent;
-        let cursor = firstCursor;
-        const seen = new Set<number>();
-        try {
-          while (page.has_more && requestId === candleRequestRef.current) {
-            if (seen.has(cursor)) throw new Error("周期 Bar 游标未前进");
-            seen.add(cursor);
-            page = await marketApi.barPage(
-              selectedCode,
-              selectedSource,
-              selectedBarPeriodId,
-              cursor,
-              LOCAL_HISTORY_PAGE_SIZE,
-            );
-            if (requestId !== candleRequestRef.current) return;
-            if (page.items.length > 0) {
-              const pageItems = page.items;
-              startTransition(() => {
-                setCandles((current) => mergeCandleRows(pageItems, current));
-              });
-            }
-            const nextCursor = historyPageCursor(page);
-            if (nextCursor !== null) historyCursorRef.current = nextCursor;
-            if (!page.has_more) break;
-            if (nextCursor === null || nextCursor >= cursor) {
-              throw new Error("周期 Bar 游标未前进");
-            }
-            cursor = nextCursor;
-          }
-        } catch (error) {
-          if (requestId === candleRequestRef.current) {
-            setHistoryError(`本地历史分页中断：${translateError(error)}`);
-          }
-        } finally {
-          if (requestId === candleRequestRef.current) {
-            historyLoadInFlightRef.current = false;
-            setHistorySyncing(false);
-          }
-        }
-      })();
     } catch (error) {
       if (requestId !== candleRequestRef.current) return;
       setCandles([]);
@@ -557,6 +505,9 @@ export default function App() {
           Math.max(0, Math.ceil((before - localCursor) / 60)),
         );
       }
+      // One-second Bars are recorded from the live stream and cannot be
+      // reconstructed truthfully from the provider's one-minute backfill.
+      if (selectedBarPeriodId === "1s") return historyOutcome("exhausted");
       const filled = await marketApi.olderCandleHistory(
         selectedCode,
         selectedSource,
@@ -601,7 +552,11 @@ export default function App() {
   }, [selectedBarPeriodId, selectedCode, selectedInstrument.history_available, selectedPeriod, selectedSource]);
 
   const repairVisibleHistoryGap = useCallback(async (window: HistoryWindow): Promise<void> => {
-    if (!selectedInstrument.history_available || selectedPeriod.aggregation.kind !== "fixed") return;
+    if (
+      !selectedInstrument.history_available
+      || selectedPeriod.aggregation.kind !== "fixed"
+      || selectedBarPeriodId === "1s"
+    ) return;
     const key = `${selectedSource}:${selectedCode}:${window.start}:${window.count}`;
     if (historyGapAttemptsRef.current.has(key)) return;
     historyGapAttemptsRef.current.add(key);
@@ -654,34 +609,6 @@ export default function App() {
     selectedPeriod,
     selectedSource,
   ]);
-
-  const refreshCandles = useCallback(async () => {
-    if (barRefreshInFlightRef.current) {
-      barRefreshRequestedRef.current = true;
-      return;
-    }
-    barRefreshInFlightRef.current = true;
-    const requestId = candleRequestRef.current;
-    try {
-      do {
-        barRefreshRequestedRef.current = false;
-        try {
-          const recent = await marketApi.barPage(
-            selectedCode,
-            selectedSource,
-            selectedBarPeriodId,
-          );
-          if (requestId !== candleRequestRef.current) return;
-          setCandles((current) => mergeCandleRows(current, recent.items));
-          setCandleError(null);
-        } catch (error) {
-          setCandleError(translateError(error));
-        }
-      } while (barRefreshRequestedRef.current);
-    } finally {
-      barRefreshInFlightRef.current = false;
-    }
-  }, [selectedBarPeriodId, selectedCode, selectedSource]);
 
   useEffect(() => {
     void Promise.all([marketApi.instruments(), marketApi.watchlist()])
@@ -764,7 +691,7 @@ export default function App() {
 
     const connect = () => {
       if (disposed || selectedCodeRef.current !== selectedCode) return;
-      socket = marketApi.openQuoteStream(selectedCode);
+      socket = marketApi.openQuoteStream(selectedCode, selectedBarPeriodId);
       socket.onopen = () => {
         if (disposed || selectedCodeRef.current !== selectedCode) return;
         retryCount = 0;
@@ -776,27 +703,19 @@ export default function App() {
         if (disposed || selectedCodeRef.current !== selectedCode) return;
         const event = JSON.parse(String(message.data)) as QuoteStreamEvent;
         const marketClosed = marketPhaseRef.current === "closed";
-        if (event.kind === "bar") {
+        if (event.kind === "bar" && event.bar) {
           setQuoteStreamState(marketClosed ? "waiting" : "live");
-          void refreshCandles();
-        } else if (event.kind === "sample" && event.sample) {
-          const sampleValue = numeric(event.sample.value);
-          const observedTime = Date.parse(event.sample.observed_at) / 1_000;
-          const receivedTime = Date.parse(event.sample.received_at) / 1_000;
           if (
-            sampleValue !== null
-            && Number.isFinite(observedTime)
-            && Number.isFinite(receivedTime)
+            event.period_id === selectedBarPeriodId
+            && event.bar.source.provider === selectedSource
           ) {
-            setTimelineSamples((current) => appendTimelineSample(current, {
-              time: receivedTime,
-              observedTime,
-              value: sampleValue,
-              eventId: event.sample!.event_id,
-            }));
+            setCandles((current) => upsertRealtimeBar(current, event.bar!));
+            setCandleError(null);
           }
+        } else if (event.kind === "sample") {
+          // Raw samples remain an ingestion/replay concern. Every chart mode
+          // consumes the complete period Bar emitted by the backend.
           setQuoteStreamState(marketClosed ? "waiting" : "live");
-          if (selectedPeriod.mode !== "timeline") void refreshCandles();
         } else if (event.kind === "quote" && event.quote) {
           setQuoteStreamState(marketClosed ? "waiting" : "live");
           setQuote(event.quote);
@@ -832,9 +751,8 @@ export default function App() {
     };
   }, [
     instrumentSourcesLoaded,
-    refreshCandles,
+    selectedBarPeriodId,
     selectedCode,
-    selectedPeriod.mode,
     selectedSource,
     selectedSourceDescriptor?.display_name,
     selectedSourceReady,
@@ -919,118 +837,6 @@ export default function App() {
   }, [instrumentSourcesLoaded, marketSession.phase, selectedCode, selectedSource, selectedSourceReady]);
 
   useEffect(() => {
-    let disposed = false;
-    if (selectedPeriod.mode !== "timeline") {
-      setTimelineHistorySyncing(false);
-      return () => {
-        disposed = true;
-      };
-    }
-    const historyKey = `${selectedCode}:${selectedSource}`;
-    if (timelineHistoryLoadedKeyRef.current === historyKey) {
-      setTimelineHistoryReady(true);
-      setTimelineHistorySyncing(false);
-      return () => {
-        disposed = true;
-      };
-    }
-    setTimelineSamples([]);
-    // Persisted one-minute Bars are already a complete, source-bound fallback.
-    // Raw quote events enrich that line in the background and must not block it.
-    setTimelineHistoryReady(true);
-    setTimelineHistorySyncing(true);
-    void (async () => {
-      let cursor: number | undefined;
-      const seenCursors = new Set<number>();
-      let firstPage = true;
-      let frontierDayKey: string | null = null;
-      let pendingPages: TimelineSample[][] = [];
-      const publishPendingPages = () => {
-        if (pendingPages.length === 0) return;
-        const batch = mergeTimelineSamples(...pendingPages);
-        pendingPages = [];
-        startTransition(() => {
-          setTimelineSamples((current) => mergeTimelineSamples(batch, current));
-          setTimelineHistoryReady(true);
-        });
-      };
-      while (!disposed) {
-        const page = await marketApi.timelineSamplePage(selectedCode, selectedSource, cursor);
-        if (disposed || selectedCodeRef.current !== selectedCode) return;
-        const samples = page.items.map((item) => ({
-          time: Date.parse(item.received_at) / 1_000,
-          observedTime: Date.parse(item.observed_at) / 1_000,
-          value: Number(item.value),
-          eventId: item.event_id,
-        })).filter((item) => (
-          Number.isFinite(item.time)
-          && Number.isFinite(item.observedTime)
-          && Number.isFinite(item.value)
-        ));
-        let oldestObservedTime = Number.POSITIVE_INFINITY;
-        for (const sample of samples) {
-          oldestObservedTime = Math.min(oldestObservedTime, sample.observedTime ?? sample.time);
-        }
-        const oldestDayKey = Number.isFinite(oldestObservedTime)
-          ? tradingDayIdentity(oldestObservedTime, selectedInstrument.market_schedule)
-          : "";
-        pendingPages.push(samples);
-        if (firstPage) {
-          firstPage = false;
-          frontierDayKey = oldestDayKey || null;
-        } else if (oldestDayKey && frontierDayKey && oldestDayKey !== frontierDayKey) {
-          // A raw-event page is count-based and can contain only the tail of a
-          // busy session. Publish after crossing the trading-day boundary so
-          // the initial one-day viewport never presents a partial day as full.
-          publishPendingPages();
-          frontierDayKey = oldestDayKey;
-        } else if (oldestDayKey && !frontierDayKey) {
-          frontierDayKey = oldestDayKey;
-        }
-        if (!page.has_more || page.next_cursor === null) break;
-        if (seenCursors.has(page.next_cursor)) {
-          throw new Error("分时事件游标未前进");
-        }
-        seenCursors.add(page.next_cursor);
-        cursor = page.next_cursor;
-      }
-      if (disposed || selectedCodeRef.current !== selectedCode) return;
-      publishPendingPages();
-      timelineHistoryLoadedKeyRef.current = historyKey;
-      startTransition(() => {
-        setTimelineHistorySyncing(false);
-      });
-    })().catch(() => {
-      // Persisted samples enrich the timeline; the live raw-event stream remains independent.
-      if (!disposed) {
-        setTimelineHistoryReady(true);
-        setTimelineHistorySyncing(false);
-      }
-    });
-    return () => {
-      disposed = true;
-    };
-  }, [selectedCode, selectedInstrument.market_schedule, selectedPeriod.mode, selectedSource]);
-
-  useEffect(() => {
-    let disposed = false;
-    let timer: number | null = null;
-    const scheduleNextMinute = () => {
-      const delay = 60_000 - (Date.now() % 60_000) + 25;
-      timer = window.setTimeout(async () => {
-        if (disposed) return;
-        await refreshCandles();
-        if (!disposed) scheduleNextMinute();
-      }, delay);
-    };
-    scheduleNextMinute();
-    return () => {
-      disposed = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [refreshCandles]);
-
-  useEffect(() => {
     if (!sourceMenuOpen) return;
     void refreshSourceSnapshot();
     const timer = window.setInterval(() => void refreshSourceSnapshot(), 5_000);
@@ -1094,7 +900,6 @@ export default function App() {
     try {
       const value = await marketApi.updateInstrumentSource(selectedCode, source.source_id);
       setCandles([]);
-      setTimelineSamples([]);
       setInstrumentSources((current) => ({ ...current, [selectedCode]: value.source_id }));
       setWatchQuotes((current) => {
         const next = { ...current };
@@ -1277,7 +1082,6 @@ export default function App() {
         instrumentName={selectedInstrument.name}
         unit={unitFor(selectedCode, selectedInstrument) || "美元/盎司"}
         candles={candles}
-        timelineSamples={timelineSamples}
         periodId={periodId}
         livePrice={livePrice}
         change={numeric(priceQuote?.change)}
@@ -1343,7 +1147,6 @@ export default function App() {
                 historyLoadInFlightRef.current = false;
                 setQuote(null);
                 setCandles([]);
-                setTimelineSamples([]);
                 setQuoteError(null);
                 setCandleError(null);
                 setHistorySyncing(false);
@@ -1575,8 +1378,8 @@ export default function App() {
             <span
               className="timeline-resolution-badge"
               title={quoteStreaming
-                ? "当前报价源在行情帧到达时立即推送；历史段由分钟 K 线补齐"
-                : `当前报价源约每 ${timelineSamplingSeconds} 秒请求一次；历史段由分钟 K 线补齐`}
+                ? "分时与 K 线共用标准 1 秒 Bar；每个报价帧直接更新当前秒完整 OHLC"
+                : `分时使用标准 1 秒 Bar；当前报价源约每 ${timelineSamplingSeconds} 秒产生一次更新`}
             >
               {timelineResolutionLabel}
             </span>
@@ -1673,9 +1476,7 @@ export default function App() {
           <MarketChart
             candles={candles}
             period={selectedPeriod}
-            timelineSamples={timelineSamples}
             livePrice={livePrice}
-            observedAt={quoteObservedAt}
             referencePrice={timelineReferencePrice}
             timelineResolutionSeconds={timelineSamplingSeconds}
             priceDigits={digitsFor(selectedCode, selectedInstrument)}
@@ -1690,7 +1491,7 @@ export default function App() {
               updateLayerWorkspace((current) => resizeIndicatorLayer(current, layerId, height));
             }}
           />
-          {historySyncing || historyRepairingCount > 0 || timelineHistorySyncing ? (
+          {historySyncing || historyRepairingCount > 0 ? (
             <div
               className="history-loading-indicator"
               role="status"
