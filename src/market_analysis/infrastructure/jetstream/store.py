@@ -25,7 +25,16 @@ from nats.js.errors import NotFoundError
 from market_analysis.infrastructure.jetstream.frames import FrameEnvelope
 from market_analysis.infrastructure.jetstream.settings import JetStreamSettings
 
-FrameHandler = Callable[[FrameEnvelope], Awaitable[None]]
+
+@dataclass(frozen=True, slots=True)
+class RecordedFrame:
+    """One immutable provider frame with its durable stream ordering key."""
+
+    stream_sequence: int
+    envelope: FrameEnvelope
+
+
+FrameHandler = Callable[[RecordedFrame], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +58,7 @@ class ReplaySession:
         consumer_name: str,
         end_sequence: int,
         initial_pending: int,
+        speed: float,
         on_frame: FrameHandler,
         on_closed: Callable[[ReplaySession], None],
     ) -> None:
@@ -58,6 +68,7 @@ class ReplaySession:
         self._consumer_name = consumer_name
         self._end_sequence = end_sequence
         self._initial_pending = initial_pending
+        self._speed = speed
         self._on_frame = on_frame
         self._on_closed = on_closed
         self._task: asyncio.Task[None] | None = None
@@ -80,10 +91,13 @@ class ReplaySession:
             return
         if not self._task.done():
             self._task.cancel()
-        with suppress(asyncio.CancelledError):
+        # ``wait`` is the observation point for handler failures. Cleanup remains
+        # idempotent and must not re-raise the same failure from a finally block.
+        with suppress(asyncio.CancelledError, Exception):
             await self._task
 
     async def _consume(self) -> None:
+        previous_received_at: datetime | None = None
         try:
             if self._initial_pending == 0:
                 return
@@ -93,8 +107,13 @@ class ReplaySession:
                 if stream_sequence > self._end_sequence:
                     break
                 envelope = FrameEnvelope.from_message(message.data, message.headers)
+                if previous_received_at is not None:
+                    delay = (envelope.received_at - previous_received_at).total_seconds()
+                    if delay > 0:
+                        await asyncio.sleep(delay / self._speed)
+                previous_received_at = envelope.received_at
                 self.last_stream_sequence = stream_sequence
-                await self._on_frame(envelope)
+                await self._on_frame(RecordedFrame(stream_sequence, envelope))
                 if stream_sequence >= self._end_sequence or metadata.num_pending == 0:
                     break
         finally:
@@ -135,6 +154,8 @@ class FrameStore:
         client = await nats.connect(
             self.settings.url,
             connect_timeout=self.settings.connect_timeout_seconds,
+            max_reconnect_attempts=2,
+            reconnect_time_wait=0.25,
         )
         jetstream = client.jetstream(timeout=self.settings.publish_timeout_seconds)
         try:
@@ -176,8 +197,33 @@ class FrameStore:
             first_sequence=state.first_seq,
             last_sequence=state.last_seq,
             message_count=state.messages,
-            first_received_at=state.first_ts,
-            last_received_at=state.last_ts,
+            # nats-py versions before StreamState timestamp exposure still
+            # provide exact per-frame capture time through ``frame_at``.
+            first_received_at=getattr(state, "first_ts", None),
+            last_received_at=getattr(state, "last_ts", None),
+        )
+
+    async def frame_at(self, sequence: int) -> RecordedFrame:
+        """Reads one exact retained frame for seek timecodes without replaying a range."""
+
+        if sequence < 1:
+            raise ValueError("frame sequence must be positive")
+        jetstream = self._require_jetstream()
+        stream = await jetstream.stream_info(self.settings.stream_name)
+        if (
+            stream.state.messages == 0
+            or sequence < stream.state.first_seq
+            or sequence > stream.state.last_seq
+        ):
+            raise ValueError("requested frame is outside retained stream sequences")
+        try:
+            message = await jetstream.get_msg(self.settings.stream_name, seq=sequence)
+        except NotFoundError as error:
+            raise ValueError("requested frame is not retained") from error
+        headers = getattr(message, "headers", None) or getattr(message, "header", None)
+        return RecordedFrame(
+            stream_sequence=sequence,
+            envelope=FrameEnvelope.from_message(message.data, headers),
         )
 
     async def replay(
@@ -187,11 +233,14 @@ class FrameStore:
         end_sequence: int,
         on_frame: FrameHandler,
         channel: str | None = None,
+        speed: float = 1.0,
     ) -> ReplaySession:
         if start_sequence < 1:
             raise ValueError("replay start sequence must be positive")
         if end_sequence < start_sequence:
             raise ValueError("replay end sequence must be >= start sequence")
+        if not 0.25 <= speed <= 64:
+            raise ValueError("replay speed must be between 0.25 and 64")
         jetstream = self._require_jetstream()
         stream = await jetstream.stream_info(self.settings.stream_name)
         if stream.state.messages == 0:
@@ -211,7 +260,10 @@ class FrameStore:
                 deliver_policy=DeliverPolicy.BY_START_SEQUENCE,
                 opt_start_seq=start_sequence,
                 ack_policy=AckPolicy.NONE,
-                replay_policy=ReplayPolicy.ORIGINAL,
+                # Application pacing uses the immutable capture timestamps so the
+                # same sequence can be replayed at 0.25x..64x without buffering it
+                # in the browser. Delivery itself remains strictly ordered.
+                replay_policy=ReplayPolicy.INSTANT,
                 flow_control=True,
                 idle_heartbeat=5.0,
             ),
@@ -224,6 +276,7 @@ class FrameStore:
             consumer_name=consumer.name,
             end_sequence=end_sequence,
             initial_pending=consumer.num_pending or 0,
+            speed=speed,
             on_frame=on_frame,
             on_closed=self._sessions.discard,
         )

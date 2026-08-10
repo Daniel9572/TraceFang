@@ -20,6 +20,7 @@ from market_analysis.infrastructure.jetstream import (
     FrameEnvelope,
     FrameStore,
     JetStreamSettings,
+    RecordedFrame,
 )
 
 
@@ -96,6 +97,7 @@ class FakeJetStream:
         self.deleted = []
         self.created_config = None
         self.stream_state = SimpleNamespace(messages=5, first_seq=1, last_seq=5)
+        self.stored_messages = {}
 
     async def publish(self, subject, payload, **options):
         self.publish_call = (subject, payload, options)
@@ -118,6 +120,13 @@ class FakeJetStream:
     async def delete_consumer(self, stream, consumer) -> bool:
         self.deleted.append((stream, consumer))
         return True
+
+    async def get_msg(self, stream, *, seq):
+        try:
+            value = self.stored_messages[seq]
+        except KeyError as error:
+            raise NotFoundError from error
+        return SimpleNamespace(data=value.body, header=value.headers())
 
     async def add_stream(self, *, config) -> None:
         self.created_config = config
@@ -213,7 +222,7 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.discard, DiscardPolicy.NEW)
         self.assertEqual(config.subjects, ["market.raw.>"])
 
-    async def test_replay_uses_original_server_timing_and_finite_sequence_range(self) -> None:
+    async def test_replay_uses_capture_timing_and_finite_sequence_range(self) -> None:
         messages = (
             FakeMessage(2, envelope(2), pending=2),
             FakeMessage(3, envelope(3), pending=1),
@@ -224,7 +233,7 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
         store = connected_store(jetstream)
         received = []
 
-        async def accept(value: FrameEnvelope) -> None:
+        async def accept(value: RecordedFrame) -> None:
             received.append(value)
 
         session = await store.replay(
@@ -235,7 +244,8 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.wait_for(session.wait(), timeout=1)
 
-        self.assertEqual([value.sequence for value in received], [2, 3])
+        self.assertEqual([value.stream_sequence for value in received], [2, 3])
+        self.assertEqual([value.envelope.sequence for value in received], [2, 3])
         self.assertEqual(session.last_stream_sequence, 3)
         subject, options = jetstream.subscribe_call
         self.assertEqual(subject, "market.raw.jin10_web")
@@ -243,7 +253,7 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.deliver_policy, DeliverPolicy.BY_START_SEQUENCE)
         self.assertEqual(config.opt_start_seq, 2)
         self.assertEqual(config.ack_policy, AckPolicy.NONE)
-        self.assertEqual(config.replay_policy, ReplayPolicy.ORIGINAL)
+        self.assertEqual(config.replay_policy, ReplayPolicy.INSTANT)
         self.assertTrue(subscription.unsubscribed)
         self.assertEqual(
             jetstream.deleted,
@@ -255,7 +265,7 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
         jetstream = FakeJetStream(subscription)
         store = connected_store(jetstream)
 
-        async def accept(value: FrameEnvelope) -> None:
+        async def accept(value: RecordedFrame) -> None:
             self.fail(f"unexpected replay frame: {value}")
 
         session = await store.replay(
@@ -270,6 +280,16 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
             jetstream.deleted,
             [("MARKET_RAW_FRAMES", "ephemeral-replay")],
         )
+
+    async def test_reads_exact_frame_for_seek_timecode(self) -> None:
+        jetstream = FakeJetStream()
+        jetstream.stored_messages[3] = envelope(3)
+        store = connected_store(jetstream)
+
+        recorded = await store.frame_at(3)
+
+        self.assertEqual(recorded.stream_sequence, 3)
+        self.assertEqual(recorded.envelope, envelope(3))
 
 
 if __name__ == "__main__":

@@ -456,7 +456,7 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(reader.requested_counts), 1)
         self.assertLessEqual(max(reader.requested_counts), 10_000)
 
-    async def test_derived_period_is_materialized_once_and_reused(self) -> None:
+    async def test_derived_period_get_is_read_only(self) -> None:
         start = datetime(2025, 1, 1, tzinfo=UTC)
         rows = tuple(
             bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
@@ -484,9 +484,11 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first, second)
         self.assertGreater(cold_read_calls, 0)
-        self.assertEqual(len(reader.calls), cold_read_calls)
+        self.assertGreater(len(reader.calls), cold_read_calls)
+        self.assertFalse(store.states)
+        self.assertFalse(store.values)
 
-    async def test_minute_revision_recomputes_only_its_materialized_bucket(self) -> None:
+    async def test_derived_period_get_reflects_a_minute_revision_without_writing(self) -> None:
         start = datetime(2025, 1, 1, tzinfo=UTC)
         rows = tuple(
             bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
@@ -509,7 +511,6 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
             revision=2,
         )
         reader.replace(revised)
-        store.record_change(revised.open_time)
 
         page = await service.get_page(
             INSTRUMENT,
@@ -520,53 +521,12 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         revision_calls = reader.calls[calls_before_revision:]
-        self.assertEqual(len(revision_calls), 1)
-        self.assertLessEqual(revision_calls[0][1], 241)
+        self.assertGreater(len(revision_calls), 0)
         self.assertEqual(page.items[-1].high, Decimal("99999"))
+        self.assertFalse(store.states)
+        self.assertFalse(store.values)
 
-    async def test_orphan_materialized_rows_rebuild_their_coverage_cursor(self) -> None:
-        start = datetime(2025, 1, 1, tzinfo=UTC)
-        rows = tuple(
-            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
-            for index in range(1_440)
-        )
-        reader = _TrackedMinuteReader(rows)
-        store = _MaterializedPeriodStore()
-        first_service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
-        expected = await first_service.get_page(
-            INSTRUMENT,
-            source_id="tonghuashun_futures",
-            period_id="4h",
-            schedule=None,
-            page_size=3,
-        )
-        store.states.clear()
-        calls_before_recovery = len(reader.calls)
-        recovered_service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
-
-        recovered = await recovered_service.get_page(
-            INSTRUMENT,
-            source_id="tonghuashun_futures",
-            period_id="4h",
-            schedule=None,
-            page_size=3,
-        )
-        recovery_calls = len(reader.calls)
-        repeated = await recovered_service.get_page(
-            INSTRUMENT,
-            source_id="tonghuashun_futures",
-            period_id="4h",
-            schedule=None,
-            page_size=3,
-        )
-
-        self.assertEqual(recovered, expected)
-        self.assertEqual(repeated, expected)
-        self.assertGreater(recovery_calls, calls_before_recovery)
-        self.assertEqual(len(reader.calls), recovery_calls)
-        self.assertTrue(store.states)
-
-    async def test_unchanged_provisional_tail_is_not_recomputed_on_every_read(self) -> None:
+    async def test_provisional_tail_read_does_not_create_materialized_state(self) -> None:
         start = datetime(2025, 1, 1, tzinfo=UTC)
         rows = tuple(
             bar(
@@ -598,9 +558,11 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first.items[0].state, BarState.PROVISIONAL_AUTHORITATIVE)
         self.assertEqual(first, second)
-        self.assertEqual(len(reader.calls), cold_read_calls)
+        self.assertGreater(len(reader.calls), cold_read_calls)
+        self.assertFalse(store.states)
+        self.assertFalse(store.values)
 
-    async def test_materialized_daily_pages_match_one_shot_session_projection(self) -> None:
+    async def test_daily_read_pages_match_one_shot_session_projection(self) -> None:
         rows = tuple(
             bar(at, value)
             for at, value in (
@@ -643,7 +605,7 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((*older.items, *latest.items), expected)
         self.assertFalse(older.has_more)
 
-    async def test_materialized_history_continues_beyond_twenty_thousand_minutes(
+    async def test_read_only_history_continues_beyond_twenty_thousand_minutes(
         self,
     ) -> None:
         start = datetime(2025, 1, 1, tzinfo=UTC)
@@ -676,7 +638,9 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         self.assertGreater(cold_read_calls, 2)
         self.assertLessEqual(max(count for _, count in reader.calls), 10_000)
-        self.assertEqual(len(reader.calls), cold_read_calls)
+        self.assertGreater(len(reader.calls), cold_read_calls)
+        self.assertFalse(store.states)
+        self.assertFalse(store.values)
 
 
 if __name__ == "__main__":

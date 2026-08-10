@@ -526,110 +526,16 @@ class PeriodBarService:
             raise ValueError("page_size must be positive")
         if before is not None and (before.tzinfo is None or before.utcoffset() is None):
             raise ValueError("before must be timezone-aware")
-        if self._store is None or period_id in {"timeline", "1s", "1m"}:
-            return await self._get_unmaterialized_page(
-                instrument,
-                source_id=source_id,
-                period_id=period_id,
-                schedule=schedule,
-                before=before,
-                page_size=page_size,
-            )
-
-        version = _materialization_version(schedule)
-        lock_key = (source_id, instrument, period_id, version)
-        lock = self._locks.setdefault(lock_key, asyncio.Lock())
-        async with lock:
-            state = (
-                await self._store.load_period_bar_materialization(
-                    instrument,
-                    source_id=source_id,
-                    period_id=period_id,
-                    materialization_version=version,
-                )
-                or PeriodBarMaterializationState()
-            )
-            target_mutation_id = await self._store.latest_realtime_bar_mutation_id(
-                instrument,
-                source_id=source_id,
-            )
-            state = await self._refresh_changed_buckets(
-                instrument,
-                source_id=source_id,
-                period_id=period_id,
-                schedule=schedule,
-                materialization_version=version,
-                state=state,
-                target_mutation_id=target_mutation_id,
-            )
-            await self._store.save_period_bar_materialization(
-                instrument,
-                source_id=source_id,
-                period_id=period_id,
-                materialization_version=version,
-                state=state,
-            )
-            requested_count = page_size + 1
-            if state.oldest_bucket_open_time is None and not state.history_exhausted:
-                # A crash may persist a derived chunk before its coverage cursor.
-                # Rebuild that first chunk so orphan rows never become trusted state.
-                values: tuple[RealtimeBar, ...] = ()
-            else:
-                values = await self._store.load_materialized_period_bars_before(
-                    instrument,
-                    source_id=source_id,
-                    period_id=period_id,
-                    materialization_version=version,
-                    before=before,
-                    count=requested_count,
-                )
-            while len(values) < requested_count and not state.history_exhausted:
-                prior_progress = (
-                    state.source_cursor,
-                    state.oldest_bucket_open_time,
-                    state.history_exhausted,
-                )
-                state = await self._materialize_next_history_chunk(
-                    instrument,
-                    source_id=source_id,
-                    period_id=period_id,
-                    schedule=schedule,
-                    materialization_version=version,
-                    state=state,
-                    remaining_bars=requested_count - len(values),
-                )
-                await self._store.save_period_bar_materialization(
-                    instrument,
-                    source_id=source_id,
-                    period_id=period_id,
-                    materialization_version=version,
-                    state=state,
-                )
-                progress = (
-                    state.source_cursor,
-                    state.oldest_bucket_open_time,
-                    state.history_exhausted,
-                )
-                if progress == prior_progress:
-                    raise RuntimeError("period Bar materialization cursor did not advance")
-                values = await self._store.load_materialized_period_bars_before(
-                    instrument,
-                    source_id=source_id,
-                    period_id=period_id,
-                    materialization_version=version,
-                    before=before,
-                    count=requested_count,
-                )
-
-        items = values[-page_size:]
-        oldest_component = (
-            _payload_time(items[0], "bucket_first_open_time", items[0].open_time) if items else None
-        )
-        return PeriodBarPage(
+        # Query endpoints are deliberately read-only. Expensive precomputation, if
+        # introduced later, belongs to an explicit background command and must not
+        # be triggered by an HTTP GET.
+        return await self._get_unmaterialized_page(
+            instrument,
+            source_id=source_id,
             period_id=period_id,
-            items=items,
-            next_before=oldest_component,
-            has_more=len(values) > page_size,
+            schedule=schedule,
+            before=before,
+            page_size=page_size,
         )
 
     async def _refresh_changed_buckets(

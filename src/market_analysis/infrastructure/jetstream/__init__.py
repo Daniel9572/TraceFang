@@ -4,6 +4,7 @@ from market_analysis.infrastructure.jetstream.sink import JetStreamRawFrameSink
 from market_analysis.infrastructure.jetstream.store import (
     FrameStore,
     FrameStreamBounds,
+    RecordedFrame,
     ReplaySession,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "FrameStreamBounds",
     "JetStreamRawFrameSink",
     "JetStreamSettings",
+    "RecordedFrame",
     "ReplaySession",
 ]

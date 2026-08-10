@@ -166,6 +166,29 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await coordinator.close()
 
+    async def test_slow_subscriber_receives_explicit_gap_instead_of_silent_drop(self) -> None:
+        async def load(_instrument, source):
+            return view(source)
+
+        coordinator = QuoteStreamCoordinator(load_quote=load)
+        try:
+            async with coordinator.subscribe(SPOT_GOLD, source="jin10_web") as queue:
+                await asyncio.wait_for(queue.get(), 1)
+                await asyncio.wait_for(queue.get(), 1)
+                for index in range(513):
+                    coordinator.publish(view("jin10_web", f"{4243 + index}.10"))
+
+                gap = await asyncio.wait_for(queue.get(), 1)
+                latest = await asyncio.wait_for(queue.get(), 1)
+
+                self.assertEqual(gap.kind, "gap")
+                self.assertEqual(gap.gap_from_sequence, 1)
+                self.assertEqual(gap.gap_to_sequence, 512)
+                self.assertEqual(latest.delivery_sequence, 513)
+                self.assertEqual(latest.quote.quote.last, Decimal("4755.10"))
+        finally:
+            await coordinator.close()
+
     async def test_raw_sample_is_delivered_separately_from_latest_quote_view(self) -> None:
         async def load(_instrument, source):
             return view(source)

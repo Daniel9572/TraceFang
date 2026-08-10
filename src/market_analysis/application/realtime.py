@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -28,6 +28,9 @@ class QuoteStreamEvent:
     sample: QuoteSample | None = None
     bar: RealtimeBar | None = None
     error: str | None = None
+    delivery_sequence: int | None = None
+    gap_from_sequence: int | None = None
+    gap_to_sequence: int | None = None
 
 
 LoadQuote = Callable[[Instrument, str], Awaitable[QuoteView]]
@@ -41,6 +44,7 @@ class _Pump:
     period: str
     subscribers: set[asyncio.Queue[QuoteStreamEvent]]
     latest: QuoteStreamEvent | None = None
+    next_sequence: int = 0
 
 
 class QuoteStreamCoordinator:
@@ -122,7 +126,6 @@ class QuoteStreamCoordinator:
                 period_id=pump.period,
                 quote=view,
             )
-            pump.latest = event
             self._broadcast(pump, event)
 
     def publish_sample(self, sample: QuoteSample) -> None:
@@ -166,7 +169,6 @@ class QuoteStreamCoordinator:
                 period_id=pump.period,
                 error=self._safe_error(error),
             )
-            pump.latest = event
             self._broadcast(pump, event)
 
     async def _seed_from_local_cache(
@@ -198,11 +200,34 @@ class QuoteStreamCoordinator:
                 queue.put_nowait(event)
 
     @staticmethod
-    def _broadcast(pump: _Pump, event: QuoteStreamEvent) -> None:
+    def _broadcast(pump: _Pump, event: QuoteStreamEvent) -> QuoteStreamEvent:
+        pump.next_sequence += 1
+        delivered = replace(event, delivery_sequence=pump.next_sequence)
+        if delivered.kind in {"quote", "status"}:
+            pump.latest = delivered
         for queue in tuple(pump.subscribers):
             if queue.full():
-                queue.get_nowait()
-            queue.put_nowait(event)
+                dropped: list[QuoteStreamEvent] = []
+                while not queue.empty():
+                    dropped.append(queue.get_nowait())
+                sequences = [
+                    item.delivery_sequence
+                    for item in dropped
+                    if item.delivery_sequence is not None
+                ]
+                fallback = max(1, delivered.delivery_sequence - 1)
+                queue.put_nowait(
+                    QuoteStreamEvent(
+                        kind="gap",
+                        state=delivered.state,
+                        emitted_at=datetime.now(UTC),
+                        period_id=delivered.period_id,
+                        gap_from_sequence=min(sequences, default=fallback),
+                        gap_to_sequence=max(sequences, default=fallback),
+                    )
+                )
+            queue.put_nowait(delivered)
+        return delivered
 
     def _matching_pumps(self, source: str, instrument: Instrument) -> tuple[_Pump, ...]:
         return tuple(
