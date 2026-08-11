@@ -12,6 +12,7 @@ import {
   EXPERT_STRATEGIES,
   runExpertBacktest,
 } from "../src/expertAnalysis.ts";
+import { deriveKdjDullingSnapshot } from "../src/expertKdj.ts";
 import type { Candle } from "../src/types.ts";
 
 function candle(index: number, close: number, volume: number | null = 100 + index): Candle {
@@ -237,6 +238,66 @@ test("does not promote partial MA or one-horizon momentum history into direction
   assert.ok((completeMomentum?.confidence ?? 0) > 0);
 });
 
+test("treats persistent stochastic extremes as dulling context instead of a reversal", () => {
+  const high = deriveKdjDullingSnapshot([
+    { k: 82, d: 81, j: 84 },
+    { k: 85, d: 83, j: 89 },
+    { k: 88, d: 86, j: 92 },
+  ]);
+  const low = deriveKdjDullingSnapshot([
+    { k: 18, d: 19, j: 16 },
+    { k: 15, d: 17, j: 11 },
+    { k: 12, d: 14, j: 8 },
+  ]);
+
+  assert.deepEqual(high, {
+    zone: "high",
+    dulling: "high-dulling",
+    streak: 3,
+    cross: "none",
+    scoreEligible: false,
+  });
+  assert.deepEqual(low, {
+    zone: "low",
+    dulling: "low-dulling",
+    streak: 3,
+    cross: "none",
+    scoreEligible: false,
+  });
+  assert.equal("direction" in high, false);
+  assert.equal("direction" in low, false);
+});
+
+test("confirms stochastic release only after leaving a persistent extreme with a reverse cross", () => {
+  const highRelease = deriveKdjDullingSnapshot([
+    { k: 82, d: 81, j: 84 },
+    { k: 85, d: 83, j: 89 },
+    { k: 88, d: 86, j: 92 },
+    { k: 78, d: 82, j: 70 },
+  ]);
+  const lowRelease = deriveKdjDullingSnapshot([
+    { k: 18, d: 19, j: 16 },
+    { k: 15, d: 17, j: 11 },
+    { k: 12, d: 14, j: 8 },
+    { k: 22, d: 18, j: 30 },
+  ]);
+
+  assert.deepEqual(highRelease, {
+    zone: "middle",
+    dulling: "high-releasing",
+    streak: 0,
+    cross: "bearish",
+    scoreEligible: true,
+  });
+  assert.deepEqual(lowRelease, {
+    zone: "middle",
+    dulling: "low-releasing",
+    streak: 0,
+    cross: "bullish",
+    scoreEligible: true,
+  });
+});
+
 test("emits nine-count exhaustion only on the exact ninth setup bar", () => {
   const completed = Array.from({ length: 13 }, (_, index) => candle(index, 2400 + index));
   const completedSignal = buildExpertAnalysis(completed, ["nine-count"]).signals[0];
@@ -245,11 +306,23 @@ test("emits nine-count exhaustion only on the exact ninth setup bar", () => {
     ["nine-count"],
   ).signals[0];
 
-  assert.equal(completedSignal?.direction, "bearish");
-  assert.ok((completedSignal?.confidence ?? 0) > 0);
+  assert.equal(completedSignal?.direction, "neutral");
+  assert.equal(completedSignal?.confidence, 0);
   assert.equal(extendedSignal?.direction, "neutral");
   assert.equal(extendedSignal?.confidence, 0);
   assert.match(extendedSignal?.detail ?? "", /更早的 Bar 完成/);
+
+  const completionIndexes = Array.from({ length: 16 }, (_, lastIndex) => {
+    if (lastIndex < 4) return null;
+    const prefix = Array.from(
+      { length: lastIndex + 1 },
+      (_, index) => candle(index, 2400 + index),
+    );
+    return buildExpertAnalysis(prefix, ["nine-count"]).indicators.nineCount?.completedNow === true
+      ? lastIndex
+      : null;
+  }).filter((index): index is number => index !== null);
+  assert.deepEqual(completionIndexes, [12]);
 });
 
 test("keeps confirmed strategy signals unchanged while the tail Bar is provisional", () => {

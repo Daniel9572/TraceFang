@@ -16,6 +16,7 @@ import {
   movingAverageSnapshotAt,
   nineCountSnapshotAt,
 } from "./expertTechnical.ts";
+import { deriveKdjDullingSnapshot } from "./expertKdj.ts";
 import { priceStructureSnapshotAt } from "./expertPricePatterns.ts";
 import {
   createWilderRsiRuntime,
@@ -687,18 +688,55 @@ function evaluateExpertStrategiesAt(
     k: kdjSeries.k[lastIndex],
     d: kdjSeries.d[lastIndex],
     j: kdjSeries.j[lastIndex],
+    ...deriveKdjDullingSnapshot(Array.from(
+      { length: lastIndex + 1 },
+      (_, index) => ({
+        k: kdjSeries.k[index],
+        d: kdjSeries.d[index],
+        j: kdjSeries.j[index],
+      }),
+    )),
   } : null;
   if (enabled.has("kdj") && kdjSnapshot) {
-    const direction = kdjSnapshot.k > kdjSnapshot.d ? "bullish" : "bearish";
-    const extreme = kdjSnapshot.j >= 100 ? "，处于高位" : kdjSnapshot.j <= 0 ? "，处于低位" : "";
+    const releasing = kdjSnapshot.dulling === "high-releasing"
+      || kdjSnapshot.dulling === "low-releasing";
+    const direction = !kdjSnapshot.scoreEligible
+      ? "neutral" as const
+      : kdjSnapshot.dulling === "high-releasing"
+        ? "bearish" as const
+        : kdjSnapshot.dulling === "low-releasing"
+          ? "bullish" as const
+          : kdjSnapshot.k > kdjSnapshot.d
+            ? "bullish" as const
+            : kdjSnapshot.k < kdjSnapshot.d ? "bearish" as const : "neutral" as const;
+    const title = kdjSnapshot.dulling === "high-dulling"
+      ? `KDJ 高位钝化 · ${kdjSnapshot.streak} 根`
+      : kdjSnapshot.dulling === "low-dulling"
+        ? `KDJ 低位钝化 · ${kdjSnapshot.streak} 根`
+        : kdjSnapshot.dulling === "high-entering"
+          ? "KDJ 进入高位区"
+          : kdjSnapshot.dulling === "low-entering"
+            ? "KDJ 进入低位区"
+            : kdjSnapshot.dulling === "high-releasing"
+              ? "KDJ 高位钝化释放候选"
+              : kdjSnapshot.dulling === "low-releasing"
+                ? "KDJ 低位钝化释放候选"
+                : direction === "bullish" ? "KDJ 多方占优" : direction === "bearish" ? "KDJ 空方占优" : "KDJ 中性";
     signals.push(createSignal(
       "kdj",
-      direction === "bullish" ? "KDJ 多方占优" : "KDJ 空方占优",
-      `K ${kdjSnapshot.k.toFixed(1)} / D ${kdjSnapshot.d.toFixed(1)} / J ${kdjSnapshot.j.toFixed(1)}${extreme}`,
+      title,
+      `K ${kdjSnapshot.k.toFixed(1)} / D ${kdjSnapshot.d.toFixed(1)} / J ${kdjSnapshot.j.toFixed(1)}`,
       direction,
-      kdjSnapshot.j > 110 || kdjSnapshot.j < -10 ? 0.63 : 0.58,
+      kdjSnapshot.scoreEligible ? (releasing ? 0.52 : 0.56) : 0,
       latest.time,
-      [extreme ? "极值区信号需防反转" : "摆动区间正常"],
+      [
+        !kdjSnapshot.scoreEligible
+          ? "K/D 同处极值区时只标记趋势持续风险，不产生逆势观点"
+          : releasing
+            ? "离开极值区并发生反向 K/D 交叉；仍需价格结构或均线确认"
+            : "摆动区间正常；K/D 交叉仅作方向确认",
+        "J 越过 0/100 只表示摆动放大，不单独构成反转依据",
+      ],
     ));
   }
 
@@ -762,23 +800,20 @@ function evaluateExpertStrategiesAt(
   }
 
   if (enabled.has("nine-count")) {
-    const direction = nineCount?.completedNow === true
-      ? nineCount.direction === "sell-setup" ? "bearish" as const : "bullish" as const
-      : "neutral" as const;
     signals.push(createSignal(
       "nine-count",
       nineCount === null || nineCount.count === 0
         ? "九转 Setup 尚未计数"
-        : `${nineCount.direction === "sell-setup" ? "上涨" : "下跌"} Setup ${nineCount.count}/9`,
+        : `${nineCount.direction === "sell-setup" ? "上涨" : "下跌"}节奏 Setup ${nineCount.count}/9`,
       nineCount?.completedNow === true
-        ? `${nineCount.perfected ? "已满足 Perfected 条件" : "尚未满足 Perfected 条件"}；等待结构确认`
+        ? `${nineCount.perfected ? "已满足 Perfected 条件" : "尚未满足 Perfected 条件"}；节奏可能延伸，等待结构确认`
         : nineCount?.count === 9
           ? "Setup 9 已在更早的 Bar 完成；等待价格翻转后重新计数"
         : "每根收盘价与四根之前比较；方向改变即重置",
-      direction,
-      nineCount?.completedNow === true ? 0.35 : 0,
+      "neutral",
+      0,
       latest.time,
-      ["这里只实现 1–9 Setup，不冒充包含 13 Countdown 的完整 Sequential", "实验性耗竭提醒不计入综合方向分"],
+      ["这里只实现 1–9 Setup，不冒充包含 13 Countdown 的完整 Sequential", "只提示节奏与潜在延伸风险，不是反转依据，也不计入综合方向分"],
     ));
   }
 

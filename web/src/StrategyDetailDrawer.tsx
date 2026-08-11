@@ -15,6 +15,7 @@ const ROLE_LABELS: Record<ExpertStrategyDetails["role"], string> = {
   direction: "方向",
   confirmation: "确认",
   exhaustion: "耗竭",
+  rhythm: "节奏",
   structure: "结构",
   "risk-context": "风险背景",
 };

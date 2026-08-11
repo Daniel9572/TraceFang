@@ -64,6 +64,23 @@ test("keeps visual, proxy, and context-only strategies out of directional scorin
   assert.ok(DEFAULT_EXPERT_STRATEGIES.includes("auto-trend"));
 });
 
+test("catalogs nine-count as Setup rhythm only, never as a complete Sequential trade", () => {
+  const strategy = strategyById("nine-count");
+  const dossier = [
+    strategy.description,
+    strategy.details.principle,
+    ...strategy.details.signalRules,
+    ...strategy.details.boundaryConditions,
+    ...strategy.details.invalidation,
+  ].join(" ");
+
+  assert.equal(strategy.details.compositeEligible, false);
+  assert.equal(strategy.details.backtestEligible, false);
+  assert.match(dossier, /Setup|1.?9/);
+  assert.match(dossier, /不.*完整|仅.*Setup|不包含.*Countdown/);
+  assert.doesNotMatch(dossier, /反转概率|保证反转|买入信号|卖出信号/);
+});
+
 test("documents opportunity and proxy boundaries without overstating causality", () => {
   const multiTimeframe = strategyById("multi-timeframe");
   const smartMoney = strategyById("smart-money");

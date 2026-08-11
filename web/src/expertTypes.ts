@@ -406,7 +406,7 @@ export interface ExpertStrategyReference {
 }
 
 export interface ExpertStrategyDetails {
-  role: "direction" | "confirmation" | "exhaustion" | "structure" | "risk-context";
+  role: "direction" | "confirmation" | "exhaustion" | "rhythm" | "structure" | "risk-context";
   horizon: string;
   principle: string;
   formula: string[];
@@ -444,9 +444,24 @@ export interface ExpertSignal {
   evidence: string[];
 }
 
+export interface ExpertKdjDullingSnapshot {
+  zone: "low" | "middle" | "high";
+  dulling:
+    | "normal"
+    | "high-entering"
+    | "high-dulling"
+    | "high-releasing"
+    | "low-entering"
+    | "low-dulling"
+    | "low-releasing";
+  streak: number;
+  cross: "bullish" | "bearish" | "none";
+  scoreEligible: boolean;
+}
+
 export interface ExpertIndicatorSnapshot {
   macd: { value: number; signal: number; histogram: number } | null;
-  kdj: { k: number; d: number; j: number } | null;
+  kdj: ({ k: number; d: number; j: number } & ExpertKdjDullingSnapshot) | null;
   rsi: {
     period: number;
     value: number;
