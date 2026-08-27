@@ -8,6 +8,7 @@ import {
   classifyCandleSeriesMutation,
   formatBarCountdown,
   upsertRealtimeBar,
+  upsertRealtimeBarBatch,
 } from "../src/chartModel.ts";
 import { chartPeriodById, secondsUntilPeriodClose } from "../src/chartPeriods.ts";
 import type { Candle } from "../src/types.ts";
@@ -90,6 +91,22 @@ test("appends only a newer complete Bar and classifies it for chart update", () 
 
   assert.deepEqual(next, [current, incoming]);
   assert.equal(classifyCandleSeriesMutation(previous, next), "tail-append");
+});
+
+test("applies a coalesced realtime batch with one immutable history copy", () => {
+  const first = candle("2026-08-06T01:46:00Z", 99, 101, 98, 100);
+  const current = candle("2026-08-06T01:47:00Z", 100, 102, 99, 101);
+  const revision = { ...current, close: 103, revision: 2 };
+  const finalRevision = { ...revision, high: 104, close: 102, revision: 3 };
+  const nextBar = candle("2026-08-06T01:48:00Z", 102, 103, 101, 102.5);
+
+  const result = upsertRealtimeBarBatch(
+    [first, current],
+    [revision, finalRevision, nextBar],
+  );
+
+  assert.deepEqual(result, [first, finalRevision, nextBar]);
+  assert.equal(result[0], first);
 });
 
 test("ignores older timestamps and stale revisions on the realtime path", () => {

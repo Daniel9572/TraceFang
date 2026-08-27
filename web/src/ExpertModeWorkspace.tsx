@@ -12,11 +12,11 @@ import {
   Magnet,
   Minus,
   MousePointer2,
-  Pause,
   Play,
   Radio,
   RotateCcw,
   Sparkles,
+  Square,
   Trash2,
   TrendingUp,
   Undo2,
@@ -43,7 +43,14 @@ import {
   candlePrefixRevisionKey,
   latestFinalCandleIndex,
 } from "./expertTechnical";
-import { completedReplayHistory, formatReplayTimecode } from "./expertReplay";
+import {
+  createReplayProjectionStart,
+  formatReplayTimecode,
+  REPLAY_DERIVED_DOMAIN_NOTICE,
+  REPLAY_RATE_LABEL,
+  replaySafeLiveDerivedValue,
+  type ReplayProjectionState,
+} from "./expertReplay";
 import { ChartLayerManager } from "./ChartLayerManager";
 import {
   buildExpertOptionStrikeRows,
@@ -417,23 +424,20 @@ export function ExpertModeWorkspace({
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const replaySocketRef = useRef<WebSocket | null>(null);
-  const replayNextSequenceRef = useRef<number | null>(null);
   const [replayBounds, setReplayBounds] = useState<ReplayFrameBounds | null>(null);
   const [replayCursor, setReplayCursor] = useState<number | null>(null);
   const [replayCursorFrame, setReplayCursorFrame] = useState<ReplayFrameCursor | null>(null);
-  const [replayState, setReplayState] = useState<"live" | "paused" | "playing" | "completed">("live");
+  const [replayState, setReplayState] = useState<ReplayProjectionState>("live");
   const [replayCandles, setReplayCandles] = useState<Candle[]>([]);
   const [replayPrice, setReplayPrice] = useState<number | null>(null);
-  const [replaySpeed, setReplaySpeed] = useState(1);
   const [replayError, setReplayError] = useState<string | null>(null);
   const [replayWarning, setReplayWarning] = useState<string | null>(null);
-  const [replayNeedsSeed, setReplayNeedsSeed] = useState(true);
   const replayActive = replayState !== "live";
-  const replaySupported = sourceId === "jin10_client";
+  const replaySupported = replayBounds?.source_ids.includes(sourceId) ?? false;
   const candles = replayActive ? replayCandles : liveCandles;
   const livePrice = replayActive ? replayPrice : currentLivePrice;
   const observedAt = replayActive
-    ? replayCursorFrame?.received_at ?? liveObservedAt
+    ? replayCursorFrame?.received_at ?? null
     : liveObservedAt;
   const replayCutoff = replayActive && replayCursorFrame
     ? Date.parse(replayCursorFrame.received_at) / 1_000
@@ -470,11 +474,9 @@ export function ExpertModeWorkspace({
         setReplayError(value.state === "unavailable" ? value.detail : null);
         if (value.state === "ready" && value.first_sequence !== null) {
           setReplayCursor((current) => {
-            const next = current === null
+            return current === null
               ? value.first_sequence
               : Math.min(value.last_sequence ?? current, Math.max(value.first_sequence!, current));
-            replayNextSequenceRef.current = next;
-            return next;
           });
         }
       })
@@ -495,12 +497,6 @@ export function ExpertModeWorkspace({
           if (controller.signal.aborted) return;
           setReplayCursorFrame(value);
           setReplayError(null);
-          if (replayActive && replayNeedsSeed) {
-            const cutoff = Date.parse(value.received_at) / 1_000;
-            setReplayCandles(completedReplayHistory(liveCandles, cutoff));
-            setReplayPrice(null);
-            setReplayNeedsSeed(false);
-          }
         })
         .catch((requestError) => {
           if (!controller.signal.aborted) {
@@ -512,7 +508,7 @@ export function ExpertModeWorkspace({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [liveCandles, replayActive, replayCursor, replayNeedsSeed, replayState]);
+  }, [replayCursor, replayState]);
 
   useEffect(() => () => closeReplaySocket(), [closeReplaySocket]);
 
@@ -521,46 +517,14 @@ export function ExpertModeWorkspace({
     setReplayState("live");
     setReplayCandles([]);
     setReplayPrice(null);
-    setReplayNeedsSeed(true);
     setReplayWarning(null);
-  }, [closeReplaySocket, code, periodId]);
+  }, [closeReplaySocket, code, periodId, sourceId]);
 
-  const pauseReplay = useCallback(() => {
+  const stopReplay = useCallback(() => {
     closeReplaySocket();
-    setReplayState("paused");
+    setReplayState("stopped");
+    setReplayWarning("回放已停止；再次播放将从留存首帧空状态重建");
   }, [closeReplaySocket]);
-
-  const seekReplayCursor = useCallback((requested: number) => {
-    if (
-      replayBounds?.state !== "ready"
-      || replayBounds.first_sequence === null
-      || replayBounds.last_sequence === null
-    ) return;
-    const next = Math.min(
-      replayBounds.last_sequence,
-      Math.max(replayBounds.first_sequence, Math.round(requested)),
-    );
-    closeReplaySocket();
-    replayNextSequenceRef.current = next;
-    setReplayCursor(next);
-    setReplayNeedsSeed(true);
-    setReplayWarning(null);
-    if (replayActive) setReplayState("paused");
-  }, [closeReplaySocket, replayActive, replayBounds]);
-
-  const seekReplayPointer = useCallback((clientX: number, element: HTMLInputElement) => {
-    if (
-      replayBounds?.state !== "ready"
-      || replayBounds.first_sequence === null
-      || replayBounds.last_sequence === null
-    ) return;
-    const rect = element.getBoundingClientRect();
-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width)));
-    seekReplayCursor(
-      replayBounds.first_sequence
-      + ratio * (replayBounds.last_sequence - replayBounds.first_sequence),
-    );
-  }, [replayBounds, seekReplayCursor]);
 
   const returnToLive = useCallback(() => {
     closeReplaySocket();
@@ -569,52 +533,36 @@ export function ExpertModeWorkspace({
     setReplayPrice(null);
     setReplayError(null);
     setReplayWarning(null);
-    setReplayNeedsSeed(true);
-    if (replayCursor !== null) replayNextSequenceRef.current = replayCursor;
-  }, [closeReplaySocket, replayCursor]);
+    if (replayBounds?.state === "ready") {
+      setReplayCursor(replayBounds.first_sequence);
+      setReplayCursorFrame(null);
+    }
+  }, [closeReplaySocket, replayBounds]);
 
   const startReplay = useCallback(async () => {
-    if (
-      replayBounds?.state !== "ready"
-      || replayBounds.last_sequence === null
-      || replayCursor === null
-    ) return;
-    let cursorFrame = replayCursorFrame?.sequence === replayCursor ? replayCursorFrame : null;
+    if (replayBounds?.state !== "ready") return;
     try {
       const latestBounds = await marketApi.replayFrameBounds();
-      if (latestBounds.state !== "ready" || latestBounds.last_sequence === null) {
+      const projection = createReplayProjectionStart(latestBounds, period.id);
+      if (projection === null) {
         throw new Error(latestBounds.detail ?? "真实行情回放暂不可用");
       }
-      setReplayBounds(latestBounds);
-      if (cursorFrame === null) cursorFrame = await marketApi.replayFrameCursor(replayCursor);
-      if (replayNeedsSeed || replayState === "live" || replayState === "completed") {
-        const cutoff = Date.parse(cursorFrame.received_at) / 1_000;
-        setReplayCandles(completedReplayHistory(liveCandles, cutoff));
-        setReplayPrice(null);
-        replayNextSequenceRef.current = replayCursor;
-        setReplayNeedsSeed(false);
-      }
-      const startSequence = replayNextSequenceRef.current ?? replayCursor;
-      if (startSequence > latestBounds.last_sequence) {
-        setReplayState("completed");
-        return;
-      }
       closeReplaySocket();
-      const socket = marketApi.openReplayStream(code, {
-        period: period.id,
-        startSequence,
-        endSequence: latestBounds.last_sequence,
-        speed: replaySpeed,
-      });
+      setReplayBounds(latestBounds);
+      setReplayCandles(projection.candles);
+      setReplayPrice(projection.price);
+      setReplayCursor(projection.startSequence);
+      setReplayCursorFrame(null);
+      const socket = marketApi.openReplayStream(code, projection);
       replaySocketRef.current = socket;
       setReplayState("playing");
       setReplayError(null);
       setReplayWarning(null);
+      let terminalStateReceived = false;
       socket.onmessage = (message) => {
         const event = JSON.parse(String(message.data)) as ReplayStreamEvent;
         if (event.kind === "frame" && event.stream_sequence !== undefined && event.frame_received_at) {
-          const sequence = event.stream_sequence ?? startSequence;
-          replayNextSequenceRef.current = sequence + 1;
+          const sequence = event.stream_sequence ?? projection.startSequence;
           setReplayCursor(sequence);
           setReplayCursorFrame({
             sequence,
@@ -630,33 +578,35 @@ export function ExpertModeWorkspace({
         } else if (event.kind === "decode_error") {
           setReplayWarning(event.error ?? "原始帧无法解码");
         } else if (event.kind === "status" && event.state === "completed") {
+          terminalStateReceived = true;
           setReplayState("completed");
         } else if (event.kind === "status" && event.state === "unavailable") {
+          terminalStateReceived = true;
           setReplayError(event.error ?? "真实行情回放不可用");
-          setReplayState("paused");
+          setReplayState("stopped");
         }
       };
-      socket.onerror = () => socket.close();
+      socket.onerror = () => {
+        setReplayError("原始帧回放连接中断");
+        socket.close();
+      };
       socket.onclose = () => {
         if (replaySocketRef.current !== socket) return;
         replaySocketRef.current = null;
-        setReplayState((current) => current === "playing" ? "paused" : current);
+        if (!terminalStateReceived) {
+          setReplayState("stopped");
+          setReplayWarning((current) => current ?? "回放已停止；再次播放将从留存首帧空状态重建");
+        }
       };
     } catch (requestError) {
       setReplayError(requestError instanceof Error ? requestError.message : String(requestError));
-      setReplayState("paused");
+      setReplayState("stopped");
     }
   }, [
     closeReplaySocket,
     code,
-    liveCandles,
     period.id,
     replayBounds,
-    replayCursor,
-    replayCursorFrame,
-    replayNeedsSeed,
-    replaySpeed,
-    replayState,
   ]);
 
   useEffect(() => {
@@ -709,7 +659,7 @@ export function ExpertModeWorkspace({
   }, []);
 
   useEffect(() => {
-    if (intelligenceTab !== "options" || !goldOptionsApplicable) return;
+    if (replayActive || intelligenceTab !== "options" || !goldOptionsApplicable) return;
     let disposed = false;
     let timer: number | null = null;
     const schedule = (seconds: number) => {
@@ -745,9 +695,10 @@ export function ExpertModeWorkspace({
       if (timer !== null) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [goldOptionsApplicable, intelligenceTab]);
+  }, [goldOptionsApplicable, intelligenceTab, replayActive]);
 
   useEffect(() => {
+    if (replayActive) return;
     if (!volatilityContextEnabled) {
       setVolatilityContext(null);
       setVolatilityContextError(null);
@@ -778,9 +729,10 @@ export function ExpertModeWorkspace({
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [volatilityContextEnabled]);
+  }, [replayActive, volatilityContextEnabled]);
 
   useEffect(() => {
+    if (replayActive) return;
     if (!multiTimeframeEnabled) {
       setMultiTimeframeContext(null);
       setMultiTimeframeError(null);
@@ -809,9 +761,10 @@ export function ExpertModeWorkspace({
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [code, multiTimeframeEnabled, realtimeBarStreamKey]);
+  }, [code, multiTimeframeEnabled, realtimeBarStreamKey, replayActive]);
 
   useEffect(() => {
+    if (replayActive) return;
     if (!positioningContextEnabled || positioningProduct === null) {
       setPositioningContext(null);
       setPositioningContextError(null);
@@ -842,7 +795,7 @@ export function ExpertModeWorkspace({
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [positioningContextEnabled, positioningProduct]);
+  }, [positioningContextEnabled, positioningProduct, replayActive]);
 
   const finalCandleIndex = useMemo(() => latestFinalCandleIndex(candles), [candles]);
   const firstEvidenceCandle = candles[0];
@@ -899,9 +852,21 @@ export function ExpertModeWorkspace({
     invalidated: analysis.pricePatterns.filter((pattern) => pattern.status === "invalidated").length
       + analysis.marketStructureEvents.filter((event) => event.status === "invalidated").length,
   }), [analysis.marketStructureEvents, analysis.pricePatterns]);
+  const displayedMultiTimeframeContext = replaySafeLiveDerivedValue(
+    replayState,
+    multiTimeframeContext,
+  );
+  const displayedVolatilityContext = replaySafeLiveDerivedValue(
+    replayState,
+    volatilityContext,
+  );
+  const displayedPositioningContext = replaySafeLiveDerivedValue(
+    replayState,
+    positioningContext,
+  );
   const timeframeOpportunity = useMemo(
-    () => multiTimeframeOpportunity(multiTimeframeContext),
-    [multiTimeframeContext],
+    () => multiTimeframeOpportunity(displayedMultiTimeframeContext),
+    [displayedMultiTimeframeContext],
   );
   const indicatorSeries = useMemo(
     () => replayActive
@@ -1002,16 +967,40 @@ export function ExpertModeWorkspace({
     low: Number(latestBar.low),
     close: Number(latestBar.close),
   } : null);
-  const priceTone = (change ?? 0) >= 0
+  const displayedReferencePrice = replayActive
+    ? finiteNumber(replayCandles[0]?.open)
+    : referencePrice;
+  const displayedChange = replayActive
+    ? livePrice !== null && displayedReferencePrice !== null
+      ? livePrice - displayedReferencePrice
+      : null
+    : change;
+  const displayedChangePercent = replayActive
+    ? displayedChange !== null && displayedReferencePrice !== null && displayedReferencePrice !== 0
+      ? displayedChange / displayedReferencePrice * 100
+      : null
+    : changePercent;
+  const priceTone = (displayedChange ?? 0) >= 0
     ? "is-up"
     : "is-down";
+  const displayedOptionsStatus = replaySafeLiveDerivedValue(replayState, optionsStatus);
+  const displayedOptionsError = replaySafeLiveDerivedValue(replayState, optionsError);
+  const displayedAiStatus = replaySafeLiveDerivedValue(replayState, aiStatus);
+  const displayedAiAnalysis = replaySafeLiveDerivedValue(replayState, aiAnalysis);
+  const displayedAiError = replaySafeLiveDerivedValue(replayState, aiError);
   const selectedOptionExpiry = useMemo(
-    () => resolveExpertOptionExpiry(optionsStatus?.expiries ?? [], selectedOptionExpiryKey),
-    [optionsStatus?.expiries, selectedOptionExpiryKey],
+    () => resolveExpertOptionExpiry(
+      displayedOptionsStatus?.expiries ?? [],
+      selectedOptionExpiryKey,
+    ),
+    [displayedOptionsStatus?.expiries, selectedOptionExpiryKey],
   );
   const optionStrikeRows = useMemo(
-    () => buildExpertOptionStrikeRows(optionsStatus?.contracts ?? [], selectedOptionExpiry),
-    [optionsStatus?.contracts, selectedOptionExpiry],
+    () => buildExpertOptionStrikeRows(
+      displayedOptionsStatus?.contracts ?? [],
+      selectedOptionExpiry,
+    ),
+    [displayedOptionsStatus?.contracts, selectedOptionExpiry],
   );
   const selectedOptionExpiryValue = selectedOptionExpiry === null
     ? ""
@@ -1025,7 +1014,8 @@ export function ExpertModeWorkspace({
       atmRow.offsetTop - (scroll.clientHeight - atmRow.clientHeight) / 2,
     );
   }, [selectedOptionExpiryValue]);
-  const aiReady = aiStatus?.state === "ready" && aiStatus.authenticated === true;
+  const aiReady = displayedAiStatus?.state === "ready"
+    && displayedAiStatus.authenticated === true;
 
   const toggleStrategy = (strategyId: ExpertStrategyId) => {
     setEnabledStrategies((current) => current.includes(strategyId)
@@ -1060,6 +1050,10 @@ export function ExpertModeWorkspace({
   };
 
   const requestAiAnalysis = useCallback(async () => {
+    if (replayActive) {
+      setAiError(REPLAY_DERIVED_DOMAIN_NOTICE);
+      return;
+    }
     setAiBusy(true);
     setAiError(null);
     try {
@@ -1075,7 +1069,7 @@ export function ExpertModeWorkspace({
     } finally {
       setAiBusy(false);
     }
-  }, [code, enabledStrategies, period.id, period.mode]);
+  }, [code, enabledStrategies, period.id, period.mode, replayActive]);
 
   const eventReferenceTime = replayCutoff ?? Date.now() / 1_000;
   const latestEvent = !importantEventsEnabled || eventReferenceTime === null
@@ -1158,7 +1152,7 @@ export function ExpertModeWorkspace({
         </div>
         <div className={`expert-live-quote ${priceTone}`}>
           <strong>{formatPrice(livePrice, priceDigits)}</strong>
-          <span>{formatSigned(change, priceDigits)} · {formatSigned(changePercent, 2, "%")}</span>
+          <span>{formatSigned(displayedChange, priceDigits)} · {formatSigned(displayedChangePercent, 2, "%")}</span>
         </div>
         <div className="expert-periods chart-toolbar">
           <PeriodToolbar
@@ -1185,8 +1179,14 @@ export function ExpertModeWorkspace({
         <div className="expert-feed-state">
           <span className={`expert-feed-dot is-${sourceState}`} />
           <div>
-            <strong>{replayActive ? (replayState === "playing" ? "回放中" : "回放暂停") : marketPhase === "closed" ? "休市" : "实时"}</strong>
-            <small>{replayActive ? `原始帧 · ${replaySpeed}×` : historyLoading ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small>
+            <strong>{replayActive
+              ? replayState === "playing"
+                ? "回放中"
+                : replayState === "completed"
+                  ? "回放完成"
+                  : "回放已停止"
+              : marketPhase === "closed" ? "休市" : "实时"}</strong>
+            <small>{replayActive ? REPLAY_RATE_LABEL : historyLoading ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small>
           </div>
         </div>
       </header>
@@ -1313,7 +1313,7 @@ export function ExpertModeWorkspace({
           realtimeBarStreamKey={realtimeBarStreamKey}
           period={period}
           livePrice={livePrice}
-          referencePrice={referencePrice}
+          referencePrice={displayedReferencePrice}
           timelineResolutionSeconds={timelineResolutionSeconds}
           priceDigits={priceDigits}
           marketPhase={marketPhase}
@@ -1510,10 +1510,12 @@ export function ExpertModeWorkspace({
                     <div><TrendingUp size={13} /><strong>周期张力</strong></div>
                     <span>1H · 1D · 1W</span>
                   </header>
-                  {multiTimeframeContext ? (
+                  {replayActive ? (
+                    <div className="expert-context-empty">{REPLAY_DERIVED_DOMAIN_NOTICE}</div>
+                  ) : displayedMultiTimeframeContext ? (
                     <>
                       <div className="expert-timeframe-ladder">
-                        {multiTimeframeContext.timeframes.map((item) => (
+                        {displayedMultiTimeframeContext.timeframes.map((item) => (
                           <article key={item.horizon} className={`is-${item.direction}`}>
                             <span>{item.horizon === "short" ? "短" : item.horizon === "medium" ? "中" : "长"}</span>
                             <div>
@@ -1536,8 +1538,8 @@ export function ExpertModeWorkspace({
                         </div>
                       ) : (
                         <div className="expert-context-empty">
-                          {multiTimeframeContext.comparison.incomparable_reasons.length > 0
-                            ? multiTimeframeContext.comparison.incomparable_reasons
+                          {displayedMultiTimeframeContext.comparison.incomparable_reasons.length > 0
+                            ? displayedMultiTimeframeContext.comparison.incomparable_reasons
                               .map((reason) => timeframeLimitationLabel(reason.split(":").slice(1).join(":")))
                               .join(" · ")
                             : "暂不可比较：三个周期均需至少 20 根在共同 as-of 前可用的已收盘 Bar。"}
@@ -1545,13 +1547,13 @@ export function ExpertModeWorkspace({
                       )}
                       <footer className="expert-context-source">
                         <span>同品种 · 同数据源 · 已收盘</span>
-                        <time dateTime={multiTimeframeContext.decision_as_of}>
-                          {formatOptionObservedAt(multiTimeframeContext.decision_as_of, displayTimeZone)}
+                        <time dateTime={displayedMultiTimeframeContext.decision_as_of}>
+                          {formatOptionObservedAt(displayedMultiTimeframeContext.decision_as_of, displayTimeZone)}
                         </time>
                       </footer>
                     </>
                   ) : <div className="expert-context-empty">{multiTimeframeError ?? "正在比较 1H / 1D / 1W 已收盘走势"}</div>}
-                  {multiTimeframeError && multiTimeframeContext ? <small className="expert-context-warning">刷新失败，保留上一份快照：{multiTimeframeError}</small> : null}
+                  {!replayActive && multiTimeframeError && displayedMultiTimeframeContext ? <small className="expert-context-warning">刷新失败，保留上一份快照：{multiTimeframeError}</small> : null}
                   <p>周期差异只定位相对优势观察窗；必须等待短周期结构或 RSI 确认，不输出胜率或保证入场。</p>
                 </section>
               ) : null}
@@ -1561,9 +1563,11 @@ export function ExpertModeWorkspace({
                     <div><Activity size={13} /><strong>隐含波动背景</strong></div>
                     <span>EOD · 不判方向</span>
                   </header>
-                  {volatilityContext ? (
+                  {replayActive ? (
+                    <div className="expert-context-empty">{REPLAY_DERIVED_DOMAIN_NOTICE}</div>
+                  ) : displayedVolatilityContext ? (
                     <div className="expert-volatility-grid">
-                      {volatilityContext.indices.map((index) => {
+                      {displayedVolatilityContext.indices.map((index) => {
                         const percentile = index.trailing_percentile_252;
                         return (
                           <article key={index.index_code}>
@@ -1581,7 +1585,7 @@ export function ExpertModeWorkspace({
                       })}
                     </div>
                   ) : <div className="expert-context-empty">{volatilityContextError ?? "正在读取 Cboe 日终数据"}</div>}
-                  {volatilityContextError && volatilityContext ? <small className="expert-context-warning">刷新失败，保留上一份 EOD：{volatilityContextError}</small> : null}
+                  {!replayActive && volatilityContextError && displayedVolatilityContext ? <small className="expert-context-warning">刷新失败，保留上一份 EOD：{volatilityContextError}</small> : null}
                   <p>VIX 是 SPX 风险波动；GVZ 才是 GLD 期权隐含波动。两者只作风险背景，不直接推断金价涨跌。</p>
                 </section>
               ) : null}
@@ -1591,29 +1595,31 @@ export function ExpertModeWorkspace({
                     <div><Layers3 size={13} /><strong>量价与持仓</strong></div>
                     <span>SHFE · 延迟快照</span>
                   </header>
-                  {positioningProduct === null ? (
+                  {replayActive ? (
+                    <div className="expert-context-empty">{REPLAY_DERIVED_DOMAIN_NOTICE}</div>
+                  ) : positioningProduct === null ? (
                     <div className="expert-context-empty">仅在沪金加权 AU8888 / 沪银加权 AG8888 读取交易所量仓。</div>
-                  ) : positioningContext ? (
+                  ) : displayedPositioningContext ? (
                     <>
                       <dl className="expert-positioning-metrics">
-                        <div><dt>成交量</dt><dd>{formatOptionQuantity(positioningContext.volume)}</dd></div>
-                        <div><dt>总持仓</dt><dd>{formatOptionQuantity(positioningContext.open_interest)}</dd></div>
-                        <div><dt>持仓变化</dt><dd>{formatSignedQuantity(positioningContext.open_interest_change)}</dd></div>
-                        <div><dt>真实合约</dt><dd>{positioningContext.contract_count}</dd></div>
+                        <div><dt>成交量</dt><dd>{formatOptionQuantity(displayedPositioningContext.volume)}</dd></div>
+                        <div><dt>总持仓</dt><dd>{formatOptionQuantity(displayedPositioningContext.open_interest)}</dd></div>
+                        <div><dt>持仓变化</dt><dd>{formatSignedQuantity(displayedPositioningContext.open_interest_change)}</dd></div>
+                        <div><dt>真实合约</dt><dd>{displayedPositioningContext.contract_count}</dd></div>
                       </dl>
                       <div className="expert-positioning-readout">
                         <strong>{volumePriceStateLabel(analysis.indicators.volumePriceState)}</strong>
-                        <span>{positioningContext.open_interest_change === null
+                        <span>{displayedPositioningContext.open_interest_change === null
                           ? "官方快照未给完整 ΔOI，不补 0、不推断多空"
                           : "ΔOI 仅表示未平仓参与变化，仍不等于净多或净空"}</span>
                       </div>
                       <footer className="expert-context-source">
-                        <time dateTime={positioningContext.as_of}>{formatOptionObservedAt(positioningContext.as_of, displayTimeZone)}</time>
-                        <a href={positioningContext.source.source_url} target="_blank" rel="noreferrer">交易所源</a>
+                        <time dateTime={displayedPositioningContext.as_of}>{formatOptionObservedAt(displayedPositioningContext.as_of, displayTimeZone)}</time>
+                        <a href={displayedPositioningContext.source.source_url} target="_blank" rel="noreferrer">交易所源</a>
                       </footer>
                     </>
                   ) : <div className="expert-context-empty">{positioningContextError ?? "正在读取 SHFE 延迟量仓"}</div>}
-                  {positioningContextError && positioningContext ? <small className="expert-context-warning">刷新失败，保留上一份快照：{positioningContextError}</small> : null}
+                  {!replayActive && positioningContextError && displayedPositioningContext ? <small className="expert-context-warning">刷新失败，保留上一份快照：{positioningContextError}</small> : null}
                 </section>
               ) : null}
               <div className="expert-signal-feed">
@@ -1655,21 +1661,29 @@ export function ExpertModeWorkspace({
 
           {intelligenceTab === "options" ? (
             <div className="expert-options-panel">
-              <div className={`expert-capability-state is-${optionsStatus?.state ?? "unavailable"}`}>
+              <div className={`expert-capability-state is-${displayedOptionsStatus?.state ?? "unavailable"}`}>
                 <div>
                   <span className="expert-option-status-dot" />
-                  <strong>{optionsStatus?.state === "live"
-                    ? "期权实时链已连接"
-                    : optionsStatus?.state === "delayed"
-                      ? "上期所官方延时链已连接"
-                      : optionsStatus === null && optionsError === null
-                        ? "正在读取官方期权链"
-                        : "期权行情暂不可用"}</strong>
-                  <em>{optionsStatus?.delivery_mode === "exchange_delayed" ? "EXCHANGE DELAYED" : optionMarketStateLabel(optionsStatus?.state ?? "unavailable")}</em>
+                  <strong>{replayActive
+                    ? "回放派生域已隔离"
+                    : displayedOptionsStatus?.state === "live"
+                      ? "期权实时链已连接"
+                      : displayedOptionsStatus?.state === "delayed"
+                        ? "上期所官方延时链已连接"
+                        : displayedOptionsStatus === null && displayedOptionsError === null
+                          ? "正在读取官方期权链"
+                          : "期权行情暂不可用"}</strong>
+                  <em>{replayActive
+                    ? "REPLAY ISOLATED"
+                    : displayedOptionsStatus?.delivery_mode === "exchange_delayed"
+                      ? "EXCHANGE DELAYED"
+                      : optionMarketStateLabel(displayedOptionsStatus?.state ?? "unavailable")}</em>
                 </div>
-                <span>{optionsError ?? optionsStatus?.detail ?? "正在检测沪金与国际金期权接入能力"}</span>
-                {optionsStatus?.observed_at ? (
-                  <small>{formatOptionQuantity(optionsStatus.quote_count)} 合约 · 截至 {formatOptionObservedAt(optionsStatus.observed_at, displayTimeZone)}</small>
+                <span>{replayActive
+                  ? REPLAY_DERIVED_DOMAIN_NOTICE
+                  : displayedOptionsError ?? displayedOptionsStatus?.detail ?? "正在检测沪金与国际金期权接入能力"}</span>
+                {displayedOptionsStatus?.observed_at ? (
+                  <small>{formatOptionQuantity(displayedOptionsStatus.quote_count)} 合约 · 截至 {formatOptionObservedAt(displayedOptionsStatus.observed_at, displayTimeZone)}</small>
                 ) : null}
               </div>
 
@@ -1682,7 +1696,7 @@ export function ExpertModeWorkspace({
                       onChange={(event) => setSelectedOptionExpiryKey(event.target.value)}
                       aria-label="选择黄金期权到期月份"
                     >
-                      {(optionsStatus?.expiries ?? []).map((expiry) => (
+                      {(displayedOptionsStatus?.expiries ?? []).map((expiry) => (
                         <option key={expertOptionExpiryKey(expiry)} value={expertOptionExpiryKey(expiry)}>
                           {expiry.underlying_contract_id.toUpperCase()} · {expiry.expiry}
                         </option>
@@ -1691,10 +1705,10 @@ export function ExpertModeWorkspace({
                   </label>
 
                   <div className="expert-option-metrics">
-                    <span><small>标的期货</small><strong>{formatOptionMetric(selectedOptionExpiry.underlying_price)}</strong><em>{optionPriceUnitLabel(optionsStatus?.price_unit)}</em></span>
+                    <span><small>标的期货</small><strong>{formatOptionMetric(selectedOptionExpiry.underlying_price)}</strong><em>{optionPriceUnitLabel(displayedOptionsStatus?.price_unit)}</em></span>
                     <span><small>P/C · 持仓</small><strong>{formatOptionMetric(selectedOptionExpiry.put_call_open_interest_ratio)}</strong><em>{optionPositioningLabel(selectedOptionExpiry.positioning_state)}</em></span>
                     <span><small>P/C · 成交</small><strong>{formatOptionMetric(selectedOptionExpiry.put_call_volume_ratio)}</strong><em>真实成交量</em></span>
-                    <span><small>参考 IV</small><strong>{selectedOptionExpiry.reference_iv === null ? "—" : `${(selectedOptionExpiry.reference_iv * 100).toFixed(1)}%`}</strong><em>{optionsStatus?.reference_data_as_of ?? "无参考日"}</em></span>
+                    <span><small>参考 IV</small><strong>{selectedOptionExpiry.reference_iv === null ? "—" : `${(selectedOptionExpiry.reference_iv * 100).toFixed(1)}%`}</strong><em>{displayedOptionsStatus?.reference_data_as_of ?? "无参考日"}</em></span>
                   </div>
 
                   <div className="expert-option-structure" aria-label="期权持仓结构关键行权价">
@@ -1742,18 +1756,20 @@ export function ExpertModeWorkspace({
                   </div>
                 </>
               ) : (
-                <p>尚未取得可展示的真实合约。系统不会生成假 Put/Call、Greeks 或 GEX。</p>
+                <p>{replayActive
+                  ? REPLAY_DERIVED_DOMAIN_NOTICE
+                  : "尚未取得可展示的真实合约。系统不会生成假 Put/Call、Greeks 或 GEX。"}</p>
               )}
 
-              {(optionsStatus?.limitations.length ?? 0) > 0 ? (
+              {(displayedOptionsStatus?.limitations.length ?? 0) > 0 ? (
                 <details className="expert-option-limitations">
                   <summary>数据边界与使用约束</summary>
-                  <ul>{optionsStatus?.limitations.map((item) => <li key={item}>{item}</li>)}</ul>
+                  <ul>{displayedOptionsStatus?.limitations.map((item) => <li key={item}>{item}</li>)}</ul>
                 </details>
               ) : null}
 
               <div className="expert-option-sources">
-                {(optionsStatus?.markets ?? []).map((source) => (
+                {(displayedOptionsStatus?.markets ?? []).map((source) => (
                   <div key={source.market_id}>
                     <strong>{source.label}</strong>
                     <em>{optionMarketStateLabel(source.state)}</em>
@@ -1768,19 +1784,28 @@ export function ExpertModeWorkspace({
             <div className="expert-ai-panel">
               <div className={`expert-ai-connection ${aiReady ? "is-ready" : ""}`}>
                 <Bot size={19} />
-                <div><strong>{aiReady ? "本机 ChatGPT 已连接" : "等待本机 GPT"}</strong><span>{aiStatus?.detail ?? "正在检测 Codex 账户状态"}</span></div>
+                <div>
+                  <strong>{replayActive
+                    ? "回放未接入历史 AI 分析"
+                    : aiReady ? "本机 ChatGPT 已连接" : "等待本机 GPT"}</strong>
+                  <span>{replayActive
+                    ? REPLAY_DERIVED_DOMAIN_NOTICE
+                    : displayedAiStatus?.detail ?? "正在检测 Codex 账户状态"}</span>
+                </div>
               </div>
-              <button type="button" className="expert-ai-run" disabled={!aiReady || aiBusy || candles.length === 0} onClick={() => void requestAiAnalysis()}>
-                {aiBusy ? <RotateCcw className="spin" size={15} /> : <Sparkles size={15} />}
-                {aiBusy ? "分析行情中" : "用当前账户分析"}
+              <button type="button" className="expert-ai-run" disabled={replayActive || !aiReady || aiBusy || candles.length === 0} onClick={() => void requestAiAnalysis()}>
+                {!replayActive && aiBusy ? <RotateCcw className="spin" size={15} /> : <Sparkles size={15} />}
+                {replayActive ? "回放隔离中" : aiBusy ? "分析行情中" : "用当前账户分析"}
               </button>
-              <small className="expert-ai-quota-note">只读临时会话；发送来源、截止时间、最近 Bar 与已启用策略，会消耗本机 Codex/ChatGPT 配额。</small>
-              {aiError ? <div className="expert-ai-error">{aiError}</div> : null}
-              {aiAnalysis ? (
+              <small className="expert-ai-quota-note">{replayActive
+                ? "不会把当前实时状态发送给 AI，也不会用当前 AI 结论解释历史回放。"
+                : "只读临时会话；发送来源、截止时间、最近 Bar 与已启用策略，会消耗本机 Codex/ChatGPT 配额。"}</small>
+              {displayedAiError ? <div className="expert-ai-error">{displayedAiError}</div> : null}
+              {displayedAiAnalysis ? (
                 <div className="expert-ai-answer">
-                  <header><strong>GPT 行情研判</strong><span>{aiAnalysis.data_as_of ?? aiAnalysis.generated_at}</span></header>
-                  <p>{aiAnalysis.analysis ?? aiAnalysis.detail}</p>
-                  <small>{aiAnalysis.source_id} · {aiAnalysis.bar_count} 根 Bar</small>
+                  <header><strong>GPT 行情研判</strong><span>{displayedAiAnalysis.data_as_of ?? displayedAiAnalysis.generated_at}</span></header>
+                  <p>{displayedAiAnalysis.analysis ?? displayedAiAnalysis.detail}</p>
+                  <small>{displayedAiAnalysis.source_id} · {displayedAiAnalysis.bar_count} 根 Bar</small>
                 </div>
               ) : null}
             </div>
@@ -1797,14 +1822,14 @@ export function ExpertModeWorkspace({
         <button
           type="button"
           className={replayActive ? "is-active" : ""}
-          disabled={!replaySupported || replayBounds?.state !== "ready" || replayCursor === null}
-          onClick={() => replayState === "playing" ? pauseReplay() : void startReplay()}
+          disabled={!replaySupported || replayBounds?.state !== "ready"}
+          onClick={() => replayState === "playing" ? stopReplay() : void startReplay()}
           title={!replaySupported
             ? "当前行情源尚未接入原始帧回放"
-            : replayError ?? "按原始提供商帧顺序回放，并复用实时 Bar 归约链路"}
+            : replayError ?? "ReplayOriginal 1× 原速；每次从留存首帧空状态重建，不注入当前行情"}
         >
-          {replayState === "playing" ? <Pause size={13} /> : <Play size={13} />}
-          {replayState === "playing" ? "暂停回放" : replayActive ? "继续回放" : "行情回放"}
+          {replayState === "playing" ? <Square size={12} /> : <Play size={13} />}
+          {replayState === "playing" ? "停止回放" : replayActive ? "从头重放" : "行情回放"}
         </button>
         <button
           type="button"
@@ -1817,29 +1842,12 @@ export function ExpertModeWorkspace({
         </button>
         <input
           type="range"
-          aria-label="真实行情回放游标"
+          aria-label="真实行情回放进度"
           min={replayBounds?.first_sequence ?? 0}
           max={replayBounds?.last_sequence ?? 0}
           step={1}
           value={replayCursor ?? replayBounds?.first_sequence ?? 0}
-          disabled={replayBounds?.state !== "ready"}
-          onInput={(event) => seekReplayCursor(Number(event.currentTarget.value))}
-          onPointerDown={(event) => {
-            event.preventDefault();
-            event.currentTarget.focus();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            seekReplayPointer(event.clientX, event.currentTarget);
-          }}
-          onPointerMove={(event) => {
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-              seekReplayPointer(event.clientX, event.currentTarget);
-            }
-          }}
-          onPointerUp={(event) => {
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }
-          }}
+          disabled
         />
         <span
           className={`expert-replay-time ${replayBounds?.state === "unavailable" ? "is-error" : ""}`}
@@ -1850,22 +1858,11 @@ export function ExpertModeWorkspace({
             : replayCursorFrame?.sequence === replayCursor
               ? formatReplayTimecode(replayCursorFrame.received_at)
               : "正在定位精确帧时间…"}
-          {replayWarning ? <i aria-label={`帧解码警告：${replayWarning}`}>!</i> : null}
+          {replayWarning ? <i aria-label={replayWarning}>!</i> : null}
         </span>
-        <label>
-          速度
-          <select
-            value={replaySpeed}
-            onChange={(event) => {
-              if (replayState === "playing") pauseReplay();
-              setReplaySpeed(Number(event.currentTarget.value));
-            }}
-          >
-            {[0.25, 0.5, 1, 2, 4, 8, 16, 32, 64].map((speed) => (
-              <option key={speed} value={speed}>{speed}×</option>
-            ))}
-          </select>
-        </label>
+        <small className="expert-replay-rate" title="时间间隔由 NATS JetStream ReplayOriginal 保持">
+          {REPLAY_RATE_LABEL}
+        </small>
         <div className="expert-backtest-strip" title={backtest.caveat}>
           <span>{backtestReady ? "实验回测" : `回测计算中 ${backtestProgress}%`}</span>
           {backtestReady ? (

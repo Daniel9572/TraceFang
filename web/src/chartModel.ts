@@ -55,18 +55,44 @@ function realtimeBarCanReplace(current: Candle, incoming: Candle): boolean {
   return candleStateRank[incoming.state] >= candleStateRank[current.state];
 }
 
-export function upsertRealtimeBar(candles: Candle[], incoming: Candle): Candle[] {
+type RealtimeBarTailMutation = "append" | "replace" | null;
+
+function realtimeBarTailMutation(
+  current: Candle | undefined,
+  incoming: Candle,
+): RealtimeBarTailMutation {
   const incomingTime = epochSeconds(incoming.open_time);
-  if (incomingTime === null) return candles;
-  const current = candles.at(-1);
-  if (!current) return [incoming];
+  if (incomingTime === null) return null;
+  if (!current) return "append";
   const currentTime = epochSeconds(current.open_time);
-  if (currentTime === null || incomingTime < currentTime) return candles;
-  if (incomingTime > currentTime) return [...candles, incoming];
+  if (currentTime === null || incomingTime < currentTime) return null;
+  if (incomingTime > currentTime) return "append";
   if (!realtimeBarCanReplace(current, incoming) || sameCandleVersion(current, incoming)) {
-    return candles;
+    return null;
   }
-  return [...candles.slice(0, -1), incoming];
+  return "replace";
+}
+
+export function upsertRealtimeBar(candles: Candle[], incoming: Candle): Candle[] {
+  const current = candles.at(-1);
+  const mutation = realtimeBarTailMutation(current, incoming);
+  if (mutation === "append") return [...candles, incoming];
+  if (mutation === "replace") return [...candles.slice(0, -1), incoming];
+  return candles;
+}
+
+/** Applies a small ordered realtime batch with at most one copy of chart history. */
+export function upsertRealtimeBarBatch(candles: Candle[], incoming: readonly Candle[]): Candle[] {
+  let next: Candle[] | null = null;
+  for (const bar of incoming) {
+    const rows = next ?? candles;
+    const mutation = realtimeBarTailMutation(rows.at(-1), bar);
+    if (mutation === null) continue;
+    if (next === null) next = candles.slice();
+    if (mutation === "append") next.push(bar);
+    else next[next.length - 1] = bar;
+  }
+  return next ?? candles;
 }
 
 export type CandleSeriesMutation = "unchanged" | "tail-update" | "tail-append" | "reset";

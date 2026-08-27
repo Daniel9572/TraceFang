@@ -537,8 +537,7 @@
 .expert-replay-time { display: flex; min-width: 322px; align-items: center; gap: 5px; color: #a9bdc6; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .expert-replay-time.is-error { color: #e99a90; }
 .expert-replay-time i { display: inline-grid; width: 14px; height: 14px; place-items: center; border: 1px solid rgba(217, 108, 95, .35); border-radius: 50%; color: #e99a90; font-size: 8px; font-style: normal; }
-.expert-replay-deck label { display: flex; align-items: center; gap: 5px; color: var(--expert-faint); font-size: 7px; }
-.expert-replay-deck select { height: 25px; border: 1px solid var(--expert-line); border-radius: 5px; color: var(--expert-text); background: #0d202c; font-size: 8px; }
+.expert-replay-rate { color: var(--expert-faint); font-size: 7px; white-space: nowrap; }
 .expert-backtest-strip { display: flex; align-items: center; justify-content: flex-end; gap: 10px; color: var(--expert-muted); font-size: 8px; font-variant-numeric: tabular-nums; }
 .expert-backtest-strip strong { font-size: 10px; }
 .expert-backtest-strip .is-up { color: #e85d6e; }
@@ -567,7 +566,7 @@
   .expert-feed-state small { max-width: 70px; }
   .expert-backtest-strip span:nth-of-type(n+3) { display: none; }
   .expert-replay-deck { grid-template-columns: auto 32px minmax(120px, 1fr) auto minmax(130px, auto); }
-  .expert-replay-deck label { display: none; }
+  .expert-replay-rate { display: none; }
   .expert-replay-time { min-width: 220px; font-size: 8px; }
   .expert-layer-manager { right: 8px; width: 270px; }
 }

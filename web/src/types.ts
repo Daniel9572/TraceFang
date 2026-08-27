@@ -175,6 +175,7 @@ export interface ReplayFrameBounds {
   message_count: number;
   first_received_at: string | null;
   last_received_at: string | null;
+  source_ids: SourceId[];
   detail: string | null;
 }
 
@@ -199,7 +200,7 @@ export interface ReplayStreamEvent {
   error?: string | null;
   start_sequence?: number;
   end_sequence?: number;
-  speed?: number;
+  replay_policy?: "original";
 }
 
 export interface ChartBarPage {

@@ -24,6 +24,7 @@ import type { BarPeriodId } from "./chartPeriods";
 import { BoundedBarPageCache } from "./barPageCache.ts";
 import { sameCandleVersion } from "./chartModel.ts";
 import { historyWindowBefore, type HistoryWindow } from "./historyLoading.ts";
+import { replayStreamQuery, type ReplayStreamOptions } from "./expertReplay.ts";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -288,20 +289,10 @@ export const marketApi = {
   ),
   openReplayStream: (
     code: string,
-    options: {
-      period: string;
-      startSequence: number;
-      endSequence: number;
-      speed: number;
-    },
+    options: ReplayStreamOptions,
   ) => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const params = new URLSearchParams({
-      period: options.period,
-      start_sequence: String(options.startSequence),
-      end_sequence: String(options.endSequence),
-      speed: String(options.speed),
-    });
+    const params = replayStreamQuery(options);
     const url = `${protocol}//${window.location.host}/api/replay/stream/${encodeURIComponent(code)}?${params}`;
     return new WebSocket(url);
   },

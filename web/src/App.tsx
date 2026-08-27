@@ -23,7 +23,7 @@ import {
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { marketApi, mergeCandleRows } from "./api";
-import { barsFromCandles, upsertRealtimeBar } from "./chartModel";
+import { barsFromCandles, upsertRealtimeBarBatch } from "./chartModel";
 import {
   buildChartLayers,
   chartLayerStorageKey,
@@ -51,7 +51,11 @@ import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
 import { ExpertModeWorkspace } from "./ExpertModeWorkspace";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
-import { RealtimeBarStream, realtimeBarDatasetKey } from "./realtimeBarStream";
+import {
+  RealtimeBarCommitBuffer,
+  RealtimeBarStream,
+  realtimeBarDatasetKey,
+} from "./realtimeBarStream";
 import { SourcePicker, type SourceTestFeedback } from "./SourcePicker";
 import { startWatchlistQuoteStream, watchlistQuoteStreamTargets } from "./watchlistStreams";
 import type { ExpertMarketEvent } from "./expertTypes";
@@ -94,6 +98,9 @@ const defaultInstruments: InstrumentEntry[] = [
     market_schedule: SPOT_METALS_MARKET_SCHEDULE,
   },
 ];
+
+const REALTIME_REACT_COMMIT_INTERVAL_MS = 1_000;
+const REALTIME_REACT_COMMIT_MAX_BARS = 8;
 
 const sourceLabels: Record<SourceId, string> = {
   jin10_client: "金十客户端行情",
@@ -725,6 +732,32 @@ export default function App() {
     let retryTimer: number | null = null;
     let retryCount = 0;
     let resyncPromise: Promise<void> | null = null;
+    let reactCommitTimer: number | null = null;
+    const reactCommitBuffer = new RealtimeBarCommitBuffer(REALTIME_REACT_COMMIT_MAX_BARS);
+
+    const flushRealtimeBarsToReact = () => {
+      if (reactCommitTimer !== null) {
+        window.clearTimeout(reactCommitTimer);
+        reactCommitTimer = null;
+      }
+      const pending = reactCommitBuffer.drain();
+      if (disposed || pending.length === 0) return;
+      setCandles((current) => upsertRealtimeBarBatch(current, pending));
+    };
+
+    const queueRealtimeBarForReact = (bar: Candle) => {
+      const full = reactCommitBuffer.push(bar);
+      if (full) {
+        flushRealtimeBarsToReact();
+        return;
+      }
+      if (reactCommitTimer === null) {
+        reactCommitTimer = window.setTimeout(
+          flushRealtimeBarsToReact,
+          REALTIME_REACT_COMMIT_INTERVAL_MS,
+        );
+      }
+    };
 
     setLoadingQuote(true);
     setQuote(null);
@@ -772,8 +805,9 @@ export default function App() {
             event.period_id === selectedBarPeriodId
             && event.bar.source.provider === selectedSource
           ) {
-            realtimeBarStream.publish(selectedBarStreamKey, event.bar);
-            setCandles((current) => upsertRealtimeBar(current, event.bar!));
+            if (realtimeBarStream.publish(selectedBarStreamKey, event.bar)) {
+              queueRealtimeBarForReact(event.bar);
+            }
             setCandleError(null);
           }
         } else if (event.kind === "sample") {
@@ -798,6 +832,7 @@ export default function App() {
       socket.onerror = () => socket?.close();
       socket.onclose = () => {
         if (disposed || selectedCodeRef.current !== selectedCode) return;
+        flushRealtimeBarsToReact();
         setQuoteStreamState("unavailable");
         setQuoteError("实时报价连接已断开，正在重连");
         setLoadingQuote(false);
@@ -822,7 +857,10 @@ export default function App() {
     return () => {
       disposed = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (reactCommitTimer !== null) window.clearTimeout(reactCommitTimer);
+      reactCommitBuffer.clear();
       socket?.close();
+      realtimeBarStream.reset(selectedBarStreamKey);
     };
   }, [
     instrumentSourcesLoaded,

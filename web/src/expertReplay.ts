@@ -1,6 +1,21 @@
-import type { Candle } from "./types";
+import type { Candle, ReplayFrameBounds } from "./types";
 
 const REPLAY_TIME_ZONE = "Asia/Shanghai";
+export const REPLAY_RATE_LABEL = "ReplayOriginal · 1× 原速";
+export const REPLAY_DERIVED_DOMAIN_NOTICE = "回放未提供该历史域；当前实时派生数据已隔离。";
+
+export type ReplayProjectionState = "live" | "stopped" | "playing" | "completed";
+
+export interface ReplayStreamOptions {
+  period: string;
+  startSequence: number;
+  endSequence: number;
+}
+
+export interface ReplayProjectionStart extends ReplayStreamOptions {
+  candles: Candle[];
+  price: null;
+}
 const REPLAY_TIME_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: REPLAY_TIME_ZONE,
   year: "numeric",
@@ -23,35 +38,41 @@ export function formatReplayTimecode(value: string | null): string {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${parts.fractionalSecond} · ${REPLAY_TIME_ZONE} · UTC+08:00`;
 }
 
-function epochSeconds(value: string): number | null {
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? milliseconds / 1_000 : null;
-}
-
-function intervalSeconds(value: Candle["interval"]): number | null {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
-}
-
 /**
- * Seeds replay with completed historical Bars only. The active Bar is omitted
- * because its final OHLC may contain evidence captured after the seek cursor.
+ * A replay projector must always start empty at the first retained raw frame.
+ * Current chart Bars are deliberately not accepted as input: even finalized
+ * Bars may contain provider evidence that arrived after the replay boundary.
  */
-export function completedReplayHistory(candles: Candle[], cutoffSeconds: number): Candle[] {
-  const completed: Candle[] = [];
-  for (let index = 0; index < candles.length; index += 1) {
-    const candle = candles[index];
-    const open = epochSeconds(candle.open_time);
-    if (open === null || open >= cutoffSeconds) continue;
-    const nextOpen = index + 1 < candles.length
-      ? epochSeconds(candles[index + 1].open_time)
-      : null;
-    const boundary = nextOpen ?? (
-      intervalSeconds(candle.interval) === null
-        ? null
-        : open + (intervalSeconds(candle.interval) as number)
-    );
-    if (boundary !== null && boundary <= cutoffSeconds) completed.push(candle);
-  }
-  return completed;
+export function createReplayProjectionStart(
+  bounds: ReplayFrameBounds,
+  period: string,
+): ReplayProjectionStart | null {
+  if (
+    bounds.state !== "ready"
+    || bounds.first_sequence === null
+    || bounds.last_sequence === null
+  ) return null;
+  return {
+    period,
+    startSequence: bounds.first_sequence,
+    endSequence: bounds.last_sequence,
+    candles: [],
+    price: null,
+  };
+}
+
+export function replayStreamQuery(options: ReplayStreamOptions): string {
+  return new URLSearchParams({
+    period: options.period,
+    start_sequence: String(options.startSequence),
+    end_sequence: String(options.endSequence),
+  }).toString();
+}
+
+/** Prevents a current live-only snapshot from crossing into replay decisions or UI. */
+export function replaySafeLiveDerivedValue<T>(
+  replayState: ReplayProjectionState,
+  value: T | null,
+): T | null {
+  return replayState === "live" ? value : null;
 }

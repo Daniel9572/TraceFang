@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  RealtimeBarCommitBuffer,
   RealtimeBarStream,
   realtimeBarDatasetKey,
 } from "../src/realtimeBarStream.ts";
@@ -68,4 +69,28 @@ test("accepts the next second and keeps datasets independent", () => {
   assert.equal(stream.publish(firstKey, bar(1, 103, "2026-08-11T01:00:01Z")), true);
   assert.equal(stream.publish(secondKey, bar(1, 700)), true);
   assert.deepEqual(delivered, [firstKey, firstKey, secondKey]);
+});
+
+test("coalesces same-second React commits without dropping distinct Bars", () => {
+  const buffer = new RealtimeBarCommitBuffer(2);
+
+  assert.equal(buffer.push(bar(1, 100)), false);
+  assert.equal(buffer.push(bar(2, 102)), false);
+  assert.equal(buffer.size, 1);
+  assert.equal(buffer.push(bar(1, 103, "2026-08-11T01:00:01Z")), true);
+
+  const pending = buffer.drain();
+  assert.deepEqual(pending.map((value) => Number(value.close)), [102, 103]);
+  assert.equal(buffer.size, 0);
+});
+
+test("releases a dataset revision watermark when its socket scope ends", () => {
+  const stream = new RealtimeBarStream();
+  const key = realtimeBarDatasetKey("XAUUSD", "jin10_client", "1s");
+  const first = bar(1, 100);
+
+  assert.equal(stream.publish(key, first), true);
+  assert.equal(stream.publish(key, first), false);
+  stream.reset(key);
+  assert.equal(stream.publish(key, first), true);
 });

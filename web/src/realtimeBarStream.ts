@@ -1,4 +1,4 @@
-import { sameCandleVersion } from "./chartModel.ts";
+import { sameCandleVersion, upsertRealtimeBar } from "./chartModel.ts";
 import type { Candle } from "./types.ts";
 
 export interface RealtimeBarDelivery {
@@ -65,6 +65,42 @@ export class RealtimeBarStream {
   reset(datasetKey?: string): void {
     if (datasetKey === undefined) this.latestByDataset.clear();
     else this.latestByDataset.delete(datasetKey);
+  }
+}
+
+/**
+ * Coalesces the React-facing tail while the transport stream keeps delivering
+ * every accepted revision directly to the chart. Distinct Bar times are never
+ * collapsed; revisions of one open time reduce to the newest complete Bar.
+ */
+export class RealtimeBarCommitBuffer {
+  private pending: Candle[] = [];
+  readonly maxBars: number;
+
+  constructor(maxBars = 8) {
+    if (!Number.isInteger(maxBars) || maxBars < 1) {
+      throw new Error("maxBars must be a positive integer");
+    }
+    this.maxBars = maxBars;
+  }
+
+  get size(): number {
+    return this.pending.length;
+  }
+
+  push(bar: Candle): boolean {
+    this.pending = upsertRealtimeBar(this.pending, bar);
+    return this.pending.length >= this.maxBars;
+  }
+
+  drain(): Candle[] {
+    const bars = this.pending;
+    this.pending = [];
+    return bars;
+  }
+
+  clear(): void {
+    this.pending = [];
   }
 }
 
