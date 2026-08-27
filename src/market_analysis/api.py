@@ -101,6 +101,8 @@ from market_analysis.infrastructure.providers.shfe_positioning import (
     ShfePositioningSettings,
 )
 from market_analysis.infrastructure.providers.tonghuashun_futures import (
+    TONGHUASHUN_HISTORY_FRAME_CHANNEL,
+    TONGHUASHUN_LIVE_FRAME_CHANNEL,
     TonghuashunFuturesProvider,
     TonghuashunFuturesSettings,
 )
@@ -143,6 +145,8 @@ class Runtime:
         self.frame_store: FrameStore | None = None
         self.frame_store_setup_error: str | None = None
         self.replay_decoder: FrameDecoder | None = None
+        self.replay_source_ids: frozenset[str] = frozenset()
+        self.replay_channels_by_source: dict[str, frozenset[str]] = {}
         self.bar_contracts: tuple[RealtimeBarContract, ...] = ()
         self.instrument_sources: dict[str, str] = {}
         self.watchlist_codes: list[str] = list(DEFAULT_WATCHLIST_CODES)
@@ -354,21 +358,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     frame_store: FrameStore | None = None
     frame_sink: JetStreamRawFrameSink | None = None
     runtime.frame_store_setup_error = None
-    try:
-        frame_settings = JetStreamSettings.from_env()
-        if frame_settings is None:
-            runtime.frame_store_setup_error = "MARKET_ANALYSIS_NATS_URL is not configured"
-        else:
-            frame_store = FrameStore(frame_settings)
+    frame_settings = JetStreamSettings.from_env()
+    if frame_settings is None:
+        runtime.frame_store_setup_error = "MARKET_ANALYSIS_NATS_URL is not configured"
+    else:
+        frame_store = FrameStore(frame_settings)
+        try:
             await frame_store.connect()
-            frame_sink = JetStreamRawFrameSink(frame_store)
-    except Exception as error:
-        runtime.frame_store_setup_error = str(error) or type(error).__name__
-        if frame_store is not None:
+        except Exception as error:
+            runtime.frame_store_setup_error = str(error) or type(error).__name__
             with suppress(Exception):
                 await frame_store.close()
-        frame_store = None
-        frame_sink = None
+            # A configured capture store is part of the market-data contract.
+            # Continuing without it would create a permanent, unmarked replay gap.
+            raise RuntimeError(
+                "configured raw-frame capture store is unavailable"
+            ) from error
+        frame_sink = JetStreamRawFrameSink(frame_store)
     runtime.frame_store = frame_store
 
     local_provider: Jin10LocalProvider | None = None
@@ -396,7 +402,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         web_provider = None
 
     tonghuashun_futures_settings = TonghuashunFuturesSettings.from_env()
-    tonghuashun_futures_provider = TonghuashunFuturesProvider(tonghuashun_futures_settings)
+    tonghuashun_futures_provider = TonghuashunFuturesProvider(
+        tonghuashun_futures_settings,
+        frame_sink=frame_sink,
+    )
     shfe_options_settings = ShfeGoldOptionsSettings.from_env()
     shfe_options_provider = (
         ShfeGoldOptionsProvider(shfe_options_settings) if shfe_options_settings.enabled else None
@@ -662,11 +671,35 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 on_candle=values.append,
             )
             return tuple(values)
+        if frame.channel in {
+            TONGHUASHUN_LIVE_FRAME_CHANNEL,
+            TONGHUASHUN_HISTORY_FRAME_CHANNEL,
+        }:
+            await tonghuashun_futures_provider.ingest_frame(
+                frame,
+                on_quote=values.append,
+            )
+            return tuple(values)
         raise ProviderUnavailableError(
             f"recorded frame channel {frame.channel!r} has no active decoder"
         )
 
     runtime.replay_decoder = decode_replay_frame
+    replay_channels_by_source = {
+        TONGHUASHUN_FUTURES_SOURCE: frozenset(
+            {
+                TONGHUASHUN_LIVE_FRAME_CHANNEL,
+                TONGHUASHUN_HISTORY_FRAME_CHANNEL,
+            }
+        )
+    }
+    if web_provider is not None:
+        jin10_channels = {JIN10_WEB_CHANNEL}
+        if local_provider is not None:
+            jin10_channels.add(JIN10_LOCAL_CHANNEL)
+        replay_channels_by_source[JIN10_CLIENT_SOURCE] = frozenset(jin10_channels)
+    runtime.replay_channels_by_source = replay_channels_by_source
+    runtime.replay_source_ids = frozenset(replay_channels_by_source)
 
     async def load_latest_quote(instrument, source_id):
         store = runtime.database_store
@@ -892,6 +925,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     runtime.frame_store = None
     runtime.frame_store_setup_error = None
     runtime.replay_decoder = None
+    runtime.replay_source_ids = frozenset()
+    runtime.replay_channels_by_source = {}
     runtime.bar_contracts = ()
     runtime.instrument_sources.clear()
     runtime.watchlist_codes = list(DEFAULT_WATCHLIST_CODES)
@@ -1657,6 +1692,7 @@ async def timeline_samples(
 @app.get("/api/replay/frames")
 async def replay_frame_bounds() -> dict[str, Any]:
     store = runtime.frame_store
+    replay_source_ids = sorted(runtime.replay_source_ids)
     if store is None or not store.is_connected:
         return {
             "state": "unavailable",
@@ -1665,6 +1701,7 @@ async def replay_frame_bounds() -> dict[str, Any]:
             "message_count": 0,
             "first_received_at": None,
             "last_received_at": None,
+            "source_ids": replay_source_ids,
             "detail": runtime.frame_store_setup_error or "raw frame store is unavailable",
         }
     try:
@@ -1677,6 +1714,7 @@ async def replay_frame_bounds() -> dict[str, Any]:
             "message_count": 0,
             "first_received_at": None,
             "last_received_at": None,
+            "source_ids": replay_source_ids,
             "detail": str(error)[:240] or type(error).__name__,
         }
     payload = asdict(bounds)
@@ -1693,6 +1731,7 @@ async def replay_frame_bounds() -> dict[str, Any]:
     return {
         "state": "ready" if bounds.message_count else "empty",
         **payload,
+        "source_ids": replay_source_ids,
         "detail": None if bounds.message_count else "尚未捕获可回放的原始行情帧",
     }
 
@@ -1722,12 +1761,22 @@ async def replay_stream(websocket: WebSocket, code: str) -> None:
         requested_period = websocket.query_params.get("period", "1m")
         if requested_period not in PERIOD_DEFINITIONS:
             raise ValueError("chart period is not supported")
-        start_sequence = int(websocket.query_params.get("start_sequence", "0"))
-        speed = float(websocket.query_params.get("speed", "1"))
         store = _frame_store()
         bounds = await store.bounds()
-        if bounds.last_sequence is None:
+        if bounds.first_sequence is None or bounds.last_sequence is None:
             raise ValueError("recorded frame stream is empty")
+        requested_start_text = websocket.query_params.get("start_sequence")
+        if (
+            requested_start_text is not None
+            and int(requested_start_text) != bounds.first_sequence
+        ):
+            raise ValueError(
+                "complete replay must start at the first retained frame; "
+                "arbitrary seek requires a reducer checkpoint"
+            )
+        # A fresh projector has no OHLC reducer state. Starting at any later
+        # sequence could fabricate the open/high/low of the in-progress bucket.
+        start_sequence = bounds.first_sequence
         end_sequence_text = websocket.query_params.get("end_sequence")
         end_sequence = (
             int(end_sequence_text)
@@ -1735,8 +1784,9 @@ async def replay_stream(websocket: WebSocket, code: str) -> None:
             else bounds.last_sequence
         )
         normalized_code, instrument, source_id = await _instrument_source(code)
-        if source_id != JIN10_CLIENT_SOURCE:
+        if source_id not in runtime.replay_source_ids:
             raise ValueError(f"{normalized_code} 的当前数据源没有原始帧回放能力")
+        replay_channels = runtime.replay_channels_by_source[source_id]
         definition = instrument_definition(normalized_code)
         projector = MarketReplayProjector(
             contracts=runtime.bar_contracts,
@@ -1752,12 +1802,14 @@ async def replay_stream(websocket: WebSocket, code: str) -> None:
                 "state": "playing",
                 "start_sequence": start_sequence,
                 "end_sequence": end_sequence,
-                "speed": speed,
+                "replay_policy": "original",
             }
         )
 
         async def send_recorded_frame(recorded) -> None:
             frame = recorded.envelope
+            if frame.channel not in replay_channels:
+                return
             provider_frame = ProviderFrame(
                 version=frame.version,
                 channel=frame.channel,
@@ -1774,7 +1826,6 @@ async def replay_stream(websocket: WebSocket, code: str) -> None:
         session = await store.replay(
             start_sequence=start_sequence,
             end_sequence=end_sequence,
-            speed=speed,
             on_frame=send_recorded_frame,
         )
         await session.wait()

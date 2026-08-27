@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -36,6 +36,27 @@ class RecordedFrame:
 
 FrameHandler = Callable[[RecordedFrame], Awaitable[None]]
 
+_NATS_HEADER_LINE = b"NATS/1.0\r\n"
+_NATS_HEADER_SEPARATOR = b": "
+_NATS_LINE_END = b"\r\n"
+
+
+def _encoded_message_size(body: bytes, headers: dict[str, str]) -> int:
+    """Returns the HPUB message bytes governed by max_payload/max_msg_size."""
+
+    header_size = len(_NATS_HEADER_LINE) + len(_NATS_LINE_END)
+    for key, value in headers.items():
+        normalized_key = key.strip()
+        if not normalized_key:
+            continue
+        header_size += (
+            len(normalized_key.encode())
+            + len(_NATS_HEADER_SEPARATOR)
+            + len(value.strip().encode())
+            + len(_NATS_LINE_END)
+        )
+    return header_size + len(body)
+
 
 @dataclass(frozen=True, slots=True)
 class FrameStreamBounds:
@@ -58,7 +79,6 @@ class ReplaySession:
         consumer_name: str,
         end_sequence: int,
         initial_pending: int,
-        speed: float,
         on_frame: FrameHandler,
         on_closed: Callable[[ReplaySession], None],
     ) -> None:
@@ -68,7 +88,6 @@ class ReplaySession:
         self._consumer_name = consumer_name
         self._end_sequence = end_sequence
         self._initial_pending = initial_pending
-        self._speed = speed
         self._on_frame = on_frame
         self._on_closed = on_closed
         self._task: asyncio.Task[None] | None = None
@@ -97,7 +116,6 @@ class ReplaySession:
             await self._task
 
     async def _consume(self) -> None:
-        previous_received_at: datetime | None = None
         try:
             if self._initial_pending == 0:
                 return
@@ -107,11 +125,6 @@ class ReplaySession:
                 if stream_sequence > self._end_sequence:
                     break
                 envelope = FrameEnvelope.from_message(message.data, message.headers)
-                if previous_received_at is not None:
-                    delay = (envelope.received_at - previous_received_at).total_seconds()
-                    if delay > 0:
-                        await asyncio.sleep(delay / self._speed)
-                previous_received_at = envelope.received_at
                 self.last_stream_sequence = stream_sequence
                 await self._on_frame(RecordedFrame(stream_sequence, envelope))
                 if stream_sequence >= self._end_sequence or metadata.num_pending == 0:
@@ -159,6 +172,7 @@ class FrameStore:
         )
         jetstream = client.jetstream(timeout=self.settings.publish_timeout_seconds)
         try:
+            self._validate_server_capacity(client)
             await self._ensure_stream(jetstream)
         except BaseException:
             await client.close()
@@ -177,12 +191,21 @@ class FrameStore:
 
     async def capture(self, envelope: FrameEnvelope) -> int:
         jetstream = self._require_jetstream()
+        headers = envelope.headers()
+        message_size = _encoded_message_size(envelope.body, headers)
+        if message_size > self.settings.max_frame_bytes:
+            raise ValueError(
+                "encoded provider frame is "
+                f"{message_size} bytes, exceeding MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES="
+                f"{self.settings.max_frame_bytes}; raise the application, NATS max_payload "
+                "and JetStream max_msg_size limits together"
+            )
         acknowledgement = await jetstream.publish(
             self.settings.channel_subject(envelope.channel),
             envelope.body,
             timeout=self.settings.publish_timeout_seconds,
             stream=self.settings.stream_name,
-            headers=envelope.headers(),
+            headers=headers,
         )
         if acknowledgement.stream != self.settings.stream_name:
             raise RuntimeError("JetStream acknowledged the frame from an unexpected stream")
@@ -233,14 +256,11 @@ class FrameStore:
         end_sequence: int,
         on_frame: FrameHandler,
         channel: str | None = None,
-        speed: float = 1.0,
     ) -> ReplaySession:
         if start_sequence < 1:
             raise ValueError("replay start sequence must be positive")
         if end_sequence < start_sequence:
             raise ValueError("replay end sequence must be >= start sequence")
-        if not 0.25 <= speed <= 64:
-            raise ValueError("replay speed must be between 0.25 and 64")
         jetstream = self._require_jetstream()
         stream = await jetstream.stream_info(self.settings.stream_name)
         if stream.state.messages == 0:
@@ -260,10 +280,9 @@ class FrameStore:
                 deliver_policy=DeliverPolicy.BY_START_SEQUENCE,
                 opt_start_seq=start_sequence,
                 ack_policy=AckPolicy.NONE,
-                # Application pacing uses the immutable capture timestamps so the
-                # same sequence can be replayed at 0.25x..64x without buffering it
-                # in the browser. Delivery itself remains strictly ordered.
-                replay_policy=ReplayPolicy.INSTANT,
+                # JetStream owns replay timing. ReplayOriginal preserves the
+                # stream's recorded receive cadence without an application clock.
+                replay_policy=ReplayPolicy.ORIGINAL,
                 flow_control=True,
                 idle_heartbeat=5.0,
             ),
@@ -276,7 +295,6 @@ class FrameStore:
             consumer_name=consumer.name,
             end_sequence=end_sequence,
             initial_pending=consumer.num_pending or 0,
-            speed=speed,
             on_frame=on_frame,
             on_closed=self._sessions.discard,
         )
@@ -294,8 +312,12 @@ class FrameStore:
                     subjects=[self.settings.capture_subject],
                     retention=RetentionPolicy.LIMITS,
                     max_bytes=self.settings.max_bytes,
-                    discard=DiscardPolicy.NEW,
+                    # The replay contract is a rolling, explicitly bounded window.
+                    # Rejecting new frames would create an invisible hole at the
+                    # live edge, so capacity pressure must advance first_seq instead.
+                    discard=DiscardPolicy.OLD,
                     max_age=self.settings.max_age_seconds,
+                    max_msg_size=self.settings.max_frame_bytes,
                     storage=StorageType.FILE,
                 )
             )
@@ -305,6 +327,53 @@ class FrameStore:
             raise RuntimeError("existing JetStream stream does not capture the configured subject")
         if info.config.storage != StorageType.FILE:
             raise RuntimeError("existing JetStream frame stream must use file storage")
+        if info.config.retention != RetentionPolicy.LIMITS:
+            raise RuntimeError("existing JetStream frame stream must use limits retention")
+        configured_message_limit = getattr(info.config, "max_msg_size", -1)
+        stream_can_carry_limit = (
+            configured_message_limit is None
+            or configured_message_limit < 0
+            or configured_message_limit >= self.settings.max_frame_bytes
+        )
+        if not stream_can_carry_limit and info.state.messages != 0:
+            raise RuntimeError(
+                "existing JetStream frame stream max_msg_size="
+                f"{configured_message_limit} cannot carry "
+                f"MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES={self.settings.max_frame_bytes}; "
+                "preserve the recorded evidence and select a new "
+                "MARKET_ANALYSIS_NATS_STREAM, or empty/recreate the stream with a "
+                "matching max_msg_size"
+            )
+        updated_config = info.config
+        update_required = False
+        if info.config.discard != DiscardPolicy.OLD:
+            if info.state.messages != 0:
+                raise RuntimeError(
+                    "existing JetStream frame stream uses a legacy retention policy; "
+                    "select a new stream name before enabling rolling capture"
+                )
+            # Updating DiscardNew -> DiscardOld is non-destructive only while the
+            # stream is empty. Never mutate retention for a stream with evidence.
+            updated_config = replace(updated_config, discard=DiscardPolicy.OLD)
+            update_required = True
+        if info.state.messages == 0 and configured_message_limit != self.settings.max_frame_bytes:
+            updated_config = replace(
+                updated_config,
+                max_msg_size=self.settings.max_frame_bytes,
+            )
+            update_required = True
+        if update_required:
+            await jetstream.update_stream(config=updated_config)
+
+    def _validate_server_capacity(self, client: NatsClient) -> None:
+        server_limit = client.max_payload
+        if server_limit < self.settings.max_frame_bytes:
+            raise RuntimeError(
+                f"NATS server advertises max_payload={server_limit}, below "
+                f"MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES={self.settings.max_frame_bytes}; "
+                "set max_payload to at least the same byte value in nats-server.conf "
+                "and restart NATS"
+            )
 
     def _require_jetstream(self) -> JetStreamContext:
         if self._jetstream is None or not self.is_connected:

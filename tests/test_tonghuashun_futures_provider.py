@@ -2,15 +2,30 @@ from __future__ import annotations
 
 import json
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 
+from market_analysis.application.provider_frames import ProviderFrame
+from market_analysis.application.realtime_bars import RealtimeBarContract, RealtimeBarService
+from market_analysis.domain.errors import ProviderDataError, ProviderRateLimitError
 from market_analysis.infrastructure.providers.tonghuashun_futures import (
     TonghuashunFuturesProvider,
     TonghuashunFuturesSettings,
     TonghuashunFuturesSymbolMapper,
+)
+from market_analysis.infrastructure.providers.tonghuashun_futures.protocol import (
+    TONGHUASHUN_HISTORY_FRAME_CHANNEL,
+    TONGHUASHUN_HTTP_FRAME_ENCODING,
+    TONGHUASHUN_HTTP_FRAME_VERSION,
+    TONGHUASHUN_LIVE_FRAME_CHANNEL,
+    TonghuashunDecodedLineFrame,
+    TonghuashunDecodedQuoteFrame,
+    TonghuashunHttpFrameKind,
+    TonghuashunHttpResponseFrame,
+    decode_http_response_frame,
+    encode_http_response_frame,
 )
 from market_analysis.instruments import (
     BRENT_CRUDE_CONTINUOUS,
@@ -112,6 +127,18 @@ def minute_payload(symbol: str) -> dict:
     }
 
 
+class _RecordingSink:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.frames: list[ProviderFrame] = []
+
+    async def capture(self, frame: ProviderFrame) -> int:
+        self.frames.append(frame)
+        if self.error is not None:
+            raise self.error
+        return len(self.frames)
+
+
 class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -177,10 +204,13 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gold.change, Decimal("13.93"))
         self.assertEqual(gold.change_percent, Decimal("1.50"))
         self.assertEqual(gold.source.provider_symbol, "qh_au8888")
+        self.assertEqual(gold.source.observed_at, gold.source.received_at)
         self.assertEqual(
-            gold.source.observed_at,
-            datetime(2026, 8, 7, 18, 30, tzinfo=UTC),
+            gold.source.raw_payload["wire_observed_at"],
+            "2026-08-08T02:30:00+08:00",
         )
+        self.assertEqual(gold.source.raw_payload["wire_time_precision"], "minute")
+        self.assertEqual(gold.source.raw_payload["bar_clock"], "provider_frame.received_at")
         self.assertEqual(silver.last, Decimal("15465"))
         self.assertEqual(silver.change, Decimal("248"))
         self.assertEqual(silver.change_percent, Decimal("1.63"))
@@ -207,16 +237,241 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(quote.last, Decimal("26690.620"))
         self.assertEqual(quote.open, Decimal("26534.660"))
+        self.assertEqual(quote.source.observed_at, quote.source.received_at)
         self.assertEqual(
-            quote.source.observed_at,
-            datetime(2026, 8, 7, 20, 0, tzinfo=UTC),
+            quote.source.raw_payload["wire_observed_at"],
+            "2026-08-08T04:00:00+08:00",
         )
+        self.assertEqual(quote.source.raw_payload["wire_time_precision"], "minute")
+        self.assertEqual(quote.source.raw_payload["bar_clock"], "provider_frame.received_at")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].close, Decimal("26690.620"))
         self.assertEqual(
             rows[0].open_time,
             datetime(2026, 8, 7, 20, 0, tzinfo=UTC),
         )
+
+    async def test_captures_lossless_live_responses_before_replay_decode(self) -> None:
+        sink = _RecordingSink()
+        provider = TonghuashunFuturesProvider(
+            TonghuashunFuturesSettings(),
+            http_client=self.http,
+            frame_sink=sink,
+        )
+
+        live = await provider.get_quote(SHFE_GOLD_WEIGHTED)
+
+        self.assertEqual(len(sink.frames), 2)
+        self.assertEqual([frame.sequence for frame in sink.frames], [1, 2])
+        self.assertEqual(
+            [frame.channel for frame in sink.frames],
+            [TONGHUASHUN_LIVE_FRAME_CHANNEL, TONGHUASHUN_LIVE_FRAME_CHANNEL],
+        )
+        self.assertTrue(
+            all(frame.encoding == TONGHUASHUN_HTTP_FRAME_ENCODING for frame in sink.frames)
+        )
+        recorded = decode_http_response_frame(sink.frames[0].body)
+        self.assertEqual(recorded.kind, TonghuashunHttpFrameKind.TIME)
+        self.assertEqual(recorded.provider_code, "qh_au8888")
+        self.assertEqual(recorded.status_code, 200)
+        self.assertIn("/time/qh_au8888/last.js", recorded.request_url)
+        self.assertNotEqual(recorded.content, sink.frames[0].body)
+        self.assertEqual(
+            recorded.content,
+            jsonp(
+                "quotebridge_v6_time_qh_au8888_last_js",
+                time_payload("qh_au8888"),
+            ).encode(),
+        )
+
+        replayed: list = []
+        live_cache_before_replay = dict(provider._daily_cache)
+        replay = await provider.ingest_frame(sink.frames[0], on_quote=replayed.append)
+
+        self.assertIs(replay, replayed[0])
+        self.assertEqual(replay.last, live.last)
+        self.assertEqual(replay.change, live.change)
+        self.assertEqual(replay.change_percent, live.change_percent)
+        self.assertEqual(replay.source.observed_at, live.source.observed_at)
+        self.assertEqual(replay.source.received_at, live.source.received_at)
+        self.assertIsNone(replay.open)
+        self.assertEqual(live.open, Decimal("950.57"))
+        self.assertFalse(replay.source.raw_payload["daily_stats_available"])
+        self.assertTrue(live.source.raw_payload["daily_stats_available"])
+        self.assertEqual(replay.source.received_at, sink.frames[0].received_at)
+        self.assertEqual(replay.source.raw_payload["sequence"], 1)
+        self.assertEqual(len(sink.frames), 2)
+        self.assertIsNone(await provider.ingest_frame(sink.frames[1], on_quote=replayed.append))
+        self.assertEqual(len(replayed), 1)
+        self.assertEqual(provider._daily_cache, live_cache_before_replay)
+
+    async def test_same_wire_minute_uses_captured_arrival_seconds_for_live_and_replay(self) -> None:
+        provider = TonghuashunFuturesProvider(TonghuashunFuturesSettings())
+        received_times = (
+            datetime(2026, 8, 10, 1, 0, 1, tzinfo=UTC),
+            datetime(2026, 8, 10, 1, 0, 2, tzinfo=UTC),
+        )
+
+        def captured(sequence: int, received_at: datetime, price: str) -> ProviderFrame:
+            payload = {
+                "qh_au8888": {
+                    "name": "沪金加权",
+                    "pre": "928.80",
+                    "date": "20260810",
+                    "dates": ["20260810"],
+                    "tradeTime": ["0900-1015"],
+                    "data": f"0900,{price},100,{price},10",
+                }
+            }
+            response = TonghuashunHttpResponseFrame(
+                version=TONGHUASHUN_HTTP_FRAME_VERSION,
+                kind=TonghuashunHttpFrameKind.TIME,
+                provider_code="qh_au8888",
+                capability="quote",
+                request_url="https://d.10jqka.com.cn/v6/time/qh_au8888/last.js",
+                status_code=200,
+                content_type="application/javascript",
+                text_encoding="utf-8",
+                content=(
+                    "quotebridge_v6_time_qh_au8888_last_js("
+                    f"{json.dumps(payload, ensure_ascii=True)})"
+                ).encode(),
+            )
+            return ProviderFrame(
+                version=TONGHUASHUN_HTTP_FRAME_VERSION,
+                channel=TONGHUASHUN_LIVE_FRAME_CHANNEL,
+                connection_id="http-capture-1",
+                sequence=sequence,
+                received_at=received_at,
+                encoding=TONGHUASHUN_HTTP_FRAME_ENCODING,
+                body=encode_http_response_frame(response),
+            )
+
+        frames = (
+            captured(1, received_times[0], "950.0"),
+            captured(2, received_times[1], "951.0"),
+        )
+        live_quotes = []
+        replay_quotes = []
+        for frame in frames:
+            decoded = provider.decode_frame(frame)
+            self.assertIsInstance(decoded, TonghuashunDecodedQuoteFrame)
+            live_quotes.append(provider._quote_from_decoded(decoded))
+            await provider.ingest_frame(frame, on_quote=replay_quotes.append)
+
+        self.assertEqual(
+            [quote.source.observed_at for quote in live_quotes],
+            list(received_times),
+        )
+        self.assertEqual(
+            [quote.source.observed_at for quote in replay_quotes],
+            list(received_times),
+        )
+        self.assertEqual(
+            {quote.source.raw_payload["wire_observed_at"] for quote in replay_quotes},
+            {"2026-08-10T09:00:00+08:00"},
+        )
+
+        bars = RealtimeBarService(
+            None,
+            contracts=(
+                RealtimeBarContract(
+                    source_id="tonghuashun_futures",
+                    authoritative_bar_channel_id="tonghuashun_futures",
+                    quote_channel_ids=("tonghuashun_futures",),
+                ),
+            ),
+        )
+        one_second_bars = {}
+        try:
+            for quote in replay_quotes:
+                event = bars.normalize_quote(quote)
+                self.assertIsNotNone(event)
+                for bar in bars.apply(event):
+                    if bar.interval == timedelta(seconds=1):
+                        one_second_bars[bar.open_time] = bar
+        finally:
+            await bars.close()
+            await provider.close()
+
+        self.assertEqual(sorted(one_second_bars), list(received_times))
+        self.assertEqual(
+            [one_second_bars[open_time].close for open_time in received_times],
+            [Decimal("950.0"), Decimal("951.0")],
+        )
+
+    async def test_history_frames_decode_but_never_emit_realtime_quotes(self) -> None:
+        sink = _RecordingSink()
+        provider = TonghuashunFuturesProvider(
+            TonghuashunFuturesSettings(),
+            http_client=self.http,
+            frame_sink=sink,
+        )
+
+        rows = await provider.get_candles(SHFE_GOLD_WEIGHTED, count=1)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(sink.frames), 1)
+        frame = sink.frames[0]
+        self.assertEqual(frame.channel, TONGHUASHUN_HISTORY_FRAME_CHANNEL)
+        response = decode_http_response_frame(frame.body)
+        self.assertEqual(response.kind, TonghuashunHttpFrameKind.MINUTE_LAST)
+        decoded = provider.decode_frame(frame)
+        self.assertIsInstance(decoded, TonghuashunDecodedLineFrame)
+        self.assertEqual(decoded.rows[-1].close, rows[-1].close)
+        replay_quotes: list = []
+        self.assertIsNone(await provider.ingest_frame(frame, on_quote=replay_quotes.append))
+        self.assertEqual(replay_quotes, [])
+
+    async def test_malformed_and_rate_limited_responses_are_captured_first(self) -> None:
+        sink = _RecordingSink()
+
+        async def malformed_handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"not-jsonp")
+
+        malformed_http = httpx.AsyncClient(transport=httpx.MockTransport(malformed_handler))
+        malformed_provider = TonghuashunFuturesProvider(
+            TonghuashunFuturesSettings(),
+            http_client=malformed_http,
+            frame_sink=sink,
+        )
+        try:
+            with self.assertRaises(ProviderDataError):
+                await malformed_provider.get_quote(SHFE_GOLD_WEIGHTED)
+        finally:
+            await malformed_http.aclose()
+        self.assertEqual(len(sink.frames), 1)
+        self.assertEqual(decode_http_response_frame(sink.frames[0].body).content, b"not-jsonp")
+
+        async def limited_handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, content=b"rate limited")
+
+        limited_http = httpx.AsyncClient(transport=httpx.MockTransport(limited_handler))
+        limited_provider = TonghuashunFuturesProvider(
+            TonghuashunFuturesSettings(),
+            http_client=limited_http,
+            frame_sink=sink,
+        )
+        try:
+            with self.assertRaises(ProviderRateLimitError):
+                await limited_provider.get_quote(SHFE_GOLD_WEIGHTED)
+        finally:
+            await limited_http.aclose()
+        self.assertEqual(len(sink.frames), 2)
+        self.assertEqual(decode_http_response_frame(sink.frames[1].body).status_code, 429)
+
+    async def test_capture_failure_prevents_response_decode(self) -> None:
+        sink = _RecordingSink(error=RuntimeError("PubAck failed"))
+        provider = TonghuashunFuturesProvider(
+            TonghuashunFuturesSettings(),
+            http_client=self.http,
+            frame_sink=sink,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "PubAck failed"):
+            await provider.get_quote(SHFE_GOLD_WEIGHTED)
+
+        self.assertEqual(len(sink.frames), 1)
 
 
 if __name__ == "__main__":

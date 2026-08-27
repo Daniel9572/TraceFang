@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -23,6 +25,7 @@ TONGHUASHUN_HTTP_FRAME_VERSION = 1
 TONGHUASHUN_HTTP_FRAME_ENCODING = "tonghuashun_http_v1"
 TONGHUASHUN_LIVE_FRAME_CHANNEL = "tonghuashun_futures_live"
 TONGHUASHUN_HISTORY_FRAME_CHANNEL = "tonghuashun_futures_history"
+TONGHUASHUN_TIME_PRECISION = "minute"
 
 
 class TonghuashunHttpFrameKind(StrEnum):
@@ -30,6 +33,17 @@ class TonghuashunHttpFrameKind(StrEnum):
     DAILY_LAST = "daily_last"
     MINUTE_LAST = "minute_last"
     MINUTE_YEAR = "minute_year"
+
+
+def tonghuashun_frame_channel(kind: TonghuashunHttpFrameKind) -> str:
+    """Keep finite line snapshots out of the realtime replay subject."""
+
+    if kind in {
+        TonghuashunHttpFrameKind.MINUTE_LAST,
+        TonghuashunHttpFrameKind.MINUTE_YEAR,
+    }:
+        return TONGHUASHUN_HISTORY_FRAME_CHANNEL
+    return TONGHUASHUN_LIVE_FRAME_CHANNEL
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,14 +78,112 @@ class TonghuashunHttpResponseFrame:
             raise ValueError("Tonghuashun HTTP frame status_code is invalid")
         if not isinstance(self.content, bytes):
             raise TypeError("Tonghuashun HTTP frame content must be bytes")
-        if self.kind is TonghuashunHttpFrameKind.DAILY_LAST and not self.trade_date:
+        if self.kind is TonghuashunHttpFrameKind.DAILY_LAST and (
+            self.trade_date is None or not self.trade_date.strip()
+        ):
             raise ValueError("a daily-last frame requires trade_date")
         if self.kind in {
             TonghuashunHttpFrameKind.DAILY_LAST,
             TonghuashunHttpFrameKind.MINUTE_LAST,
             TonghuashunHttpFrameKind.MINUTE_YEAR,
-        } and (not self.period or not self.file):
+        } and (
+            self.period is None
+            or not self.period.strip()
+            or self.file is None
+            or not self.file.strip()
+        ):
             raise ValueError("a line frame requires period and file")
+
+
+def encode_http_response_frame(frame: TonghuashunHttpResponseFrame) -> bytes:
+    """Serialize one lossless, versioned HTTP response recording."""
+
+    value = {
+        "version": frame.version,
+        "kind": frame.kind.value,
+        "provider_code": frame.provider_code,
+        "capability": frame.capability,
+        "request_url": frame.request_url,
+        "status_code": frame.status_code,
+        "content_type": frame.content_type,
+        "text_encoding": frame.text_encoding,
+        "content_base64": base64.b64encode(frame.content).decode("ascii"),
+        "period": frame.period,
+        "file": frame.file,
+        "trade_date": frame.trade_date,
+    }
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+
+
+def decode_http_response_frame(body: bytes) -> TonghuashunHttpResponseFrame:
+    """Purely restore the exact HTTP response and its request context."""
+
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ProviderDataError("Tonghuashun recorded HTTP frame is invalid JSON") from error
+    if not isinstance(value, Mapping):
+        raise ProviderDataError("Tonghuashun recorded HTTP frame has an invalid root")
+    try:
+        required_text = {}
+        for field in (
+            "kind",
+            "provider_code",
+            "capability",
+            "request_url",
+            "text_encoding",
+        ):
+            item = value[field]
+            if not isinstance(item, str) or not item.strip():
+                raise TypeError(f"{field} must be non-empty text")
+            required_text[field] = item
+        raw_content = value["content_base64"]
+        if not isinstance(raw_content, str):
+            raise TypeError("content_base64 must be text")
+        content = base64.b64decode(raw_content, validate=True)
+        content_type = value.get("content_type")
+        if content_type is not None and not isinstance(content_type, str):
+            raise TypeError("content_type must be text or null")
+        optional_text = {}
+        for field in ("period", "file", "trade_date"):
+            item = value.get(field)
+            if item is not None and not isinstance(item, str):
+                raise TypeError(f"{field} must be text or null")
+            optional_text[field] = item
+        status_code = value["status_code"]
+        version = value["version"]
+        if isinstance(status_code, bool) or not isinstance(status_code, int):
+            raise TypeError("status_code must be an integer")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise TypeError("version must be an integer")
+        return TonghuashunHttpResponseFrame(
+            version=version,
+            kind=TonghuashunHttpFrameKind(required_text["kind"]),
+            provider_code=required_text["provider_code"],
+            capability=required_text["capability"],
+            request_url=required_text["request_url"],
+            status_code=status_code,
+            content_type=content_type,
+            text_encoding=required_text["text_encoding"],
+            content=content,
+            period=optional_text["period"],
+            file=optional_text["file"],
+            trade_date=optional_text["trade_date"],
+        )
+    except (KeyError, TypeError, ValueError, binascii.Error) as error:
+        raise ProviderDataError("Tonghuashun recorded HTTP frame metadata is invalid") from error
+
+
+def decode_http_response_jsonp(frame: TonghuashunHttpResponseFrame) -> Mapping[str, Any]:
+    """Decode captured response bytes without reconstructing an ``httpx.Response``."""
+
+    try:
+        text = frame.content.decode(frame.text_encoding)
+    except (LookupError, UnicodeDecodeError) as error:
+        raise ProviderDataError("Tonghuashun recorded HTTP response encoding is invalid") from error
+    return decode_jsonp(text)
 
 
 @dataclass(frozen=True, slots=True)

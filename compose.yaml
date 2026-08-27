@@ -4,11 +4,14 @@ services:
   nats:
     image: nats:2.12-alpine
     restart: unless-stopped
-    command: ["-js", "-sd", "/data", "-m", "8222"]
+    command: ["-c", "/etc/nats/nats-server.conf", "-js", "-sd", "/data", "-m", "8222"]
+    environment:
+      MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES: ${MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES:-33554432}
     ports:
       - "127.0.0.1:${MARKET_ANALYSIS_NATS_PORT:-14222}:4222"
       - "127.0.0.1:${MARKET_ANALYSIS_NATS_MONITOR_PORT:-18222}:8222"
     volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
       - market-analysis-nats:/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8222/healthz?js-enabled-only=true' >/dev/null"]

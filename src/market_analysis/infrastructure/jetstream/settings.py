@@ -17,6 +17,7 @@ class JetStreamSettings:
     publish_timeout_seconds: float = 2.0
     max_age_seconds: float = 7 * 24 * 60 * 60
     max_bytes: int = 10 * 1024 * 1024 * 1024
+    max_frame_bytes: int = 32 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if not self.url.strip():
@@ -33,6 +34,12 @@ class JetStreamSettings:
             raise ValueError("JetStream maximum age must be positive")
         if self.max_bytes <= 0:
             raise ValueError("JetStream maximum bytes must be positive")
+        if self.max_frame_bytes <= 0:
+            raise ValueError("JetStream maximum frame bytes must be positive")
+        if self.max_frame_bytes > self.max_bytes:
+            raise ValueError(
+                "JetStream maximum frame bytes must not exceed the stream maximum bytes"
+            )
 
     @property
     def capture_subject(self) -> str:
@@ -62,4 +69,7 @@ class JetStreamSettings:
             ),
             max_age_seconds=float(os.environ.get("MARKET_ANALYSIS_NATS_MAX_AGE_SECONDS", "604800")),
             max_bytes=int(os.environ.get("MARKET_ANALYSIS_NATS_MAX_BYTES", "10737418240")),
+            max_frame_bytes=int(
+                os.environ.get("MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES", "33554432")
+            ),
         )

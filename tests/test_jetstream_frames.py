@@ -12,7 +12,9 @@ from nats.js.api import (
     DeliverPolicy,
     DiscardPolicy,
     ReplayPolicy,
+    RetentionPolicy,
     StorageType,
+    StreamConfig,
 )
 from nats.js.errors import NotFoundError
 
@@ -96,6 +98,7 @@ class FakeJetStream:
         self.subscribe_call = None
         self.deleted = []
         self.created_config = None
+        self.updated_config = None
         self.stream_state = SimpleNamespace(messages=5, first_seq=1, last_seq=5)
         self.stored_messages = {}
 
@@ -131,10 +134,60 @@ class FakeJetStream:
     async def add_stream(self, *, config) -> None:
         self.created_config = config
 
+    async def update_stream(self, *, config) -> None:
+        self.updated_config = config
+
 
 class MissingStreamJetStream(FakeJetStream):
     async def stream_info(self, name):
         raise NotFoundError
+
+
+class LegacyDiscardNewJetStream(FakeJetStream):
+    async def stream_info(self, name):
+        return SimpleNamespace(
+            state=self.stream_state,
+            config=SimpleNamespace(
+                subjects=["market.raw.>"],
+                storage=StorageType.FILE,
+                retention=RetentionPolicy.LIMITS,
+                discard=DiscardPolicy.NEW,
+            ),
+        )
+
+
+class EmptyLegacyDiscardNewJetStream(FakeJetStream):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_state = SimpleNamespace(messages=0, first_seq=1, last_seq=0)
+
+    async def stream_info(self, name):
+        return SimpleNamespace(
+            state=self.stream_state,
+            config=StreamConfig(
+                name="MARKET_RAW_FRAMES",
+                subjects=["market.raw.>"],
+                retention=RetentionPolicy.LIMITS,
+                max_bytes=10 * 1024 * 1024 * 1024,
+                discard=DiscardPolicy.NEW,
+                max_age=7 * 24 * 60 * 60,
+                storage=StorageType.FILE,
+            ),
+        )
+
+
+class LimitedMessageJetStream(FakeJetStream):
+    async def stream_info(self, name):
+        return SimpleNamespace(
+            state=self.stream_state,
+            config=SimpleNamespace(
+                subjects=["market.raw.>"],
+                storage=StorageType.FILE,
+                retention=RetentionPolicy.LIMITS,
+                discard=DiscardPolicy.OLD,
+                max_msg_size=1024,
+            ),
+        )
 
 
 def connected_store(jetstream: FakeJetStream) -> FrameStore:
@@ -156,6 +209,7 @@ class JetStreamSettingsTests(unittest.TestCase):
             "MARKET_ANALYSIS_NATS_SUBJECT_PREFIX": "test.raw",
             "MARKET_ANALYSIS_NATS_MAX_AGE_SECONDS": "60",
             "MARKET_ANALYSIS_NATS_MAX_BYTES": "4096",
+            "MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES": "2048",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = JetStreamSettings.from_env()
@@ -166,6 +220,15 @@ class JetStreamSettingsTests(unittest.TestCase):
         self.assertEqual(settings.channel_subject("jin10_web"), "test.raw.jin10_web")
         self.assertEqual(settings.max_age_seconds, 60)
         self.assertEqual(settings.max_bytes, 4096)
+        self.assertEqual(settings.max_frame_bytes, 2048)
+
+    def test_rejects_frame_limit_larger_than_stream_capacity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            JetStreamSettings(
+                "nats://127.0.0.1:14222",
+                max_bytes=1024,
+                max_frame_bytes=2048,
+            )
 
 
 class FrameEnvelopeTests(unittest.TestCase):
@@ -213,14 +276,76 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "acknowledgement failed"):
             await store.capture(envelope())
 
-    async def test_creates_file_stream_that_refuses_new_frames_at_capacity(self) -> None:
+    async def test_capture_rejects_encoded_headers_plus_body_before_publish(self) -> None:
+        value = envelope()
+        jetstream = FakeJetStream()
+        jetstream.release_publish.set()
+        store = FrameStore(
+            JetStreamSettings(
+                "nats://127.0.0.1:14222",
+                max_frame_bytes=len(value.body),
+            )
+        )
+        store._client = ConnectedClient()
+        store._jetstream = jetstream
+
+        with self.assertRaisesRegex(ValueError, "encoded provider frame"):
+            await store.capture(value)
+
+        self.assertIsNone(jetstream.publish_call)
+
+    async def test_rejects_server_payload_smaller_than_frame_limit(self) -> None:
+        store = FrameStore(JetStreamSettings("nats://127.0.0.1:14222"))
+
+        with self.assertRaisesRegex(RuntimeError, "nats-server.conf"):
+            store._validate_server_capacity(SimpleNamespace(max_payload=1024))
+
+    async def test_accepts_server_payload_equal_to_frame_limit(self) -> None:
+        settings = JetStreamSettings("nats://127.0.0.1:14222")
+        store = FrameStore(settings)
+
+        store._validate_server_capacity(
+            SimpleNamespace(max_payload=settings.max_frame_bytes)
+        )
+
+    async def test_creates_rolling_file_stream_that_retains_latest_frames(self) -> None:
         jetstream = MissingStreamJetStream()
         store = connected_store(jetstream)
         await store._ensure_stream(jetstream)
         config = jetstream.created_config
         self.assertEqual(config.storage, StorageType.FILE)
-        self.assertEqual(config.discard, DiscardPolicy.NEW)
+        self.assertEqual(config.discard, DiscardPolicy.OLD)
         self.assertEqual(config.subjects, ["market.raw.>"])
+        self.assertEqual(config.max_msg_size, store.settings.max_frame_bytes)
+
+    async def test_rejects_legacy_stream_instead_of_silently_losing_live_edge(self) -> None:
+        jetstream = LegacyDiscardNewJetStream()
+        store = connected_store(jetstream)
+
+        with self.assertRaisesRegex(RuntimeError, "legacy retention policy"):
+            await store._ensure_stream(jetstream)
+
+    async def test_safely_migrates_empty_legacy_stream_to_rolling_retention(self) -> None:
+        jetstream = EmptyLegacyDiscardNewJetStream()
+        store = connected_store(jetstream)
+
+        await store._ensure_stream(jetstream)
+
+        self.assertIsNotNone(jetstream.updated_config)
+        self.assertEqual(jetstream.updated_config.discard, DiscardPolicy.OLD)
+        self.assertEqual(
+            jetstream.updated_config.max_msg_size,
+            store.settings.max_frame_bytes,
+        )
+
+    async def test_rejects_nonempty_stream_with_smaller_message_limit(self) -> None:
+        jetstream = LimitedMessageJetStream()
+        store = connected_store(jetstream)
+
+        with self.assertRaisesRegex(RuntimeError, "select a new"):
+            await store._ensure_stream(jetstream)
+
+        self.assertIsNone(jetstream.updated_config)
 
     async def test_replay_uses_capture_timing_and_finite_sequence_range(self) -> None:
         messages = (
@@ -253,7 +378,7 @@ class FrameStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.deliver_policy, DeliverPolicy.BY_START_SEQUENCE)
         self.assertEqual(config.opt_start_seq, 2)
         self.assertEqual(config.ack_policy, AckPolicy.NONE)
-        self.assertEqual(config.replay_policy, ReplayPolicy.INSTANT)
+        self.assertEqual(config.replay_policy, ReplayPolicy.ORIGINAL)
         self.assertTrue(subscription.unsubscribed)
         self.assertEqual(
             jetstream.deleted,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from market_analysis.application.period_bars import PeriodBarService
@@ -55,6 +56,7 @@ class MarketReplayProjector:
         self._schedule = schedule
         self._bars = RealtimeBarService(None, contracts=contracts)
         self._period_bars = PeriodBarService(self._bars)
+        self._warmup_open_time: datetime | None = None
 
     async def close(self) -> None:
         await self._bars.close()
@@ -109,10 +111,12 @@ class MarketReplayProjector:
         for bar in transitions:
             interval_seconds = int(bar.interval.total_seconds())
             if self._period_id == "1s" and interval_seconds == 1:
-                events.append(ReplayStreamEvent(kind="bar", bar=bar, **base))
+                if self._bar_is_complete_after_warmup(bar):
+                    events.append(ReplayStreamEvent(kind="bar", bar=bar, **base))
                 continue
             if self._period_id == "1m" and interval_seconds == 60:
-                events.append(ReplayStreamEvent(kind="bar", bar=bar, **base))
+                if self._bar_is_complete_after_warmup(bar):
+                    events.append(ReplayStreamEvent(kind="bar", bar=bar, **base))
                 continue
             if interval_seconds != 60 or self._period_id in {"1s", "1m"}:
                 continue
@@ -121,9 +125,17 @@ class MarketReplayProjector:
                 schedule=self._schedule,
                 period_ids=(self._period_id,),
             ):
-                if period_id == self._period_id:
+                if period_id == self._period_id and self._bar_is_complete_after_warmup(projected):
                     events.append(ReplayStreamEvent(kind="bar", bar=projected, **base))
         return tuple(events)
+
+    def _bar_is_complete_after_warmup(self, bar: RealtimeBar) -> bool:
+        """Never render the retained stream's potentially truncated first bucket."""
+
+        if self._warmup_open_time is None:
+            self._warmup_open_time = bar.open_time
+            return False
+        return bar.open_time > self._warmup_open_time
 
     @staticmethod
     def _safe_error(error: Exception) -> str:
