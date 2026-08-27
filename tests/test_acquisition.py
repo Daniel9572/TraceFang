@@ -5,9 +5,9 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from market_analysis.application.acquisition import QuoteAcquisitionRouter
-from market_analysis.domain.models import QuoteSnapshot, SourceMetadata
-from market_analysis.infrastructure.providers.jin10 import SPOT_GOLD, SPOT_SILVER
+from tracefang.application.acquisition import QuoteAcquisitionRouter
+from tracefang.domain.models import QuoteSnapshot, SourceMetadata
+from tracefang.infrastructure.providers.jin10 import SPOT_GOLD, SPOT_SILVER
 
 
 def quote(source: str, instrument=SPOT_GOLD) -> QuoteSnapshot:

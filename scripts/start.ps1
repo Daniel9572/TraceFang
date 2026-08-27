@@ -20,7 +20,7 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
     }
 }
 else {
-    Write-Warning "Docker is not installed. Configure MARKET_ANALYSIS_DATABASE_URL for an external PostgreSQL instance."
+    Write-Warning "Docker is not installed. Configure TRACEFANG_DATABASE_URL for an external PostgreSQL instance."
 }
 
 $url = "http://127.0.0.1:8000"
@@ -28,7 +28,7 @@ $openBrowser = "Start-Sleep -Seconds 2; Start-Process '$url'"
 Start-Process powershell.exe -ArgumentList "-NoProfile", "-Command", $openBrowser -WindowStyle Hidden
 Push-Location $projectRoot
 try {
-    & $python -m uvicorn market_analysis.api:app --host 127.0.0.1 --port 8000
+    & $python -m uvicorn tracefang.api:app --host 127.0.0.1 --port 8000
 }
 finally {
     Pop-Location

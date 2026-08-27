@@ -8,11 +8,11 @@ from urllib.request import urlopen
 
 import websockets
 
-API_TEST_URL = os.environ.get("MARKET_ANALYSIS_TEST_API_URL", "").rstrip("/")
-API_TEST_CODE = os.environ.get("MARKET_ANALYSIS_TEST_REPLAY_CODE", "XAUUSD").strip()
+API_TEST_URL = os.environ.get("TRACEFANG_TEST_API_URL", "").rstrip("/")
+API_TEST_CODE = os.environ.get("TRACEFANG_TEST_REPLAY_CODE", "XAUUSD").strip()
 
 
-@unittest.skipUnless(API_TEST_URL, "MARKET_ANALYSIS_TEST_API_URL is not configured")
+@unittest.skipUnless(API_TEST_URL, "TRACEFANG_TEST_API_URL is not configured")
 class ReplayApiIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def _bounds(self) -> dict[str, object]:
         def read_bounds() -> dict[str, object]:

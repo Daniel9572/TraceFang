@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 import unittest
 
-from market_analysis.infrastructure.providers.jin10_web.protocol import (
+from tracefang.infrastructure.providers.jin10_web.protocol import (
     QUOTE_REQUEST_PROTOCOL,
     decode_message,
     encode_quote_subscription,

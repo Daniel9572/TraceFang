@@ -5,19 +5,19 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
-from market_analysis import api
-from market_analysis.application.multi_timeframe import (
+from tracefang import api
+from tracefang.application.multi_timeframe import (
     MultiTimeframeTrendService,
     TimeframeComparisonState,
     TimeframeHorizon,
     TimeframeSummaryState,
     TrendDirection,
 )
-from market_analysis.application.period_bars import PeriodBarPage
-from market_analysis.application.quotes import JIN10_CLIENT_SOURCE
-from market_analysis.domain.market_events import BarState, RealtimeBar
-from market_analysis.domain.models import SourceMetadata
-from market_analysis.instruments import SPOT_GOLD
+from tracefang.application.period_bars import PeriodBarPage
+from tracefang.application.quotes import JIN10_CLIENT_SOURCE
+from tracefang.domain.market_events import BarState, RealtimeBar
+from tracefang.domain.models import SourceMetadata
+from tracefang.instruments import SPOT_GOLD
 
 INTERVALS = {
     "1h": timedelta(hours=1),

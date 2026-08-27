@@ -6,12 +6,12 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from market_analysis.history_management.histdata import HistDataPackageLoader
-from market_analysis.history_management.postgres import (
+from tracefang.history_management.histdata import HistDataPackageLoader
+from tracefang.history_management.postgres import (
     HistoricalDatasetAlreadyExistsError,
     HistoricalPostgresRepository,
 )
-from market_analysis.infrastructure.postgres.settings import PostgresSettings
+from tracefang.infrastructure.postgres.settings import PostgresSettings
 
 
 def _settings(project_root: Path) -> PostgresSettings:
@@ -20,15 +20,15 @@ def _settings(project_root: Path) -> PostgresSettings:
         path = project_root / name
         if path.is_file():
             values.update(dotenv_values(path))
-    dsn = (values.get("MARKET_ANALYSIS_DATABASE_URL") or "").strip()
+    dsn = (values.get("TRACEFANG_DATABASE_URL") or "").strip()
     if not dsn:
-        raise RuntimeError("MARKET_ANALYSIS_DATABASE_URL is not configured")
+        raise RuntimeError("TRACEFANG_DATABASE_URL is not configured")
     return PostgresSettings(
         dsn=dsn,
-        min_pool_size=int(values.get("MARKET_ANALYSIS_DB_MIN_POOL_SIZE") or "1"),
-        max_pool_size=int(values.get("MARKET_ANALYSIS_DB_MAX_POOL_SIZE") or "5"),
+        min_pool_size=int(values.get("TRACEFANG_DB_MIN_POOL_SIZE") or "1"),
+        max_pool_size=int(values.get("TRACEFANG_DB_MAX_POOL_SIZE") or "5"),
         command_timeout_seconds=float(
-            values.get("MARKET_ANALYSIS_DB_COMMAND_TIMEOUT_SECONDS") or "10"
+            values.get("TRACEFANG_DB_COMMAND_TIMEOUT_SECONDS") or "10"
         ),
     )
 

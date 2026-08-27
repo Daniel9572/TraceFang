@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from market_analysis import api
+from tracefang import api
 
 
 class WatchlistApiTests(unittest.IsolatedAsyncioTestCase):

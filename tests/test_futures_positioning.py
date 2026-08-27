@@ -4,7 +4,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.futures_positioning import (
+from tracefang.application.futures_positioning import (
     OpenCloseBreakdown,
     OpenInterestParticipation,
     PriceDirection,
@@ -12,7 +12,7 @@ from market_analysis.application.futures_positioning import (
     PriceOpenInterestWindow,
     classify_price_open_interest,
 )
-from market_analysis.domain.market_context import DirectionalInference
+from tracefang.domain.market_context import DirectionalInference
 
 START = datetime(2026, 8, 11, 1, 0, tzinfo=UTC)
 

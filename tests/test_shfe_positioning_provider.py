@@ -5,12 +5,12 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from market_analysis.domain.errors import ProviderDataError
-from market_analysis.domain.market_context import (
+from tracefang.domain.errors import ProviderDataError
+from tracefang.domain.market_context import (
     DirectionalInference,
     PositionCountingMethod,
 )
-from market_analysis.infrastructure.providers.shfe_positioning import (
+from tracefang.infrastructure.providers.shfe_positioning import (
     ShfePositioningProvider,
 )
 

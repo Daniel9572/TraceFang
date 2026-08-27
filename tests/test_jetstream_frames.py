@@ -18,7 +18,7 @@ from nats.js.api import (
 )
 from nats.js.errors import NotFoundError
 
-from market_analysis.infrastructure.jetstream import (
+from tracefang.infrastructure.jetstream import (
     FrameEnvelope,
     FrameStore,
     JetStreamSettings,
@@ -204,12 +204,12 @@ class JetStreamSettingsTests(unittest.TestCase):
 
     def test_loads_explicit_configuration(self) -> None:
         values = {
-            "MARKET_ANALYSIS_NATS_URL": "nats://127.0.0.1:14222",
-            "MARKET_ANALYSIS_NATS_STREAM": "RAW_TEST",
-            "MARKET_ANALYSIS_NATS_SUBJECT_PREFIX": "test.raw",
-            "MARKET_ANALYSIS_NATS_MAX_AGE_SECONDS": "60",
-            "MARKET_ANALYSIS_NATS_MAX_BYTES": "4096",
-            "MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES": "2048",
+            "TRACEFANG_NATS_URL": "nats://127.0.0.1:14222",
+            "TRACEFANG_NATS_STREAM": "RAW_TEST",
+            "TRACEFANG_NATS_SUBJECT_PREFIX": "test.raw",
+            "TRACEFANG_NATS_MAX_AGE_SECONDS": "60",
+            "TRACEFANG_NATS_MAX_BYTES": "4096",
+            "TRACEFANG_NATS_MAX_FRAME_BYTES": "2048",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = JetStreamSettings.from_env()

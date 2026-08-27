@@ -7,12 +7,12 @@ import unittest
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from market_analysis.infrastructure.jetstream import FrameEnvelope, FrameStore, JetStreamSettings
+from tracefang.infrastructure.jetstream import FrameEnvelope, FrameStore, JetStreamSettings
 
-NATS_TEST_URL = os.environ.get("MARKET_ANALYSIS_TEST_NATS_URL", "").strip()
+NATS_TEST_URL = os.environ.get("TRACEFANG_TEST_NATS_URL", "").strip()
 
 
-@unittest.skipUnless(NATS_TEST_URL, "MARKET_ANALYSIS_TEST_NATS_URL is not configured")
+@unittest.skipUnless(NATS_TEST_URL, "TRACEFANG_TEST_NATS_URL is not configured")
 class JetStreamReplayIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """Black-box contract against a real nats-server with JetStream enabled."""
 

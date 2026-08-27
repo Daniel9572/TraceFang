@@ -5,11 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from market_analysis.application.expert_ai import (
+from tracefang.application.expert_ai import (
     CodexExpertAnalysisService,
     CommandResult,
 )
-from market_analysis.application.options import unconfigured_gold_options_snapshot
+from tracefang.application.options import unconfigured_gold_options_snapshot
 
 
 class _Runner:
@@ -163,7 +163,7 @@ class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
                 "USERPROFILE": "safe-profile",
                 "JIN10_LOCAL_SESSION_TOKEN": "market-secret",
                 "OPENAI_API_KEY": "api-secret",
-                "MARKET_ANALYSIS_DATABASE_URL": "database-secret",
+                "TRACEFANG_DATABASE_URL": "database-secret",
             },
             clear=True,
         ):
@@ -173,7 +173,7 @@ class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(environment["USERPROFILE"], "safe-profile")
         self.assertNotIn("JIN10_LOCAL_SESSION_TOKEN", environment)
         self.assertNotIn("OPENAI_API_KEY", environment)
-        self.assertNotIn("MARKET_ANALYSIS_DATABASE_URL", environment)
+        self.assertNotIn("TRACEFANG_DATABASE_URL", environment)
 
     def test_agent_message_with_credential_shape_is_rejected(self) -> None:
         stdout = (

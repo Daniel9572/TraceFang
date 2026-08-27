@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from market_analysis.history_management.admission import HistoricalAdmissionPolicy
-from market_analysis.history_management.histdata import HistDataPackageLoader
-from market_analysis.history_management.models import (
+from tracefang.history_management.admission import HistoricalAdmissionPolicy
+from tracefang.history_management.histdata import HistDataPackageLoader
+from tracefang.history_management.models import (
     AdmissionTarget,
     BarPriceBasis,
     DatasetState,

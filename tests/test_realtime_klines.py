@@ -5,18 +5,18 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.quotes import (
+from tracefang.application.quotes import (
     QuoteQuality,
     QuoteView,
     RealtimeQuoteSnapshot,
 )
-from market_analysis.application.realtime_bars import (
+from tracefang.application.realtime_bars import (
     RealtimeBarContract,
     RealtimeBarService,
 )
-from market_analysis.domain.errors import ProviderUnavailableError
-from market_analysis.domain.market_events import BarState, QuoteSample, RealtimeBar
-from market_analysis.domain.models import (
+from tracefang.domain.errors import ProviderUnavailableError
+from tracefang.domain.market_events import BarState, QuoteSample, RealtimeBar
+from tracefang.domain.models import (
     AssetClass,
     Candle,
     Instrument,

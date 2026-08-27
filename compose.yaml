@@ -1,4 +1,4 @@
-name: market-analysis-platform
+name: tracefang
 
 services:
   nats:
@@ -6,13 +6,13 @@ services:
     restart: unless-stopped
     command: ["-c", "/etc/nats/nats-server.conf", "-js", "-sd", "/data", "-m", "8222"]
     environment:
-      MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES: ${MARKET_ANALYSIS_NATS_MAX_FRAME_BYTES:-33554432}
+      TRACEFANG_NATS_MAX_FRAME_BYTES: ${TRACEFANG_NATS_MAX_FRAME_BYTES:-33554432}
     ports:
-      - "127.0.0.1:${MARKET_ANALYSIS_NATS_PORT:-14222}:4222"
-      - "127.0.0.1:${MARKET_ANALYSIS_NATS_MONITOR_PORT:-18222}:8222"
+      - "127.0.0.1:${TRACEFANG_NATS_PORT:-14222}:4222"
+      - "127.0.0.1:${TRACEFANG_NATS_MONITOR_PORT:-18222}:8222"
     volumes:
       - ./nats-server.conf:/etc/nats/nats-server.conf:ro
-      - market-analysis-nats:/data
+      - tracefang-nats:/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8222/healthz?js-enabled-only=true' >/dev/null"]
       interval: 3s
@@ -27,9 +27,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "127.0.0.1:${MARKET_ANALYSIS_POSTGRES_PORT}:5432"
+      - "127.0.0.1:${TRACEFANG_POSTGRES_PORT}:5432"
     volumes:
-      - market-analysis-postgres:/var/lib/postgresql/data
+      - tracefang-postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 3s
@@ -37,5 +37,5 @@ services:
       retries: 20
 
 volumes:
-  market-analysis-nats:
-  market-analysis-postgres:
+  tracefang-nats:
+  tracefang-postgres:

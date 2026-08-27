@@ -1240,7 +1240,7 @@ export default function App() {
       data-market-phase={marketSession.phase}
     >
       <header className="top-command-bar">
-        <div className="top-brand" title="Market Pulse">
+        <div className="top-brand" title="TraceFang">
           <div className="top-brand-mark"><span>M</span></div>
           <div>
             <small>MARKET WATCH</small>

@@ -5,11 +5,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.history_management.admission import (
+from tracefang.history_management.admission import (
     HistoricalAdmissionPolicy,
     create_canonical_segment,
 )
-from market_analysis.history_management.models import (
+from tracefang.history_management.models import (
     AdmissionTarget,
     ArtifactVerification,
     BarObservation,
@@ -25,7 +25,7 @@ from market_analysis.history_management.models import (
     TimestampSemantics,
     ValidationStatus,
 )
-from market_analysis.history_management.validation import (
+from tracefang.history_management.validation import (
     HistoricalDatasetValidator,
     compare_bar_datasets,
     evaluate_compatibility,

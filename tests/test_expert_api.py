@@ -8,21 +8,21 @@ from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
-from market_analysis import api
-from market_analysis.application.expert_ai import (
+from tracefang import api
+from tracefang.application.expert_ai import (
     EXPERT_STRATEGY_CATALOG,
     ExpertAiAnalysisResult,
     ExpertAiStatus,
 )
-from market_analysis.application.options import unconfigured_gold_options_snapshot
-from market_analysis.application.period_bars import PeriodBarPage
-from market_analysis.application.quotes import (
+from tracefang.application.options import unconfigured_gold_options_snapshot
+from tracefang.application.period_bars import PeriodBarPage
+from tracefang.application.quotes import (
     JIN10_CLIENT_SOURCE,
     QuoteQuality,
     QuoteView,
     RealtimeQuoteSnapshot,
 )
-from market_analysis.domain.market_context import (
+from tracefang.domain.market_context import (
     DirectionalInference,
     EndOfDayMarketContextSource,
     FuturesContractPosition,
@@ -31,9 +31,9 @@ from market_analysis.domain.market_context import (
     PositionCountingMethod,
     VolatilityIndexEodContext,
 )
-from market_analysis.domain.market_events import BarState, RealtimeBar
-from market_analysis.domain.models import SourceMetadata
-from market_analysis.instruments import SPOT_GOLD
+from tracefang.domain.market_events import BarState, RealtimeBar
+from tracefang.domain.models import SourceMetadata
+from tracefang.instruments import SPOT_GOLD
 
 
 class _QuoteViews:

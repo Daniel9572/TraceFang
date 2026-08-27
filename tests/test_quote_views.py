@@ -4,17 +4,17 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.quotes import (
+from tracefang.application.quotes import (
     JIN10_CLIENT_SOURCE,
     TONGHUASHUN_FUTURES_SOURCE,
     LatestQuoteCache,
     QuoteQuality,
     QuoteViewService,
 )
-from market_analysis.domain.errors import ProviderUnavailableError
-from market_analysis.domain.models import Instrument, QuoteSnapshot, SourceMetadata
-from market_analysis.infrastructure.providers.jin10 import SPOT_GOLD
-from market_analysis.instruments import (
+from tracefang.domain.errors import ProviderUnavailableError
+from tracefang.domain.models import Instrument, QuoteSnapshot, SourceMetadata
+from tracefang.infrastructure.providers.jin10 import SPOT_GOLD
+from tracefang.instruments import (
     SHFE_GOLD_WEIGHTED,
     SPOT_GOLD_CNH_PER_GRAM,
     TROY_OUNCE_GRAMS,

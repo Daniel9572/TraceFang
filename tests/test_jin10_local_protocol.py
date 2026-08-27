@@ -4,7 +4,7 @@ import gzip
 import struct
 import unittest
 
-from market_analysis.infrastructure.providers.jin10_local.protocol import (
+from tracefang.infrastructure.providers.jin10_local.protocol import (
     ADVANCED_QUOTE_REQUEST_PROTOCOL,
     KLINE_HISTORY_PROTOCOL,
     KLINE_SUBSCRIPTION_PROTOCOL,

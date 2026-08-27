@@ -1,4 +1,4 @@
-# Market Analysis Platform
+# TraceFang
 
 面向多市场、多品种和多数据源的交易分析平台。当前目录覆盖现货贵金属、人民币汇率、沪金/沪银加权与具体月份合约、美元指数、布伦特原油连续、上证指数和纳斯达克综合指数，用于验证结构化采集、可信存储、品种观察管理、按合约来源管理和 K 线终端。
 
@@ -55,7 +55,7 @@ Copy-Item .env.example .env
 uv sync --python 3.13
 corepack pnpm -C web install --frozen-lockfile
 corepack pnpm -C web build
-uv run market-analysis-server
+uv run tracefang-server
 ```
 
 真实 Token 不得写入 `.env` 以外的非忽略文件、代码、测试、日志或 Git 历史。若 Token 曾粘贴到聊天或其他可留存位置，建议在服务端重新生成。

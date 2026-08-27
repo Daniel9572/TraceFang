@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from market_analysis.history_management.postgres import (
+from tracefang.history_management.postgres import (
     _SELECT_TRUSTED_BARS,
     _SELECT_TRUSTED_QUOTES,
     HISTORY_SCHEMA_SQL,

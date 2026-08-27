@@ -5,8 +5,8 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.history import LocalCandleHistoryService
-from market_analysis.domain.models import AssetClass, Candle, Instrument, SourceMetadata
+from tracefang.application.history import LocalCandleHistoryService
+from tracefang.domain.models import AssetClass, Candle, Instrument, SourceMetadata
 
 INSTRUMENT = Instrument("XAUUSD", AssetClass.METAL, "XAU", "USD", "OTC")
 

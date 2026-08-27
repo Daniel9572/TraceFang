@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Protocol
+
+from tracefang.domain.market_events import RealtimeBar
+from tracefang.domain.models import Candle, Instrument, QuoteSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class PersistenceHealth:
+    state: str
+    detail: str | None
+    queue_depth: int
+    last_write_at: datetime | None
+
+
+class MarketDataStore(Protocol):
+    async def open(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def save_quote(self, quote: QuoteSnapshot) -> None: ...
+
+    async def load_latest_quote(
+        self,
+        instrument: Instrument,
+        source_id: str,
+    ) -> QuoteSnapshot | None: ...
+
+    async def save_candles(self, candles: Sequence[Candle]) -> None: ...
+
+    async def save_realtime_bars(self, bars: Sequence[RealtimeBar]) -> None: ...
+
+    async def remove_source_from_standard_history(
+        self,
+        source_id: str,
+    ) -> Mapping[str, int]: ...
+
+    async def standardize_candles(
+        self,
+        instrument: Instrument,
+        *,
+        source_priority: Sequence[str],
+        quote_derived_sources: Sequence[str],
+        start: datetime,
+        end: datetime,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> None: ...
+
+    async def load_candles(
+        self,
+        instrument: Instrument,
+        *,
+        source_priority: Sequence[str],
+        quote_derived_sources: Sequence[str],
+        interval: timedelta = timedelta(minutes=1),
+        start: datetime | None = None,
+        count: int = 100,
+    ) -> tuple[Candle, ...]: ...
+
+
+class MarketDataWriter(Protocol):
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    def submit_quote(self, quote: QuoteSnapshot) -> bool: ...
+
+    def submit_candles(self, candles: Sequence[Candle]) -> bool: ...
+
+    def submit_realtime_bars(self, bars: Sequence[RealtimeBar]) -> bool: ...
+
+    def health(self) -> PersistenceHealth: ...

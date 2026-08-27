@@ -2,10 +2,10 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from market_analysis.application.services import MarketDataService
-from market_analysis.domain.errors import ProviderUnavailableError
-from market_analysis.domain.models import QuoteSnapshot, SourceMetadata
-from market_analysis.infrastructure.providers.jin10.symbols import SPOT_GOLD
+from tracefang.application.services import MarketDataService
+from tracefang.domain.errors import ProviderUnavailableError
+from tracefang.domain.models import QuoteSnapshot, SourceMetadata
+from tracefang.infrastructure.providers.jin10.symbols import SPOT_GOLD
 
 
 class FailingProvider:

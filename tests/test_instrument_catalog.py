@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import unittest
 
-from market_analysis.infrastructure.providers.jin10 import Jin10SymbolMapper
-from market_analysis.infrastructure.providers.jin10_local.symbols import (
+from tracefang.infrastructure.providers.jin10 import Jin10SymbolMapper
+from tracefang.infrastructure.providers.jin10_local.symbols import (
     Jin10LocalSymbolMapper,
 )
-from market_analysis.infrastructure.providers.jin10_web.symbols import Jin10WebSymbolMapper
-from market_analysis.infrastructure.providers.tonghuashun_futures import (
+from tracefang.infrastructure.providers.jin10_web.symbols import Jin10WebSymbolMapper
+from tracefang.infrastructure.providers.tonghuashun_futures import (
     TonghuashunFuturesSymbolMapper,
 )
-from market_analysis.instruments import (
+from tracefang.instruments import (
     BRENT_CRUDE_CONTINUOUS,
     INSTRUMENT_CATALOG,
     NASDAQ_COMPOSITE,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 
-from market_analysis.application.gold_events import (
+from tracefang.application.gold_events import (
     GOLD_EVENT_FACTS,
     GOLD_EVENT_TYPES,
     gold_event_catalog_snapshot,

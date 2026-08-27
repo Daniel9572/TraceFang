@@ -5,14 +5,14 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from market_analysis.application.provider_frames import ProviderFrame
-from market_analysis.domain.errors import ProviderDataError
-from market_analysis.infrastructure.providers.jin10_web.protocol import (
+from tracefang.application.provider_frames import ProviderFrame
+from tracefang.domain.errors import ProviderDataError
+from tracefang.infrastructure.providers.jin10_web.protocol import (
     QUOTE_PUSH_PROTOCOL,
     Jin10WebWireQuote,
 )
-from market_analysis.infrastructure.providers.jin10_web.provider import Jin10WebProvider
-from market_analysis.infrastructure.providers.jin10_web.settings import Jin10WebSettings
+from tracefang.infrastructure.providers.jin10_web.provider import Jin10WebProvider
+from tracefang.infrastructure.providers.jin10_web.settings import Jin10WebSettings
 
 
 def _quote_frame(*, last_micros: int = 4_252_340_000) -> bytes:

@@ -5,8 +5,8 @@ import inspect
 import unittest
 from types import SimpleNamespace
 
-from market_analysis import api
-from market_analysis.application.sources import (
+from tracefang import api
+from tracefang.application.sources import (
     QuoteServiceTier,
     SourceAccessModel,
     SourceHealth,

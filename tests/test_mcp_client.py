@@ -3,11 +3,11 @@ import unittest
 
 import httpx
 
-from market_analysis.infrastructure.mcp.client import (
+from tracefang.infrastructure.mcp.client import (
     StreamableHttpMcpClient,
     _decode_sse_messages,
 )
-from market_analysis.infrastructure.mcp.errors import McpStructuredContentError
+from tracefang.infrastructure.mcp.errors import McpStructuredContentError
 
 
 class McpClientTests(unittest.IsolatedAsyncioTestCase):

@@ -1,8 +1,8 @@
 import os
 import unittest
 
-from market_analysis.infrastructure.mcp import StreamableHttpMcpClient
-from market_analysis.infrastructure.providers.jin10 import (
+from tracefang.infrastructure.mcp import StreamableHttpMcpClient
+from tracefang.infrastructure.providers.jin10 import (
     SPOT_GOLD,
     SPOT_SILVER,
     Jin10Provider,

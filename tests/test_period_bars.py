@@ -5,14 +5,14 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.period_bars import (
+from tracefang.application.period_bars import (
     PeriodBarInputChange,
     PeriodBarMaterializationState,
     PeriodBarService,
     project_period_bars,
 )
-from market_analysis.domain.market_events import BarState, RealtimeBar
-from market_analysis.domain.models import AssetClass, Instrument, SourceMetadata
+from tracefang.domain.market_events import BarState, RealtimeBar
+from tracefang.domain.models import AssetClass, Instrument, SourceMetadata
 
 INSTRUMENT = Instrument("AU8888", AssetClass.INDEX, "AU", "CNY", "SHFE")
 SHFE_SCHEDULE = {

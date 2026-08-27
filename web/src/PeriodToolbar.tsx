@@ -19,7 +19,7 @@ import {
   type PeriodPreferences,
 } from "./periodPreferences";
 
-const STORAGE_KEY = "market-analysis.period-toolbar.v1";
+const STORAGE_KEY = "tracefang.period-toolbar.v1";
 
 interface PeriodToolbarProps {
   selectedId: ChartPeriodId;

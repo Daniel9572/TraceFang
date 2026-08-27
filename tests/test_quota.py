@@ -1,8 +1,8 @@
 import unittest
 
-from market_analysis.domain.errors import ProviderRateLimitError
-from market_analysis.infrastructure.providers.jin10.settings import Jin10Settings
-from market_analysis.infrastructure.quota import DailyToolBudget
+from tracefang.domain.errors import ProviderRateLimitError
+from tracefang.infrastructure.providers.jin10.settings import Jin10Settings
+from tracefang.infrastructure.quota import DailyToolBudget
 
 
 class DailyToolBudgetTests(unittest.IsolatedAsyncioTestCase):

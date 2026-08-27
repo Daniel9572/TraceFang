@@ -3,10 +3,10 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from market_analysis.infrastructure.mcp.types import ToolCallResult
-from market_analysis.infrastructure.providers.jin10.provider import Jin10Provider
-from market_analysis.infrastructure.providers.jin10.symbols import SPOT_GOLD, SPOT_SILVER
-from market_analysis.infrastructure.quota import DailyToolBudget
+from tracefang.infrastructure.mcp.types import ToolCallResult
+from tracefang.infrastructure.providers.jin10.provider import Jin10Provider
+from tracefang.infrastructure.providers.jin10.symbols import SPOT_GOLD, SPOT_SILVER
+from tracefang.infrastructure.quota import DailyToolBudget
 
 
 class FakeMcpClient:

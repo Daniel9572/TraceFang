@@ -6,8 +6,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from market_analysis import api
-from market_analysis.domain.market_context import (
+from tracefang import api
+from tracefang.domain.market_context import (
     DirectionalInference,
     EndOfDayMarketContextSource,
     FuturesContractPosition,

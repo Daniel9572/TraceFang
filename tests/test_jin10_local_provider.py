@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock
 
 import httpx
 
-from market_analysis.domain.errors import ProviderDataError
-from market_analysis.infrastructure.providers.jin10 import SPOT_GOLD
-from market_analysis.infrastructure.providers.jin10_local.protocol import (
+from tracefang.domain.errors import ProviderDataError
+from tracefang.infrastructure.providers.jin10 import SPOT_GOLD
+from tracefang.infrastructure.providers.jin10_local.protocol import (
     KLINE_HISTORY_PROTOCOL,
     KLINE_UPDATE_PROTOCOL,
     QUOTE_PUSH_PROTOCOL,
@@ -21,8 +21,8 @@ from market_analysis.infrastructure.providers.jin10_local.protocol import (
     Jin10WireCandle,
     Jin10WireQuote,
 )
-from market_analysis.infrastructure.providers.jin10_local.provider import Jin10LocalProvider
-from market_analysis.infrastructure.providers.jin10_local.settings import Jin10LocalSettings
+from tracefang.infrastructure.providers.jin10_local.provider import Jin10LocalProvider
+from tracefang.infrastructure.providers.jin10_local.settings import Jin10LocalSettings
 
 
 class Jin10LocalProviderTests(unittest.TestCase):

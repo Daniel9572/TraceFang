@@ -7,15 +7,15 @@ from decimal import Decimal
 
 import httpx
 
-from market_analysis.application.provider_frames import ProviderFrame
-from market_analysis.application.realtime_bars import RealtimeBarContract, RealtimeBarService
-from market_analysis.domain.errors import ProviderDataError, ProviderRateLimitError
-from market_analysis.infrastructure.providers.tonghuashun_futures import (
+from tracefang.application.provider_frames import ProviderFrame
+from tracefang.application.realtime_bars import RealtimeBarContract, RealtimeBarService
+from tracefang.domain.errors import ProviderDataError, ProviderRateLimitError
+from tracefang.infrastructure.providers.tonghuashun_futures import (
     TonghuashunFuturesProvider,
     TonghuashunFuturesSettings,
     TonghuashunFuturesSymbolMapper,
 )
-from market_analysis.infrastructure.providers.tonghuashun_futures.protocol import (
+from tracefang.infrastructure.providers.tonghuashun_futures.protocol import (
     TONGHUASHUN_HISTORY_FRAME_CHANNEL,
     TONGHUASHUN_HTTP_FRAME_ENCODING,
     TONGHUASHUN_HTTP_FRAME_VERSION,
@@ -27,7 +27,7 @@ from market_analysis.infrastructure.providers.tonghuashun_futures.protocol impor
     decode_http_response_frame,
     encode_http_response_frame,
 )
-from market_analysis.instruments import (
+from tracefang.instruments import (
     BRENT_CRUDE_CONTINUOUS,
     NASDAQ_COMPOSITE,
     SHFE_GOLD_2610,

@@ -5,23 +5,23 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.provider_frames import ProviderFrame
-from market_analysis.application.realtime_bars import RealtimeBarContract
-from market_analysis.application.replay import MarketReplayProjector
-from market_analysis.domain.models import AssetClass, Instrument, QuoteSnapshot, SourceMetadata
-from market_analysis.infrastructure.providers.tonghuashun_futures import (
+from tracefang.application.provider_frames import ProviderFrame
+from tracefang.application.realtime_bars import RealtimeBarContract
+from tracefang.application.replay import MarketReplayProjector
+from tracefang.domain.models import AssetClass, Instrument, QuoteSnapshot, SourceMetadata
+from tracefang.infrastructure.providers.tonghuashun_futures import (
     TONGHUASHUN_LIVE_FRAME_CHANNEL,
     TonghuashunFuturesProvider,
     TonghuashunFuturesSettings,
 )
-from market_analysis.infrastructure.providers.tonghuashun_futures.protocol import (
+from tracefang.infrastructure.providers.tonghuashun_futures.protocol import (
     TONGHUASHUN_HTTP_FRAME_ENCODING,
     TONGHUASHUN_HTTP_FRAME_VERSION,
     TonghuashunHttpFrameKind,
     TonghuashunHttpResponseFrame,
     encode_http_response_frame,
 )
-from market_analysis.instruments import SHFE_GOLD_WEIGHTED
+from tracefang.instruments import SHFE_GOLD_WEIGHTED
 
 INSTRUMENT = Instrument("XAU/USD", AssetClass.SPOT, "XAU", "USD", "OTC")
 START = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)

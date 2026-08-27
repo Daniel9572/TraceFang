@@ -4,11 +4,11 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from market_analysis.application.realtime_bars import (
+from tracefang.application.realtime_bars import (
     RealtimeBarContract,
     RealtimeBarService,
 )
-from market_analysis.domain.models import (
+from tracefang.domain.models import (
     AssetClass,
     Candle,
     Instrument,

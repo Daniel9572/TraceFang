@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from market_analysis.infrastructure.postgres.schema import SCHEMA_SQL
-from market_analysis.infrastructure.postgres.store import (
+from tracefang.infrastructure.postgres.schema import SCHEMA_SQL
+from tracefang.infrastructure.postgres.store import (
     _INSERT_QUOTE,
     _SELECT_CANDLE_CACHE_RANGES,
     _SELECT_INSTRUMENT_SOURCE,

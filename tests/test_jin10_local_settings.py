@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from market_analysis.infrastructure.providers.jin10_local.settings import Jin10LocalSettings
+from tracefang.infrastructure.providers.jin10_local.settings import Jin10LocalSettings
 
 
 class Jin10LocalSettingsTests(unittest.TestCase):

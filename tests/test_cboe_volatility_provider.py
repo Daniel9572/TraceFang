@@ -5,8 +5,8 @@ from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
-from market_analysis.domain.errors import ProviderDataError
-from market_analysis.infrastructure.providers.cboe_volatility import (
+from tracefang.domain.errors import ProviderDataError
+from tracefang.infrastructure.providers.cboe_volatility import (
     CboeVolatilityProvider,
 )
 

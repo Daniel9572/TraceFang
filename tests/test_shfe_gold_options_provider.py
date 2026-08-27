@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 import httpx
 
-from market_analysis.application.options import GoldOptionsService
-from market_analysis.domain.options import OptionDeliveryMode, OptionType
-from market_analysis.infrastructure.providers.shfe_options import (
+from tracefang.application.options import GoldOptionsService
+from tracefang.domain.options import OptionDeliveryMode, OptionType
+from tracefang.infrastructure.providers.shfe_options import (
     ShfeGoldOptionsProvider,
     ShfeGoldOptionsSettings,
 )
-from market_analysis.infrastructure.providers.shfe_options.provider import (
+from tracefang.infrastructure.providers.shfe_options.provider import (
     create_shfe_tls_context,
 )
 
@@ -188,13 +188,13 @@ class ShfeGoldOptionsProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         provider: ShfeGoldOptionsProvider | None = None
         factory_path = (
-            "market_analysis.infrastructure.providers.shfe_options.provider.httpx.AsyncClient"
+            "tracefang.infrastructure.providers.shfe_options.provider.httpx.AsyncClient"
         )
         try:
             with (
                 patch(factory_path, side_effect=(failed_http, self.http)) as factory,
                 self.assertLogs(
-                    "market_analysis.infrastructure.providers.shfe_options.provider",
+                    "tracefang.infrastructure.providers.shfe_options.provider",
                     level="WARNING",
                 ) as logs,
             ):
