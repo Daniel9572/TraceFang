@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/barPageCache.test.ts tests/chartLayers.test.ts tests/chartModel.test.ts tests/chartTimeAxis.test.ts tests/expertAnalysis.test.ts tests/expertDrawing.test.ts tests/expertEvents.test.ts tests/expertOptions.test.ts tests/expertPricePatterns.test.ts tests/expertReplay.test.ts tests/expertRsi.test.ts tests/expertSessions.test.ts tests/expertSmartMoney.test.ts tests/expertTechnical.test.ts tests/historyLoading.test.ts tests/marketSession.test.ts tests/periodPreferences.test.ts tests/realtimeBarStream.test.ts tests/sourcePresentation.test.ts tests/strategyCatalog.test.ts tests/watchlistStreams.test.ts",
+    "test": "node --test tests/barPageCache.test.ts tests/chartLayers.test.ts tests/chartModel.test.ts tests/chartTimeAxis.test.ts tests/expertAnalysis.test.ts tests/expertDrawing.test.ts tests/expertEvents.test.ts tests/expertOptions.test.ts tests/expertPricePatterns.test.ts tests/expertReplay.test.ts tests/expertRsi.test.ts tests/expertSessions.test.ts tests/expertSmartMoney.test.ts tests/expertTechnical.test.ts tests/historyLoading.test.ts tests/historyRequestState.test.ts tests/marketSession.test.ts tests/periodPreferences.test.ts tests/quoteStreamConnection.test.ts tests/realtimeBarStream.test.ts tests/sourcePresentation.test.ts tests/strategyCatalog.test.ts tests/watchlistStreams.test.ts",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {

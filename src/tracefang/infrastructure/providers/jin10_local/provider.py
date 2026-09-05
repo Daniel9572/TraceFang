@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -13,8 +14,10 @@ import httpx
 from websockets.asyncio.client import ClientConnection, connect
 
 from tracefang.application.provider_frames import ProviderFrame, RawFrameSink
+from tracefang.application.realtime_bars import HistoricalBarBatch
 from tracefang.domain.errors import (
     InstrumentNotSupportedError,
+    ProviderAuthenticationError,
     ProviderDataError,
     ProviderUnavailableError,
 )
@@ -67,10 +70,7 @@ def _manifest_record_count(
 ) -> int:
     if item.start_timestamp is None or item.end_timestamp is None:
         return len(timestamps)
-    return sum(
-        item.start_timestamp <= timestamp <= item.end_timestamp
-        for timestamp in timestamps
-    )
+    return sum(item.start_timestamp <= timestamp <= item.end_timestamp for timestamp in timestamps)
 
 
 def _manifest_version(item: Jin10KlineHistoryFile) -> str:
@@ -104,10 +104,13 @@ class Jin10LocalProvider:
         self._quote_listeners: set[QuoteListener] = set()
         self._candle_listeners: set[CandleListener] = set()
         self._connection_had_quote = False
+        self._authentication_failed = False
+        self._session_setup_required = False
         self._sequence = 0
         self._connection_ready = asyncio.Event()
         self._active_socket: ClientConnection | None = None
         self._active_session_key: str | None = None
+        self._relogin_refresh_used = False
         self._send_lock = asyncio.Lock()
         self._history_request_lock = asyncio.Lock()
         self._history_waiters: dict[
@@ -194,6 +197,10 @@ class Jin10LocalProvider:
             return False, "closed", "本地行情长连接尚未启动"
         if self._task.done():
             return False, "stopped", self._last_error or "本地行情任务已停止"
+        if self._session_setup_required:
+            return False, "setup_required", self._last_error or "等待金十客户端登录会话"
+        if self._authentication_failed:
+            return False, "authentication_failed", "金十桌面会话已失效; 等待客户端重新登录"
         if self._connected:
             return False, "waiting_quote", self._last_error or "已连接。正在等待首个行情帧"
         return False, "reconnecting", self._last_error or "正在连接本地金十会话"
@@ -253,7 +260,7 @@ class Jin10LocalProvider:
         *,
         start: datetime,
         count: int,
-    ) -> tuple[Candle, ...]:
+    ) -> HistoricalBarBatch:
         """Fetches one exact historical window from this channel's own Kline protocol."""
 
         if start.tzinfo is None or start.utcoffset() is None:
@@ -283,6 +290,7 @@ class Jin10LocalProvider:
         boundary = int(range_end.timestamp())
         seen_boundaries: set[int] = set()
         seen_files: set[str] = set()
+        evidence: list[str] = []
 
         async with self._history_request_lock:
             for _ in range(_MAX_HISTORY_PAGES):
@@ -294,6 +302,7 @@ class Jin10LocalProvider:
                     time_type=_KLINE_TIME_TYPE,
                     boundary_timestamp=boundary,
                 )
+                evidence.append(self._manifest_evidence(manifest))
                 new_files = tuple(
                     item for item in manifest.files if item.file_name not in seen_files
                 )
@@ -325,7 +334,42 @@ class Jin10LocalProvider:
             else:
                 raise ProviderUnavailableError("金十同源 K 线回补超过安全分页上限")
 
-        return tuple(collected[key] for key in sorted(collected))
+        checked_at = datetime.now(UTC)
+        current_minute = checked_at.replace(second=0, microsecond=0)
+        return HistoricalBarBatch(
+            candles=tuple(collected[key] for key in sorted(collected)),
+            checked_start=range_start,
+            checked_end=range_end,
+            authoritative_through=min(range_end, current_minute),
+            evidence_version=self._evidence_version(evidence),
+            checked_at=checked_at,
+        )
+
+    @staticmethod
+    def _manifest_evidence(manifest: Jin10KlineHistoryManifest) -> str:
+        files = ",".join(
+            ":".join(
+                (
+                    item.file_name,
+                    str(item.record_count) if item.record_count is not None else "unknown",
+                    str(item.end_timestamp) if item.end_timestamp is not None else "unknown",
+                )
+            )
+            for item in sorted(manifest.files, key=lambda value: value.file_name)
+        )
+        return "|".join(
+            (
+                manifest.provider_code,
+                str(manifest.time_type),
+                str(manifest.boundary_timestamp),
+                files,
+            )
+        )
+
+    @staticmethod
+    def _evidence_version(evidence: Sequence[str]) -> str:
+        payload = "\n".join(evidence or ("empty-manifest",)).encode()
+        return hashlib.sha256(payload).hexdigest()
 
     def seed_candles(self, candles: tuple[Candle, ...]) -> None:
         for candle in candles:
@@ -353,7 +397,13 @@ class Jin10LocalProvider:
                 self._last_error = "金十行情服务器已关闭连接。正在重连"
             except asyncio.CancelledError:
                 raise
+            except ValueError as error:
+                self._session_setup_required = True
+                self._authentication_failed = False
+                self._last_error = self._safe_error(error)
             except Exception as error:
+                self._session_setup_required = False
+                self._authentication_failed = isinstance(error, ProviderAuthenticationError)
                 self._last_error = self._safe_error(error)
             finally:
                 self._connected = False
@@ -367,6 +417,7 @@ class Jin10LocalProvider:
     async def _run_connection(self) -> None:
         connection_id = uuid4().hex
         sequence = 0
+        self._relogin_refresh_used = False
         async with connect(
             self.settings.endpoint,
             open_timeout=self.settings.connect_timeout_seconds,
@@ -379,8 +430,10 @@ class Jin10LocalProvider:
                 raise ProviderDataError("Jin10 local handshake is not binary")
             key = derive_session_key(handshake)
             self._connected = True
+            self._authentication_failed = False
             self._last_error = None
-            await self._send_login(socket, key)
+            await self._send_login(socket, key, refresh=True)
+            self._session_setup_required = False
             quote_subscription = encode_quote_subscription(
                 provider_codes=self._subscriptions,
                 frequency_ms=self.settings.quote_frequency_ms,
@@ -473,7 +526,12 @@ class Jin10LocalProvider:
             if socket is not None:
                 if session_key is None:
                     raise ProviderDataError("live relogin frame requires a session key")
-                await self._send_login(socket, session_key)
+                if self._relogin_refresh_used:
+                    raise ProviderAuthenticationError(
+                        "Jin10 session authentication failed after credential refresh"
+                    )
+                self._relogin_refresh_used = True
+                await self._send_login(socket, session_key, refresh=True)
             return
         if protocol in _QUOTE_PROTOCOLS:
             quote = self._quote_from_wire(
@@ -514,14 +572,31 @@ class Jin10LocalProvider:
             for candle in candles:
                 on_candle(candle)
 
-    async def _send_login(self, socket: ClientConnection, key: str) -> None:
+    async def _send_login(
+        self,
+        socket: ClientConnection,
+        key: str,
+        *,
+        refresh: bool = False,
+    ) -> None:
+        credentials = self.settings.credentials(refresh=refresh)
         packet = encode_login(
-            user_id=self.settings.user_id,
-            session_token=self.settings.session_token,
+            # The protocol resolves identity from the session token when this
+            # sentinel is zero; no account id needs to be scraped or persisted.
+            user_id=0,
+            session_token=credentials.session_token,
             vip_type=self.settings.vip_type,
         )
         async with self._send_lock:
             await socket.send(xor_cipher(packet, key))
+
+    async def refresh_session(self) -> None:
+        """Refresh desktop credentials and reconnect once for a failed history command."""
+
+        self.settings.credentials(refresh=True)
+        self._authentication_failed = False
+        await self.close()
+        await self.open()
 
     async def _heartbeat(self, socket: ClientConnection) -> None:
         while True:
@@ -838,6 +913,7 @@ class Jin10LocalProvider:
                 received_at=received_at,
                 raw_payload={
                     "protocol": protocol,
+                    "observation_kind": "event",
                     "buy": str(self._price(wire.buy_micros)),
                     "ask": str(self._price(wire.ask_micros)),
                     "previous_close": str(previous_close) if previous_close else None,
@@ -852,6 +928,8 @@ class Jin10LocalProvider:
         provider_code = quote.source.provider_symbol
         self._latest[provider_code] = quote
         self._last_error = None
+        self._authentication_failed = False
+        self._session_setup_required = False
         self._connection_had_quote = True
         for listener in tuple(self._quote_listeners):
             with suppress(Exception):
@@ -879,7 +957,7 @@ class Jin10LocalProvider:
             del rows[open_time]
 
     def _safe_error(self, error: Exception) -> str:
-        message = str(error).replace(self.settings.session_token, "<redacted>")
+        message = self.settings.redact(str(error))
         message = message.replace("\r", " ").replace("\n", " ").strip()
         return (message or type(error).__name__)[:240]
 

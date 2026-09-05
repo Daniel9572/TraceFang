@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -45,6 +46,7 @@ class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status.available)
         self.assertTrue(status.authenticated)
         self.assertEqual(status.auth_mode, "chatgpt")
+        self.assertIsNone(status.diagnostic_code)
         self.assertNotIn("Logged in", status.detail)
         self.assertEqual(runner.calls[0][0], ("codex", "login", "status"))
 
@@ -52,6 +54,7 @@ class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
         service = CodexExpertAnalysisService(
             working_directory=Path.cwd(),
             command_finder=lambda _: None,
+            fallback_commands=(),
         )
 
         status = await service.status()
@@ -59,6 +62,84 @@ class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status.state, "unavailable")
         self.assertFalse(status.available)
         self.assertIsNone(status.authenticated)
+        self.assertEqual(status.diagnostic_code, "cli_not_found")
+
+    async def test_status_discovers_macos_app_cli_outside_path(self) -> None:
+        runner = _Runner(CommandResult(0, "Logged in using ChatGPT\n", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            command = Path(directory) / "codex"
+            command.write_text("#!/bin/sh\n", encoding="utf-8")
+            command.chmod(0o700)
+            service = CodexExpertAnalysisService(
+                working_directory=Path.cwd(),
+                command_finder=lambda _: None,
+                fallback_commands=(command,),
+                runner=runner,
+            )
+
+            status = await service.status()
+
+        self.assertEqual(status.state, "ready")
+        self.assertEqual(runner.calls[0][0], (str(command), "login", "status"))
+
+    async def test_status_re_resolves_cli_after_startup(self) -> None:
+        calls = 0
+
+        def find_command(_: str) -> str | None:
+            nonlocal calls
+            calls += 1
+            return None if calls == 1 else "codex"
+
+        runner = _Runner(CommandResult(0, "Logged in using ChatGPT\n", ""))
+        service = CodexExpertAnalysisService(
+            working_directory=Path.cwd(),
+            command_finder=find_command,
+            fallback_commands=(),
+            runner=runner,
+        )
+
+        missing = await service.status()
+        ready = await service.status()
+
+        self.assertEqual(missing.diagnostic_code, "cli_not_found")
+        self.assertEqual(ready.state, "ready")
+        self.assertEqual(calls, 2)
+
+    async def test_explicit_cli_path_takes_precedence_over_path_lookup(self) -> None:
+        runner = _Runner(CommandResult(0, "Logged in using ChatGPT\n", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            command = Path(directory) / "codex"
+            command.write_text("#!/bin/sh\n", encoding="utf-8")
+            command.chmod(0o700)
+            service = CodexExpertAnalysisService(
+                working_directory=Path.cwd(),
+                environment={"TRACEFANG_CODEX_CLI_PATH": str(command)},
+                command_finder=lambda _: "wrong-codex",
+                fallback_commands=(),
+                runner=runner,
+            )
+
+            status = await service.status()
+
+        self.assertEqual(status.state, "ready")
+        self.assertEqual(runner.calls[0][0], (str(command), "login", "status"))
+
+    async def test_invalid_explicit_cli_path_is_a_configuration_error(self) -> None:
+        runner = _Runner()
+        service = CodexExpertAnalysisService(
+            working_directory=Path.cwd(),
+            environment={"TRACEFANG_CODEX_CLI_PATH": "/missing/codex"},
+            command_finder=lambda _: "other-codex",
+            fallback_commands=(),
+            runner=runner,
+        )
+
+        status = await service.status()
+
+        self.assertEqual(status.state, "error")
+        self.assertFalse(status.available)
+        self.assertEqual(status.diagnostic_code, "cli_path_invalid")
+        self.assertEqual(runner.calls, [])
 
     async def test_analyze_runs_ephemeral_read_only_exec_and_reads_agent_message(self) -> None:
         output = "\n".join(
@@ -94,6 +175,7 @@ class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.analysis, "趋势仍偏强, 但需观察失效位。")
         self.assertEqual(result.source_id, "jin10_client")
         self.assertEqual(result.bar_count, 1)
+        self.assertIsNone(result.diagnostic_code)
         command, prompt, timeout = runner.calls[1]
         self.assertEqual(
             command,

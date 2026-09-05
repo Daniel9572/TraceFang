@@ -130,6 +130,8 @@ class QuoteStreamCoordinator:
 
     def publish_sample(self, sample: QuoteSample) -> None:
         for pump in self._matching_pumps(sample.source_id, sample.instrument):
+            if pump.period != "1s":
+                continue
             event = QuoteStreamEvent(
                 kind="sample",
                 state=QuoteStreamState.LIVE,

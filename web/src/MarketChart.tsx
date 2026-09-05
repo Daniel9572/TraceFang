@@ -62,12 +62,16 @@ import {
 import { weakDrawingSnap } from "./expertDrawing";
 import type { ChartIndicatorLayer, ChartLayer } from "./chartLayers";
 import {
+  enabledIndicatorWarmupBars,
+  historyDemandFor,
   historyGapWindow,
   isNearOlderHistoryEdge,
+  nextHistoryDemandEvaluationDelay,
   prependedPointCount,
   resolveHistoryDemandOutcome,
   shouldActivateOlderHistoryDemand,
   shouldRequestOlderHistory,
+  type HistoryDemand,
   type HistoryLoadOutcome,
   type HistoryWindow,
 } from "./historyLoading";
@@ -97,8 +101,8 @@ interface MarketChartProps {
   marketPhase: MarketPhase;
   marketSchedule: MarketSchedule | null | undefined;
   historyLoading: boolean;
-  onRequestOlderHistory: () => Promise<HistoryLoadOutcome>;
-  onRequestHistoryGap: (window: HistoryWindow) => void;
+  onRequestOlderHistory: (demand: HistoryDemand) => Promise<HistoryLoadOutcome>;
+  onRequestHistoryGap: (window: HistoryWindow) => Promise<void>;
   onHover: (value: HoverCandle | null) => void;
   appearance?: "default" | "expert";
   displayTimeZone?: string;
@@ -574,6 +578,9 @@ export function MarketChart({
     [layers],
   );
   const visibleIndicatorLayers = indicatorLayers.filter((layer) => layer.definition.visible);
+  const indicatorWarmupBars = enabledIndicatorWarmupBars(
+    visibleIndicatorLayers.map((layer) => layer.definition.indicatorId),
+  );
   const indicatorLayerSignature = visibleIndicatorLayers
     .map((layer) => `${layer.definition.id}:${layer.definition.indicatorId}:${layer.definition.order}:${layer.definition.height}`)
     .join("|");
@@ -717,6 +724,8 @@ export function MarketChart({
   const requestHistoryGapRef = useRef(onRequestHistoryGap);
   const historyDemandActiveRef = useRef(false);
   const historyRequestPendingRef = useRef(false);
+  const historyRetryTimerRef = useRef<number | null>(null);
+  const indicatorWarmupBarsRef = useRef(indicatorWarmupBars);
   const emptyHistoryAdvanceMinutesRef = useRef(0);
   const evaluateHistoryDemandRef = useRef<((userInitiated?: boolean) => void) | null>(null);
   const candleSeriesGapsRef = useRef<readonly RenderableSeriesGap[]>([]);
@@ -752,6 +761,7 @@ export function MarketChart({
   historyLoadingRef.current = historyLoading;
   requestOlderHistoryRef.current = onRequestOlderHistory;
   requestHistoryGapRef.current = onRequestHistoryGap;
+  indicatorWarmupBarsRef.current = indicatorWarmupBars;
   periodRef.current = period;
   timelineResolutionSecondsRef.current = timelineResolutionSeconds;
   displayTimeZoneRef.current = displayTimeZone;
@@ -1490,15 +1500,18 @@ export function MarketChart({
         const gapKey = `${gapWindow.start}:${gapWindow.count}`;
         if (dispatchedHistoryGapsRef.current.has(gapKey)) continue;
         dispatchedHistoryGapsRef.current.add(gapKey);
-        requestHistoryGapRef.current(gapWindow);
+        void Promise.resolve(requestHistoryGapRef.current(gapWindow)).finally(() => {
+          dispatchedHistoryGapsRef.current.delete(gapKey);
+        });
         requested += 1;
         if (requested >= 4) break;
       }
     };
-    const runOlderHistoryRequest = () => {
+    const runOlderHistoryRequest = (demand: HistoryDemand) => {
       if (historyRequestPendingRef.current || historyLoadingRef.current) return;
       historyRequestPendingRef.current = true;
-      void Promise.resolve(requestOlderHistoryRef.current())
+      let nextEvaluationDelay: number | null = null;
+      void Promise.resolve(requestOlderHistoryRef.current(demand))
         .then((outcome) => {
           if (chartRef.current !== chart) return;
           const resolution = resolveHistoryDemandOutcome(
@@ -1507,24 +1520,43 @@ export function MarketChart({
           );
           emptyHistoryAdvanceMinutesRef.current = resolution.emptyAdvanceMinutes;
           historyDemandActiveRef.current = resolution.active;
+          nextEvaluationDelay = nextHistoryDemandEvaluationDelay(outcome, resolution);
         })
         .catch(() => {
           if (chartRef.current === chart) historyDemandActiveRef.current = false;
         })
         .finally(() => {
-          if (chartRef.current === chart) historyRequestPendingRef.current = false;
+          if (chartRef.current !== chart) return;
+          historyRequestPendingRef.current = false;
+          if (!historyDemandActiveRef.current || nextEvaluationDelay === null) return;
+          if (historyRetryTimerRef.current !== null) {
+            window.clearTimeout(historyRetryTimerRef.current);
+          }
+          historyRetryTimerRef.current = window.setTimeout(() => {
+            historyRetryTimerRef.current = null;
+            evaluateHistoryDemandRef.current?.(false);
+          }, nextEvaluationDelay);
         });
     };
     const evaluateHistoryDemand = (userInitiated = false) => {
       const range = chart.timeScale().getVisibleLogicalRange();
       if (!range || returningRef.current || dataLengthRef.current === 0) return;
-      repairVisibleCandleGaps(range);
+      if (!historyLoadingRef.current) repairVisibleCandleGaps(range);
       if (!isNearOlderHistoryEdge(range, dataLengthRef.current)) {
         historyDemandActiveRef.current = false;
         emptyHistoryAdvanceMinutesRef.current = 0;
+        if (historyRetryTimerRef.current !== null) {
+          window.clearTimeout(historyRetryTimerRef.current);
+          historyRetryTimerRef.current = null;
+        }
         return;
       }
-      if (shouldActivateOlderHistoryDemand(range, dataLengthRef.current, userInitiated)) {
+      if (shouldActivateOlderHistoryDemand(
+        range,
+        dataLengthRef.current,
+        userInitiated,
+        emptyHistoryAdvanceMinutesRef.current,
+      )) {
         historyDemandActiveRef.current = true;
       }
       if (!historyDemandActiveRef.current) return;
@@ -1534,7 +1566,12 @@ export function MarketChart({
         historyLoadingRef.current || historyRequestPendingRef.current,
         historyDemandActiveRef.current,
       )) {
-        runOlderHistoryRequest();
+        runOlderHistoryRequest(historyDemandFor(
+          range,
+          dataLengthRef.current,
+          userInitiated,
+          indicatorWarmupBarsRef.current,
+        ));
       }
     };
     evaluateHistoryDemandRef.current = evaluateHistoryDemand;
@@ -1596,6 +1633,9 @@ export function MarketChart({
     resizeObserver.observe(container);
     return () => {
       if (returnTimerRef.current !== null) window.clearTimeout(returnTimerRef.current);
+      if (historyRetryTimerRef.current !== null) {
+        window.clearTimeout(historyRetryTimerRef.current);
+      }
       if (markerFrameRef.current !== null) window.cancelAnimationFrame(markerFrameRef.current);
       if (hoverFrameRef.current !== null) window.cancelAnimationFrame(hoverFrameRef.current);
       if (expertDecorationFrameRef.current !== null) {
@@ -1641,6 +1681,7 @@ export function MarketChart({
       renderedCandlesRef.current = null;
       historyDemandActiveRef.current = false;
       historyRequestPendingRef.current = false;
+      historyRetryTimerRef.current = null;
       emptyHistoryAdvanceMinutesRef.current = 0;
       evaluateHistoryDemandRef.current = null;
     };
@@ -1668,6 +1709,15 @@ export function MarketChart({
     historyLoading,
     period.id,
   ]);
+
+  useEffect(() => {
+    historyDemandActiveRef.current = false;
+    emptyHistoryAdvanceMinutesRef.current = 0;
+    if (historyRetryTimerRef.current !== null) {
+      window.clearTimeout(historyRetryTimerRef.current);
+      historyRetryTimerRef.current = null;
+    }
+  }, [period.id, realtimeBarStreamKey]);
 
   useEffect(() => {
     if (replayMode) return;

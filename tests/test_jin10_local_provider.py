@@ -5,29 +5,50 @@ import struct
 import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 
-from tracefang.domain.errors import ProviderDataError
+from tracefang.application.provider_frames import ProviderFrame
+from tracefang.domain.errors import ProviderDataError, ProviderUnavailableError
 from tracefang.infrastructure.providers.jin10 import SPOT_GOLD
 from tracefang.infrastructure.providers.jin10_local.protocol import (
     KLINE_HISTORY_PROTOCOL,
     KLINE_UPDATE_PROTOCOL,
     QUOTE_PUSH_PROTOCOL,
+    RELOGIN_REQUEST_PROTOCOL,
     Jin10KlineHistoryFile,
     Jin10KlineHistoryManifest,
     Jin10KlineSnapshot,
     Jin10WireCandle,
     Jin10WireQuote,
+    xor_cipher,
 )
 from tracefang.infrastructure.providers.jin10_local.provider import Jin10LocalProvider
+from tracefang.infrastructure.providers.jin10_local.session import Jin10SessionCredentials
 from tracefang.infrastructure.providers.jin10_local.settings import Jin10LocalSettings
 
 
 class Jin10LocalProviderTests(unittest.TestCase):
+    def test_health_distinguishes_expired_session_without_credentials(self) -> None:
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
+        provider._task = Mock()
+        provider._task.done.return_value = False
+        provider._authentication_failed = True
+
+        available, state, detail = provider.health()
+
+        self.assertFalse(available)
+        self.assertEqual(state, "authentication_failed")
+        self.assertNotIn("s" * 36, detail or "")
+        self.assertNotIn("user_id", detail or "")
+
     def test_dispatches_decoded_quote_to_listener_synchronously(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         received = []
         provider.add_quote_listener(received.append)
 
@@ -89,13 +110,62 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
             timestamp=int(timestamp.timestamp()),
         )
 
+    async def test_login_resolves_a_fresh_credential_snapshot(self) -> None:
+        resolver = Mock()
+        resolver.resolve.return_value = Jin10SessionCredentials(
+            session_token="r" * 36,
+            origin="desktop",
+        )
+        settings = Jin10LocalSettings(session_resolver=resolver)
+        provider = Jin10LocalProvider(settings)
+        socket = AsyncMock()
+
+        await provider._send_login(socket, "key", refresh=True)
+
+        resolver.resolve.assert_called_once_with(refresh=True)
+        socket.send.assert_awaited_once()
+        login_packet = xor_cipher(socket.send.await_args.args[0], "key")
+        _, user_id = struct.unpack_from("<hi", login_packet)
+        self.assertEqual(user_id, 0)
+
+    async def test_relogin_refreshes_once_then_reconnects(self) -> None:
+        resolver = Mock()
+        resolver.resolve.return_value = Jin10SessionCredentials(
+            session_token="r" * 36,
+            origin="desktop",
+        )
+        settings = Jin10LocalSettings(session_resolver=resolver)
+        provider = Jin10LocalProvider(settings)
+        socket = AsyncMock()
+        frame = ProviderFrame(
+            version=1,
+            channel=provider.name,
+            connection_id="test",
+            sequence=1,
+            received_at=datetime.now(UTC),
+            encoding="session-decrypted",
+            body=struct.pack("<h", RELOGIN_REQUEST_PROTOCOL),
+        )
+
+        await provider.ingest_frame(frame, socket=socket, session_key="key")
+
+        resolver.resolve.assert_called_once_with(refresh=True)
+        with self.assertRaisesRegex(ProviderUnavailableError, "credential refresh"):
+            await provider.ingest_frame(frame, socket=socket, session_key="key")
+
     async def test_quotes_do_not_build_provider_owned_minute_candles(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         first_minute = datetime.now(UTC).replace(second=5, microsecond=0)
 
         provider._store_quote(
             self._wire_quote(4_250_000_000, first_minute),
             protocol=QUOTE_PUSH_PROTOCOL,
+        )
+        self.assertEqual(
+            provider._latest["XAUUSD.GOODS"].source.raw_payload["observation_kind"],
+            "event",
         )
         provider._store_quote(
             self._wire_quote(4_252_000_000, first_minute + timedelta(seconds=10)),
@@ -111,7 +181,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candles, ())
 
     async def test_dispatches_native_bar_updates_to_candle_listener(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         received = []
         provider.add_candle_listener(received.append)
         timestamp = int(datetime.now(UTC).replace(second=0, microsecond=0).timestamp())
@@ -145,7 +217,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider._candle_listeners), 0)
 
     async def test_stores_exact_history_file_ohlcv_and_lineage(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         timestamp = 1_786_027_380
 
         rows = provider._store_wire_candles(
@@ -176,7 +250,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_targets_history_request_at_the_missing_window_end(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         start = datetime(2026, 8, 1, tzinfo=UTC)
         count = 2_880
         boundary = int((start + timedelta(minutes=count)).timestamp())
@@ -191,13 +267,18 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        candles = await provider.fetch_historical_candles(
+        batch = await provider.fetch_historical_candles(
             SPOT_GOLD,
             start=start,
             count=count,
         )
 
-        self.assertEqual(candles, ())
+        self.assertEqual(batch.candles, ())
+        self.assertEqual(batch.checked_start, start)
+        self.assertEqual(batch.checked_end, start + timedelta(minutes=count))
+        self.assertEqual(batch.authoritative_through, batch.checked_end)
+        self.assertTrue(batch.evidence_version)
+        self.assertIsNone(batch.history_floor)
         provider.open.assert_awaited_once()
         provider._request_history_manifest.assert_awaited_once_with(
             "XAUUSD.GOODS",
@@ -206,7 +287,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_history_file_accepts_append_only_rows_beyond_manifest_end(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         start = 1_786_027_380
         item = Jin10KlineHistoryFile(
             "mutable-history-file",
@@ -236,7 +319,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0].url.params["manifest_version"], f"2-{start + 60}")
 
     async def test_history_file_refreshes_a_cached_snapshot_behind_manifest(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         start = 1_786_027_380
         item = Jin10KlineHistoryFile(
             "mutable-history-file",
@@ -284,7 +369,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 2)
 
     async def test_history_file_retries_one_stale_manifest_version_download(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         start = 1_786_027_380
         item = Jin10KlineHistoryFile(
             "mutable-history-file",
@@ -314,7 +401,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 2)
 
     async def test_history_file_rejects_rows_missing_inside_manifest_window(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         start = 1_786_027_380
         item = Jin10KlineHistoryFile(
             "truncated-history-file",
@@ -337,7 +426,9 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_history_fetch_does_not_promote_live_native_bar_to_final_history(self) -> None:
-        provider = Jin10LocalProvider(Jin10LocalSettings(session_token="s" * 36, user_id=1))
+        provider = Jin10LocalProvider(
+            Jin10LocalSettings.for_credentials(session_token="s" * 36)
+        )
         start = datetime(2026, 8, 1, tzinfo=UTC)
         provider._store_kline_snapshot(
             Jin10KlineSnapshot(
@@ -367,13 +458,13 @@ class Jin10LocalCandleTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        candles = await provider.fetch_historical_candles(
+        batch = await provider.fetch_historical_candles(
             SPOT_GOLD,
             start=start,
             count=1,
         )
 
-        self.assertEqual(candles, ())
+        self.assertEqual(batch.candles, ())
 
 
 if __name__ == "__main__":

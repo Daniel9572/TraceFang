@@ -81,6 +81,7 @@ class Jin10WebProviderTests(unittest.TestCase):
         self.assertEqual(received[0].source.raw_payload["sequence"], 1)
         self.assertEqual(received[1].source.raw_payload["sequence"], 2)
         self.assertEqual(received[1].source.raw_payload["channel"], "jin10_public_websocket")
+        self.assertEqual(received[1].source.raw_payload["observation_kind"], "event")
         self.assertEqual(received[1].change, Decimal("6.360000"))
 
         provider.remove_quote_listener(received.append)

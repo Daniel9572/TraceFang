@@ -15,9 +15,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints
 
 from tracefang.application.acquisition import QuoteAcquisitionRouter
+from tracefang.application.chart_history import (
+    ChartHistoryCoordinator,
+    decode_chart_page_cursor,
+    encode_chart_page_cursor,
+)
 from tracefang.application.expert_ai import (
     EXPERT_AI_MAX_BARS,
     EXPERT_STRATEGY_COUNT,
@@ -25,12 +30,17 @@ from tracefang.application.expert_ai import (
     ExpertStrategyId,
 )
 from tracefang.application.gold_events import gold_event_catalog_snapshot
+from tracefang.application.market_data_recovery import MarketDataRecoveryCoordinator
 from tracefang.application.multi_timeframe import (
     MultiTimeframeTrendService,
     multi_timeframe_payload,
 )
 from tracefang.application.options import GoldOptionsService
-from tracefang.application.period_bars import PERIOD_DEFINITIONS, PeriodBarService
+from tracefang.application.period_bars import (
+    PERIOD_DEFINITIONS,
+    PeriodBarPage,
+    PeriodBarService,
+)
 from tracefang.application.provider_frames import ProviderFrame
 from tracefang.application.quotes import (
     JIN10_CLIENT_SOURCE,
@@ -137,6 +147,7 @@ class Runtime:
         self.quote_views: QuoteViewService | None = None
         self.acquisition: QuoteAcquisitionRouter | None = None
         self.realtime_bars: RealtimeBarService | None = None
+        self.market_data_recovery: MarketDataRecoveryCoordinator | None = None
         self.period_bars: PeriodBarService | None = None
         self.expert_ai: CodexExpertAnalysisService | None = None
         self.gold_options: GoldOptionsService | None = None
@@ -327,6 +338,22 @@ class InstrumentSourceUpdate(BaseModel):
     source_id: str = Field(min_length=1)
 
 
+class CandleBackfillResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    state: Literal["cached", "joined", "fetched", "advanced", "exhausted", "deferred"]
+    start: AwareDatetime
+    end: AwareDatetime
+    row_count: int = Field(ge=0)
+    covered_start: AwareDatetime | None = None
+    covered_end: AwareDatetime | None = None
+    authoritative_through: AwareDatetime | None = None
+    history_floor: AwareDatetime | None = None
+    retry_after: AwareDatetime | None = None
+    evidence_version: str | None = None
+
+
 _ExpertCode = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=32),
@@ -371,9 +398,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 await frame_store.close()
             # A configured capture store is part of the market-data contract.
             # Continuing without it would create a permanent, unmarked replay gap.
-            raise RuntimeError(
-                "configured raw-frame capture store is unavailable"
-            ) from error
+            raise RuntimeError("configured raw-frame capture store is unavailable") from error
         frame_sink = JetStreamRawFrameSink(frame_store)
     runtime.frame_store = frame_store
 
@@ -458,22 +483,47 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             return ProviderProbe(
                 available=False,
                 state="unavailable",
-                detail="金十客户端行情暂时没有可用的实时价格",
+                detail="金十统一行情暂时没有可用的实时报价",
                 checked_at=datetime.now(UTC),
                 health=SourceHealth.UNAVAILABLE,
             )
         if not local_probe.available:
+            setup_required = local_probe.state == "setup_required"
+            authentication_failed = local_probe.state == "authentication_failed"
+            reconnecting = local_probe.state in {"reconnecting", "waiting_quote"}
             return ProviderProbe(
                 available=True,
-                state="degraded",
-                detail="实时价格可用, 部分日内统计暂时缺失或停滞",
+                state=(
+                    "history_setup_required"
+                    if setup_required
+                    else (
+                        "history_authentication_failed"
+                        if authentication_failed
+                        else "history_reconnecting"
+                        if reconnecting
+                        else "history_unavailable"
+                    )
+                ),
+                detail=(
+                    "实时报价可用; 未找到可复用的金十客户端登录会话"
+                    if setup_required
+                    else (
+                        "实时报价可用; 金十客户端会话已失效; 重新登录后会自动恢复历史回补"
+                        if authentication_failed
+                        else (
+                            "实时报价可用; 同源历史连接正在恢复; 已缓存行情仍可正常读取"
+                            if reconnecting
+                            else "实时报价可用; 历史 K 线回补当前不可用"
+                        )
+                    )
+                ),
                 checked_at=datetime.now(UTC),
                 health=SourceHealth.DEGRADED,
             )
         return ProviderProbe(
             available=True,
             state="ready",
-            detail="完整聚合行情可用",
+            detail="实时报价、同源 K 线和历史回补均可用",
             checked_at=datetime.now(UTC),
             health=SourceHealth.HEALTHY,
         )
@@ -486,10 +536,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     registrations = (
         SourceRegistration(
             source_id=JIN10_CLIENT_SOURCE,
-            display_name="金十客户端行情",
+            display_name="金十统一行情",
             description=(
-                "完整实时数据源: 统一提供报价事件、当前/过去 K 线、涨跌和日内统计。"
-                "页面与合约路由只面对这一份结果。"
+                "统一提供实时报价、同源 K 线和日内统计; 自动复用本机已登录的金十客户端"
+                "会话进行历史回补。页面与合约路由只面对这一份来源结果。"
             ),
             capabilities=frozenset({SourceCapability.QUOTE, SourceCapability.CANDLES}),
             default_enabled=True,
@@ -656,6 +706,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         contracts=bar_contracts,
         writer=runtime.persistence,
     )
+    runtime.market_data_recovery = (
+        MarketDataRecoveryCoordinator(runtime.realtime_bars)
+        if kline_store is not None
+        else None
+    )
     runtime.bar_contracts = bar_contracts
     runtime.period_bars = PeriodBarService(runtime.realtime_bars, store=kline_store)
 
@@ -750,21 +805,31 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     def accept_raw_quote(value):
         quote_views = runtime.quote_views
+        sample = None
         normalized_event = (
             runtime.realtime_bars.normalize_quote(value)
             if runtime.realtime_bars is not None
             else None
         )
         if runtime.realtime_bars is not None and normalized_event is not None:
+            if runtime.market_data_recovery is not None:
+                runtime.market_data_recovery.observe(
+                    normalized_event.quote.instrument,
+                    source_id=normalized_event.source_id,
+                    observed_at=normalized_event.quote.source.observed_at,
+                )
+            sample = runtime.realtime_bars.sample_from_quote_event(normalized_event)
             publish_bar_transitions(runtime.realtime_bars.apply(normalized_event))
-        # Persist every raw channel frame, including late or duplicate deliveries.
-        # Only the latest presentation view applies the monotonic timestamp guard;
-        # raw evidence must never be filtered by UI-cache semantics.
+        # Persist every distinct raw channel frame, including late deliveries.
+        # Exact transport replay is idempotent by stable event identity; equal
+        # prices or equal source timestamps are never treated as duplicates.
         if runtime.persistence is not None:
             runtime.persistence.submit_quote(value)
+        stream = runtime.quote_stream
+        if stream is not None and sample is not None:
+            stream.publish_sample(sample)
         if quote_views is None or not quote_views.accept(value):
             return
-        stream = runtime.quote_stream
         if stream is None:
             return
         with suppress(ProviderError):
@@ -797,6 +862,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             else None
         )
         if runtime.realtime_bars is not None and normalized_event is not None:
+            if runtime.market_data_recovery is not None:
+                runtime.market_data_recovery.observe(
+                    normalized_event.candle.instrument,
+                    source_id=normalized_event.source_id,
+                    observed_at=normalized_event.candle.open_time,
+                )
             publish_bar_transitions(runtime.realtime_bars.apply(normalized_event))
         if runtime.persistence is not None:
             runtime.persistence.submit_candles((value,))
@@ -868,13 +939,25 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         }
         for instrument, source_id in hydration_targets:
             rows = await runtime.realtime_bars.hydrate(instrument, source_id=source_id)
+            definition = definition_for_instrument(instrument)
+            if (
+                runtime.market_data_recovery is not None
+                and definition.history_backfill_supported
+            ):
+                runtime.market_data_recovery.register_series(
+                    instrument,
+                    source_id=source_id,
+                    schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
+                    seed_rows=rows,
+                )
             if runtime.period_bars is not None:
-                definition = definition_for_instrument(instrument)
                 runtime.period_bars.seed_live(
                     rows,
                     schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
                 )
     await runtime.acquisition.start(initial_routes)
+    if runtime.market_data_recovery is not None:
+        await runtime.market_data_recovery.start()
     runtime.cboe_volatility = CboeVolatilityProvider(CboeVolatilitySettings())
     runtime.shfe_positioning = ShfePositioningProvider(ShfePositioningSettings())
     runtime.clear_caches()
@@ -884,6 +967,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await _close_expert_context_providers()
     if runtime.acquisition is not None:
         await runtime.acquisition.stop()
+    if runtime.market_data_recovery is not None:
+        await runtime.market_data_recovery.close()
     if local_provider is not None and local_quote_listener is not None:
         local_provider.remove_quote_listener(local_quote_listener)
     if local_provider is not None and local_candle_listener is not None:
@@ -911,6 +996,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     runtime.tonghuashun_futures_provider = None
     runtime.manager = None
     runtime.persistence = None
+    runtime.market_data_recovery = None
     runtime.database_store = None
     runtime.persistence_setup_error = None
     runtime.quote_stream = None
@@ -1107,7 +1193,11 @@ def _shfe_positioning_payload(
     }
 
 
-def _public_source(value: Any) -> dict[str, Any]:
+def _public_source(
+    value: Any,
+    *,
+    history_backfill_configured: bool,
+) -> dict[str, Any]:
     """Expose realtime-source outcomes, never their internal channel topology."""
 
     return {
@@ -1115,6 +1205,7 @@ def _public_source(value: Any) -> dict[str, Any]:
         "display_name": value.display_name,
         "description": value.description,
         "capabilities": value.capabilities,
+        "history_backfill_configured": history_backfill_configured,
         "selectable": value.enabled and not value.frozen,
         "delayed": value.delayed,
         "requires_running_app": value.requires_running_app,
@@ -1143,6 +1234,39 @@ def _public_acquisition_status(value: dict[str, object] | None) -> dict[str, obj
     return {
         "state": "running",
         "routes": value.get("routes", {}),
+    }
+
+
+def _public_history_status(
+    realtime_bars: RealtimeBarService,
+    *,
+    live_bar_count: int,
+) -> dict[str, Any]:
+    recovery = runtime.market_data_recovery
+    return {
+        "mode": "realtime_source_bound_cache",
+        "governance": "frozen",
+        "cross_source_fallback": False,
+        "upstream_calls_on_read": False,
+        "live_bar_count": live_bar_count,
+        "live_kline_count": live_bar_count,
+        "backfill_pending": realtime_bars.pending_backfill_count(),
+        "backfill_metrics": asdict(realtime_bars.backfill_metrics()),
+        "recovery": asdict(recovery.metrics()) if recovery is not None else None,
+        "series_authority": [
+            {
+                "source_id": state.realtime_source_id,
+                "instrument_symbol": state.instrument_symbol,
+                "interval_seconds": int(state.interval.total_seconds()),
+                "latest_authoritative_open_time": state.latest_authoritative_open_time,
+                "authoritative_through": state.authoritative_through,
+                "history_floor": state.history_floor,
+                "tail_checked_through": state.tail_checked_through,
+                "evidence_version": state.evidence_version,
+                "updated_at": state.updated_at,
+            }
+            for state in realtime_bars.known_series_states()
+        ],
     }
 
 
@@ -1183,33 +1307,40 @@ async def health() -> dict[str, Any]:
         database = asdict(runtime.persistence.health())
     database_healthy = database["state"] == "healthy"
     live_bar_count = runtime.realtime_bars.live_count() if runtime.realtime_bars else 0
+    realtime_bars = _realtime_bars()
     return {
         "status": "ok" if healthy and database_healthy else "degraded",
-        "sources": [_public_source(item) for item in sources],
+        "sources": [
+            _public_source(
+                item,
+                history_backfill_configured=realtime_bars.history_backfill_configured(
+                    item.source_id
+                ),
+            )
+            for item in sources
+        ],
         "database": database,
         "acquisition": _public_acquisition_status(
             runtime.acquisition.status() if runtime.acquisition is not None else None
         ),
-        "history": {
-            "mode": "realtime_source_bound_cache",
-            "governance": "frozen",
-            "cross_source_fallback": False,
-            "upstream_calls_on_read": False,
-            "live_bar_count": live_bar_count,
-            "live_kline_count": live_bar_count,
-            "backfill_pending": (
-                runtime.realtime_bars.pending_backfill_count()
-                if runtime.realtime_bars is not None
-                else 0
-            ),
-        },
+        "history": _public_history_status(
+            realtime_bars,
+            live_bar_count=live_bar_count,
+        ),
     }
 
 
 @app.get("/api/sources")
 async def sources(refresh: bool = Query(default=True)) -> list[dict[str, Any]]:
     values = await _manager().list_sources(refresh=refresh)
-    return [_public_source(value) for value in values]
+    realtime_bars = _realtime_bars()
+    return [
+        _public_source(
+            value,
+            history_backfill_configured=realtime_bars.history_backfill_configured(value.source_id),
+        )
+        for value in values
+    ]
 
 
 @app.post("/api/sources/{source_id}/test")
@@ -1261,6 +1392,7 @@ async def test_source(
         "code": definition.code,
         "state": descriptor.state,
         "detail": descriptor.error,
+        "history_backfill_configured": _realtime_bars().history_backfill_configured(source_id),
         "data_fresh": value is not None,
         "last": value.quote.last if value is not None else None,
         "observed_at": value.quote.source.observed_at if value is not None else None,
@@ -1288,7 +1420,7 @@ def _public_instrument(definition: InstrumentDefinition) -> dict[str, Any]:
         "price_unit": definition.price_unit,
         "price_digits": definition.price_digits,
         "quote_kind": definition.quote_kind,
-        "history_available": definition.history_available,
+        "history_backfill_supported": definition.history_backfill_supported,
         "source_ids": list(definition.source_ids),
         "dependencies": [
             definition_for_symbol(item.symbol).code for item in definition.dependencies
@@ -1395,12 +1527,84 @@ async def _refresh_watchlist_routes() -> None:
             if store is not None and store.is_open:
                 await store.set_instrument_source(requirement, source_id)
     await _acquisition().replace_routes(routes)
+    recovery = runtime.market_data_recovery
+    realtime_bars = runtime.realtime_bars
+    if recovery is None or realtime_bars is None:
+        return
+    for instrument, source_id in routes.items():
+        definition = definition_for_instrument(instrument)
+        if not definition.history_backfill_supported:
+            continue
+        rows = await realtime_bars.hydrate(instrument, source_id=source_id)
+        schedule = _MARKET_SCHEDULES[definition.market_schedule_id]
+        recovery.register_series(
+            instrument,
+            source_id=source_id,
+            schedule=schedule,
+            seed_rows=rows,
+        )
+        if runtime.period_bars is not None:
+            runtime.period_bars.seed_live(rows, schedule=schedule)
 
 
 async def _instrument_source(code: str) -> tuple[str, Instrument, str]:
     definition = instrument_definition(code)
     source_id = await _source_for_instrument(definition.instrument)
     return definition.code, definition.instrument, source_id
+
+
+def _chart_page_boundary(
+    cursor: str | None,
+    before: int | None,
+    *,
+    instrument: Instrument,
+    source_id: str,
+    period_id: str,
+    schedule: dict[str, Any] | None,
+) -> datetime | None:
+    if cursor is not None and before is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="provide either cursor or before, not both",
+        )
+    if cursor is not None:
+        try:
+            return decode_chart_page_cursor(
+                cursor,
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+    return datetime.fromtimestamp(before, tz=UTC) if before is not None else None
+
+
+def _chart_bar_page_payload(
+    page: PeriodBarPage,
+    *,
+    instrument: Instrument,
+    source_id: str,
+    period_id: str,
+    schedule: dict[str, Any] | None,
+    next_before: datetime | None,
+) -> dict[str, Any]:
+    payload = asdict(page)
+    payload["next_before"] = next_before
+    payload["next_cursor"] = (
+        encode_chart_page_cursor(
+            instrument,
+            source_id=source_id,
+            period_id=period_id,
+            schedule=schedule,
+            before=next_before,
+        )
+        if next_before is not None
+        else None
+    )
+    payload["local_status"] = "ready" if page.items else "empty"
+    return payload
 
 
 @app.get("/api/watchlist")
@@ -1606,6 +1810,7 @@ async def last_quote(code: str) -> dict[str, Any]:
 async def chart_bars(
     code: str,
     period: str = Query(default="1m"),
+    cursor: str | None = Query(default=None, description="Opaque exclusive page cursor"),
     before: int | None = Query(default=None, description="Exclusive Unix-second cursor"),
     page_size: int = Query(default=500, ge=1, le=10_000),
 ) -> dict[str, Any]:
@@ -1613,15 +1818,89 @@ async def chart_bars(
         raise HTTPException(status_code=422, detail=f"unsupported chart period: {period}")
     normalized_code, instrument, source_id = await _instrument_source(code)
     definition = instrument_definition(normalized_code)
+    schedule = _MARKET_SCHEDULES[definition.market_schedule_id]
+    boundary = _chart_page_boundary(
+        cursor,
+        before,
+        instrument=instrument,
+        source_id=source_id,
+        period_id=period,
+        schedule=schedule,
+    )
     page = await _period_bars().get_page(
         instrument,
         source_id=source_id,
         period_id=period,
-        schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
-        before=datetime.fromtimestamp(before, tz=UTC) if before is not None else None,
+        schedule=schedule,
+        before=boundary,
         page_size=page_size,
     )
-    return asdict(page)
+    return _chart_bar_page_payload(
+        page,
+        instrument=instrument,
+        source_id=source_id,
+        period_id=period,
+        schedule=schedule,
+        next_before=page.next_before,
+    )
+
+
+@app.post("/api/bars/{code}/history")
+async def ensure_chart_bar_history(
+    code: str,
+    period: str = Query(default="1m"),
+    cursor: str = Query(min_length=1, description="Opaque exclusive page cursor"),
+    count_back: int = Query(default=240, ge=1, le=10_000),
+) -> dict[str, Any]:
+    """Executes one bounded server-side step for a logical older-Bar demand."""
+
+    if period not in PERIOD_DEFINITIONS:
+        raise HTTPException(status_code=422, detail=f"unsupported chart period: {period}")
+    normalized_code, instrument, source_id = await _instrument_source(code)
+    definition = instrument_definition(normalized_code)
+    schedule = _MARKET_SCHEDULES[definition.market_schedule_id]
+    boundary = _chart_page_boundary(
+        cursor,
+        None,
+        instrument=instrument,
+        source_id=source_id,
+        period_id=period,
+        schedule=schedule,
+    )
+    assert boundary is not None
+    history_backfiller: Any = _realtime_bars()
+    if runtime.market_data_recovery is not None:
+        runtime.market_data_recovery.register_series(
+            instrument,
+            source_id=source_id,
+            schedule=schedule,
+        )
+        history_backfiller = runtime.market_data_recovery
+    result = await ChartHistoryCoordinator(
+        _period_bars(),
+        history_backfiller,
+    ).ensure_older(
+        instrument,
+        source_id=source_id,
+        period_id=period,
+        schedule=schedule,
+        before=boundary,
+        count_back=count_back,
+        backfill_supported=definition.history_backfill_supported,
+    )
+    payload = asdict(result)
+    # An empty but authoritatively checked window advances through its coverage
+    # boundary without fabricating a Bar or a provider history floor.
+    payload["page"] = _chart_bar_page_payload(
+        result.page,
+        instrument=instrument,
+        source_id=source_id,
+        period_id=period,
+        schedule=schedule,
+        next_before=result.next_before,
+    )
+    payload["next_cursor"] = payload["page"]["next_cursor"]
+    return payload
 
 
 @app.get("/api/candles/{code}")
@@ -1641,7 +1920,7 @@ async def candles(
     return [asdict(value) for value in values]
 
 
-@app.post("/api/candles/{code}/backfill")
+@app.post("/api/candles/{code}/backfill", response_model=CandleBackfillResponse)
 async def backfill_candles(
     code: str,
     count: int = Query(default=1_000, ge=1, le=10_000),
@@ -1650,25 +1929,33 @@ async def backfill_candles(
         default=False,
         description="Bypass completed coverage only for one observed in-session gap",
     ),
-) -> dict[str, Any]:
+) -> CandleBackfillResponse:
     """Explicitly fills one missing range from the contract's bound realtime source."""
 
     definition = instrument_definition(code)
-    if not definition.history_available:
+    if not definition.history_backfill_supported:
         raise HTTPException(
             status_code=409,
             detail="该换算品种目前只提供实时分钟线, 不提供历史回补",
         )
     _, instrument, source_id = await _instrument_source(code)
     start = datetime.fromtimestamp(time, tz=UTC)
-    result = await _realtime_bars().backfill(
+    history_backfiller: Any = _realtime_bars()
+    if runtime.market_data_recovery is not None:
+        runtime.market_data_recovery.register_series(
+            instrument,
+            source_id=source_id,
+            schedule=_MARKET_SCHEDULES[definition.market_schedule_id],
+        )
+        history_backfiller = runtime.market_data_recovery
+    result = await history_backfiller.backfill(
         instrument,
         source_id=source_id,
         start=start,
         count=count,
         revalidate=revalidate,
     )
-    return asdict(result)
+    return CandleBackfillResponse.model_validate(asdict(result))
 
 
 @app.get("/api/timeline/{code}")
@@ -1766,10 +2053,7 @@ async def replay_stream(websocket: WebSocket, code: str) -> None:
         if bounds.first_sequence is None or bounds.last_sequence is None:
             raise ValueError("recorded frame stream is empty")
         requested_start_text = websocket.query_params.get("start_sequence")
-        if (
-            requested_start_text is not None
-            and int(requested_start_text) != bounds.first_sequence
-        ):
+        if requested_start_text is not None and int(requested_start_text) != bounds.first_sequence:
             raise ValueError(
                 "complete replay must start at the first retained frame; "
                 "arbitrary seek requires a reducer checkpoint"
@@ -1779,9 +2063,7 @@ async def replay_stream(websocket: WebSocket, code: str) -> None:
         start_sequence = bounds.first_sequence
         end_sequence_text = websocket.query_params.get("end_sequence")
         end_sequence = (
-            int(end_sequence_text)
-            if end_sequence_text is not None
-            else bounds.last_sequence
+            int(end_sequence_text) if end_sequence_text is not None else bounds.last_sequence
         )
         normalized_code, instrument, source_id = await _instrument_source(code)
         if source_id not in runtime.replay_source_ids:
@@ -1853,6 +2135,8 @@ async def replay_stream(websocket: WebSocket, code: str) -> None:
 
 @app.websocket("/api/stream/quotes/{code}")
 async def quote_stream(websocket: WebSocket, code: str) -> None:
+    # Upstream availability is carried as status events; closing this socket means
+    # the browser-to-TraceFang transport itself changed or failed.
     requested_period = websocket.query_params.get("period", "1m")
     period = "1s" if requested_period == "timeline" else requested_period
     if period not in PERIOD_DEFINITIONS or period == "timeline":

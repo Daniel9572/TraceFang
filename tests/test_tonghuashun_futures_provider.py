@@ -216,11 +216,12 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(silver.change_percent, Decimal("1.63"))
 
     async def test_history_filters_year_file_to_requested_window(self) -> None:
-        rows = await self.provider.fetch_historical_candles(
+        batch = await self.provider.fetch_historical_candles(
             SHFE_GOLD_WEIGHTED,
             start=datetime(2026, 8, 7, 18, 29, tzinfo=UTC),
             count=1,
         )
+        rows = batch.candles
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].open, Decimal("942.80"))
@@ -230,6 +231,9 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
             rows[0].source.raw_payload["history_file"],
             "tonghuashun_public_line_61_year",
         )
+        self.assertEqual(batch.authoritative_through, batch.checked_end)
+        self.assertTrue(batch.evidence_version)
+        self.assertIsNone(batch.history_floor)
 
     async def test_nasdaq_quote_and_lines_use_their_respective_source_clocks(self) -> None:
         quote = await self.provider.get_quote(NASDAQ_COMPOSITE)
@@ -370,6 +374,10 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {quote.source.raw_payload["wire_observed_at"] for quote in replay_quotes},
             {"2026-08-10T09:00:00+08:00"},
+        )
+        self.assertEqual(
+            {quote.source.raw_payload["observation_kind"] for quote in replay_quotes},
+            {"snapshot"},
         )
 
         bars = RealtimeBarService(

@@ -18,3 +18,5 @@ dist/
 *.egg-info/
 data/
 logs/
+assets/
+.DS_Store

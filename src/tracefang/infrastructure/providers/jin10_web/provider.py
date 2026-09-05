@@ -327,6 +327,7 @@ class Jin10WebProvider:
                 raw_payload={
                     "protocol": protocol,
                     "channel": "jin10_public_websocket",
+                    "observation_kind": "event",
                     "connection_id": connection_id,
                     "sequence": sequence,
                     "previous_close": str(previous_close) if previous_close else None,

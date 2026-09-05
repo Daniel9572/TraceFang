@@ -10,10 +10,21 @@ from enum import Enum
 import asyncpg
 
 from tracefang.application.period_bars import (
+    PeriodBarBucketAggregate,
     PeriodBarInputChange,
     PeriodBarMaterializationState,
 )
-from tracefang.domain.market_events import BarState, QuoteSample, RealtimeBar
+from tracefang.application.realtime_bars import (
+    HistoricalBarBatch,
+    RealtimeBarSeriesState,
+)
+from tracefang.domain.market_events import (
+    BarState,
+    QuoteObservationKind,
+    QuoteSample,
+    RealtimeBar,
+    quote_event_id,
+)
 from tracefang.domain.models import Candle, Instrument, QuoteSnapshot, SourceMetadata
 from tracefang.infrastructure.postgres.schema import SCHEMA_SQL
 from tracefang.infrastructure.postgres.settings import PostgresSettings
@@ -70,11 +81,11 @@ WHERE profile_id = $1 AND instrument_symbol = $2
 
 _INSERT_QUOTE = """
 INSERT INTO quote_events (
-    instrument_symbol, source_id, provider_symbol, observed_at, received_at,
+    instrument_symbol, source_id, event_id, provider_symbol, observed_at, received_at,
     last, open, high, low, volume, change, change_percent, raw_payload
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
-ON CONFLICT (source_id, provider_symbol, received_at) DO NOTHING
+VALUES ($1, $2, $14, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+ON CONFLICT (source_id, event_id) WHERE event_id IS NOT NULL DO NOTHING
 """
 
 _UPSERT_LATEST_QUOTE = """
@@ -147,8 +158,14 @@ _SELECT_QUOTE_EVENT_PAGE = """
 SELECT *
 FROM (
     SELECT
-        id, instrument_symbol, source_id, provider_symbol,
-        observed_at, received_at, last
+        id, instrument_symbol, source_id,
+        COALESCE(event_id, 'persisted:' || id::text) AS event_id,
+        provider_symbol,
+        observed_at, received_at, last,
+        CASE
+            WHEN raw_payload ->> 'observation_kind' = 'snapshot' THEN 'snapshot'
+            ELSE 'event'
+        END AS observation_kind
     FROM quote_events
     WHERE instrument_symbol = $1
       AND source_id = ANY($2::text[])
@@ -595,6 +612,68 @@ ORDER BY mutation_id
 LIMIT $5
 """
 
+_AGGREGATE_REALTIME_BAR_BUCKET = """
+WITH aggregate_values AS (
+    SELECT
+        max(high) AS high,
+        min(low) AS low,
+        CASE WHEN bool_or(volume IS NOT NULL) THEN sum(volume) END AS volume,
+        bool_and(state = 'final') AS all_final,
+        bool_or(state <> 'provisional_quote') AS any_authoritative,
+        max(finalized_at) AS finalized_at,
+        sum(revision) AS revision,
+        count(*) AS component_count,
+        min(open_time) AS first_open_time,
+        max(observed_at) AS observed_at,
+        max(received_at) AS received_at
+    FROM realtime_bars
+    WHERE instrument_symbol = $1
+      AND realtime_source_id = $2
+      AND interval_seconds = 60
+      AND open_time >= $3
+      AND open_time < $4
+), first_value AS (
+    SELECT open
+    FROM realtime_bars
+    WHERE instrument_symbol = $1
+      AND realtime_source_id = $2
+      AND interval_seconds = 60
+      AND open_time >= $3
+      AND open_time < $4
+    ORDER BY open_time
+    LIMIT 1
+), last_value AS (
+    SELECT close, provider_symbol, evidence_channel_id
+    FROM realtime_bars
+    WHERE instrument_symbol = $1
+      AND realtime_source_id = $2
+      AND interval_seconds = 60
+      AND open_time >= $3
+      AND open_time < $4
+    ORDER BY open_time DESC
+    LIMIT 1
+)
+SELECT
+    aggregate_values.first_open_time,
+    first_value.open,
+    aggregate_values.high,
+    aggregate_values.low,
+    last_value.close,
+    aggregate_values.volume,
+    aggregate_values.all_final,
+    aggregate_values.any_authoritative,
+    aggregate_values.finalized_at,
+    aggregate_values.revision,
+    aggregate_values.component_count,
+    last_value.provider_symbol,
+    last_value.evidence_channel_id,
+    aggregate_values.observed_at,
+    aggregate_values.received_at
+FROM aggregate_values
+CROSS JOIN first_value
+CROSS JOIN last_value
+"""
+
 _SELECT_PERIOD_BAR_MATERIALIZATION = """
 SELECT source_cursor, oldest_bucket_open_time, history_exhausted, processed_mutation_id
 FROM period_bar_materializations
@@ -630,9 +709,7 @@ ON CONFLICT (
             EXCLUDED.oldest_bucket_open_time
         )
     END,
-    history_exhausted = (
-        period_bar_materializations.history_exhausted OR EXCLUDED.history_exhausted
-    ),
+    history_exhausted = EXCLUDED.history_exhausted,
     processed_mutation_id = GREATEST(
         period_bar_materializations.processed_mutation_id,
         EXCLUDED.processed_mutation_id
@@ -652,7 +729,7 @@ FROM (
       AND realtime_source_id = $2
       AND period_id = $3
       AND materialization_version = $4
-      AND ($5::timestamptz IS NULL OR open_time < $5)
+      AND ($5::timestamptz IS NULL OR first_component_open_time < $5)
     ORDER BY open_time DESC
     LIMIT $6
 ) AS recent
@@ -725,6 +802,152 @@ ON CONFLICT (
     provider_symbol = EXCLUDED.provider_symbol,
     row_count = EXCLUDED.row_count,
     fetched_at = now()
+"""
+
+_LOCK_REALTIME_BAR_SERIES = """
+SELECT pg_advisory_xact_lock(
+    hashtextextended($1 || ':' || $2 || ':' || $3::integer::text, 0)
+)
+"""
+
+_DELETE_MERGED_CANDLE_CACHE_RANGES = """
+DELETE FROM realtime_candle_cache_ranges
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND interval_seconds = $3
+  AND range_end >= $4
+  AND range_start <= $5
+RETURNING range_start, range_end
+"""
+
+_COUNT_SOURCE_CANDLES_IN_RANGE = """
+SELECT count(*)::integer
+FROM candles
+WHERE instrument_symbol = $1
+  AND source_id = $2
+  AND provider_symbol = $3
+  AND interval_seconds = $4
+  AND open_time >= $5
+  AND open_time < $6
+"""
+
+_SELECT_REALTIME_BAR_SERIES_STATE = """
+SELECT
+    instrument_symbol, realtime_source_id, upstream_channel_id, provider_symbol,
+    interval_seconds, latest_authoritative_open_time, authoritative_through,
+    history_floor, tail_checked_through, tail_checked_at, evidence_version, updated_at
+FROM realtime_bar_series_state
+WHERE instrument_symbol = $1
+  AND realtime_source_id = $2
+  AND interval_seconds = $3
+"""
+
+_UPSERT_REALTIME_BAR_SERIES_STATE = """
+INSERT INTO realtime_bar_series_state (
+    instrument_symbol, realtime_source_id, upstream_channel_id, provider_symbol,
+    interval_seconds, latest_authoritative_open_time, authoritative_through,
+    history_floor, tail_checked_through, tail_checked_at, evidence_version
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (realtime_source_id, instrument_symbol, interval_seconds)
+DO UPDATE SET
+    upstream_channel_id = EXCLUDED.upstream_channel_id,
+    provider_symbol = EXCLUDED.provider_symbol,
+    latest_authoritative_open_time = GREATEST(
+        realtime_bar_series_state.latest_authoritative_open_time,
+        EXCLUDED.latest_authoritative_open_time
+    ),
+    authoritative_through = GREATEST(
+        realtime_bar_series_state.authoritative_through,
+        EXCLUDED.authoritative_through
+    ),
+    history_floor = LEAST(
+        realtime_bar_series_state.history_floor,
+        EXCLUDED.history_floor
+    ),
+    tail_checked_through = CASE
+        WHEN GREATEST(
+            realtime_bar_series_state.authoritative_through,
+            EXCLUDED.authoritative_through
+        ) >= GREATEST(
+            COALESCE(
+                realtime_bar_series_state.tail_checked_through,
+                realtime_bar_series_state.authoritative_through
+            ),
+            COALESCE(EXCLUDED.tail_checked_through, EXCLUDED.authoritative_through)
+        ) THEN NULL
+        ELSE GREATEST(
+            realtime_bar_series_state.tail_checked_through,
+            EXCLUDED.tail_checked_through
+        )
+    END,
+    tail_checked_at = CASE
+        WHEN GREATEST(
+            realtime_bar_series_state.authoritative_through,
+            EXCLUDED.authoritative_through
+        ) >= GREATEST(
+            COALESCE(
+                realtime_bar_series_state.tail_checked_through,
+                realtime_bar_series_state.authoritative_through
+            ),
+            COALESCE(EXCLUDED.tail_checked_through, EXCLUDED.authoritative_through)
+        ) THEN NULL
+        ELSE GREATEST(
+            realtime_bar_series_state.tail_checked_at,
+            EXCLUDED.tail_checked_at
+        )
+    END,
+    evidence_version = EXCLUDED.evidence_version,
+    updated_at = now()
+RETURNING
+    instrument_symbol, realtime_source_id, upstream_channel_id, provider_symbol,
+    interval_seconds, latest_authoritative_open_time, authoritative_through,
+    history_floor, tail_checked_through, tail_checked_at, evidence_version, updated_at
+"""
+
+_ADVANCE_LIVE_REALTIME_BAR_SERIES_STATE = """
+INSERT INTO realtime_bar_series_state (
+    instrument_symbol, realtime_source_id, upstream_channel_id, provider_symbol,
+    interval_seconds, latest_authoritative_open_time, authoritative_through,
+    history_floor, tail_checked_through, tail_checked_at, evidence_version
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, $8)
+ON CONFLICT (realtime_source_id, instrument_symbol, interval_seconds)
+DO UPDATE SET
+    upstream_channel_id = CASE
+        WHEN EXCLUDED.authoritative_through >= realtime_bar_series_state.authoritative_through
+        THEN EXCLUDED.upstream_channel_id
+        ELSE realtime_bar_series_state.upstream_channel_id
+    END,
+    provider_symbol = CASE
+        WHEN EXCLUDED.authoritative_through >= realtime_bar_series_state.authoritative_through
+        THEN EXCLUDED.provider_symbol
+        ELSE realtime_bar_series_state.provider_symbol
+    END,
+    latest_authoritative_open_time = GREATEST(
+        realtime_bar_series_state.latest_authoritative_open_time,
+        EXCLUDED.latest_authoritative_open_time
+    ),
+    authoritative_through = GREATEST(
+        realtime_bar_series_state.authoritative_through,
+        EXCLUDED.authoritative_through
+    ),
+    tail_checked_through = CASE
+        WHEN EXCLUDED.authoritative_through >= realtime_bar_series_state.tail_checked_through
+        THEN NULL
+        ELSE realtime_bar_series_state.tail_checked_through
+    END,
+    tail_checked_at = CASE
+        WHEN EXCLUDED.authoritative_through >= realtime_bar_series_state.tail_checked_through
+        THEN NULL
+        ELSE realtime_bar_series_state.tail_checked_at
+    END,
+    evidence_version = CASE
+        WHEN realtime_bar_series_state.evidence_version LIKE 'live:%'
+        THEN EXCLUDED.evidence_version
+        ELSE realtime_bar_series_state.evidence_version
+    END,
+    updated_at = now()
 """
 
 
@@ -814,6 +1037,13 @@ def _realtime_bar_values(bar: RealtimeBar) -> tuple[object, ...]:
         bar.finalized_at,
         _payload_json(bar, source.raw_payload),
     )
+
+
+def _is_final_authoritative_projection(bar: RealtimeBar) -> bool:
+    if bar.state is not BarState.FINAL:
+        return False
+    derivation = (bar.source.raw_payload or {}).get("derivation")
+    return isinstance(derivation, str) and derivation.startswith("authoritative_")
 
 
 def _period_bar_payload_time(
@@ -911,6 +1141,25 @@ def _realtime_bar_from_row(row: Mapping[str, object], instrument: Instrument) ->
         state=BarState(str(row["state"])),
         revision=int(row["revision"]),
         finalized_at=row["finalized_at"],
+    )
+
+
+def _realtime_bar_series_state_from_row(
+    row: Mapping[str, object],
+) -> RealtimeBarSeriesState:
+    return RealtimeBarSeriesState(
+        realtime_source_id=str(row["realtime_source_id"]),
+        instrument_symbol=str(row["instrument_symbol"]),
+        upstream_channel_id=str(row["upstream_channel_id"]),
+        provider_symbol=str(row["provider_symbol"]),
+        interval=timedelta(seconds=int(row["interval_seconds"])),
+        latest_authoritative_open_time=row["latest_authoritative_open_time"],
+        authoritative_through=row["authoritative_through"],
+        history_floor=row["history_floor"],
+        tail_checked_through=row["tail_checked_through"],
+        tail_checked_at=row["tail_checked_at"],
+        evidence_version=str(row["evidence_version"]),
+        updated_at=row["updated_at"],
     )
 
 
@@ -1044,7 +1293,7 @@ class PostgresMarketDataStore:
         async with pool.acquire() as connection, connection.transaction():
             await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(quote.instrument))
             await connection.execute(_UPSERT_SOURCE, quote.source.provider)
-            await connection.execute(_INSERT_QUOTE, *values)
+            await connection.execute(_INSERT_QUOTE, *values, quote_event_id(quote))
             await connection.execute(_UPSERT_LATEST_QUOTE, *values)
 
     async def load_latest_quote(
@@ -1088,12 +1337,13 @@ class PostgresMarketDataStore:
             QuoteSample(
                 source_id=str(row["source_id"]),
                 channel_id=str(row["source_id"]),
-                event_id=f"persisted:{row['id']}",
+                event_id=str(row["event_id"]),
                 instrument=instrument,
                 provider_symbol=str(row["provider_symbol"]),
                 observed_at=row["observed_at"],
                 received_at=row["received_at"],
                 value=Decimal(row["last"]),
+                observation_kind=QuoteObservationKind(str(row["observation_kind"])),
                 storage_id=int(row["id"]),
             )
             for row in rows
@@ -1122,6 +1372,18 @@ class PostgresMarketDataStore:
             for bar in bars
             for source_id in (bar.source.provider, bar.evidence_channel_id)
         }
+        live_authority: dict[tuple[str, str, int], RealtimeBar] = {}
+        for bar in bars:
+            if not _is_final_authoritative_projection(bar):
+                continue
+            key = (
+                bar.source.provider,
+                bar.instrument.symbol,
+                int(bar.interval.total_seconds()),
+            )
+            current = live_authority.get(key)
+            if current is None or bar.open_time > current.open_time:
+                live_authority[key] = bar
         async with pool.acquire() as connection, connection.transaction():
             for instrument in instruments.values():
                 await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
@@ -1131,6 +1393,18 @@ class PostgresMarketDataStore:
                 _UPSERT_REALTIME_BAR,
                 [_realtime_bar_values(row) for row in bars],
             )
+            for bar in live_authority.values():
+                await connection.execute(
+                    _ADVANCE_LIVE_REALTIME_BAR_SERIES_STATE,
+                    bar.instrument.symbol,
+                    bar.source.provider,
+                    bar.evidence_channel_id,
+                    bar.source.provider_symbol,
+                    int(bar.interval.total_seconds()),
+                    bar.open_time,
+                    bar.open_time + bar.interval,
+                    f"live:{bar.evidence_channel_id}",
+                )
 
     async def load_period_bar_materialization(
         self,
@@ -1227,6 +1501,49 @@ class PostgresMarketDataStore:
                 open_time=row["open_time"],
             )
             for row in rows
+        )
+
+    async def aggregate_realtime_bar_bucket(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> PeriodBarBucketAggregate | None:
+        if start.tzinfo is None or start.utcoffset() is None:
+            raise ValueError("bucket start must be timezone-aware")
+        if end.tzinfo is None or end.utcoffset() is None:
+            raise ValueError("bucket end must be timezone-aware")
+        if end <= start:
+            raise ValueError("bucket end must be after start")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                _AGGREGATE_REALTIME_BAR_BUCKET,
+                instrument.symbol,
+                source_id,
+                start,
+                end,
+            )
+        if row is None:
+            return None
+        return PeriodBarBucketAggregate(
+            first_open_time=row["first_open_time"],
+            open=Decimal(row["open"]),
+            high=Decimal(row["high"]),
+            low=Decimal(row["low"]),
+            close=Decimal(row["close"]),
+            volume=Decimal(row["volume"]) if row["volume"] is not None else None,
+            all_final=bool(row["all_final"]),
+            any_authoritative=bool(row["any_authoritative"]),
+            finalized_at=row["finalized_at"],
+            revision=int(row["revision"]),
+            component_count=int(row["component_count"]),
+            provider_symbol=str(row["provider_symbol"]),
+            evidence_channel_id=str(row["evidence_channel_id"]),
+            observed_at=row["observed_at"],
+            received_at=row["received_at"],
         )
 
     async def load_materialized_period_bars_before(
@@ -1475,11 +1792,7 @@ class PostgresMarketDataStore:
         pool = self._require_pool()
         interval_seconds = int(interval.total_seconds())
         async with pool.acquire() as connection:
-            query = (
-                _SELECT_RECENT_REALTIME_BARS
-                if before is None
-                else _SELECT_REALTIME_BARS_BEFORE
-            )
+            query = _SELECT_RECENT_REALTIME_BARS if before is None else _SELECT_REALTIME_BARS_BEFORE
             arguments = (
                 (instrument.symbol, source_id, interval_seconds, count)
                 if before is None
@@ -1541,9 +1854,7 @@ class PostgresMarketDataStore:
         interval_seconds = int(interval.total_seconds())
         async with pool.acquire() as connection:
             query = (
-                _SELECT_RECENT_SOURCE_CANDLES
-                if before is None
-                else _SELECT_SOURCE_CANDLES_BEFORE
+                _SELECT_RECENT_SOURCE_CANDLES if before is None else _SELECT_SOURCE_CANDLES_BEFORE
             )
             arguments = (
                 (instrument.symbol, source_id, interval_seconds, count)
@@ -1552,6 +1863,153 @@ class PostgresMarketDataStore:
             )
             rows = await connection.fetch(query, *arguments)
         return tuple(_candle_from_row(row, instrument) for row in rows)
+
+    async def load_realtime_bar_series_state(
+        self,
+        instrument: Instrument,
+        *,
+        realtime_source_id: str,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> RealtimeBarSeriesState | None:
+        interval_seconds = int(interval.total_seconds())
+        if interval_seconds <= 0:
+            raise ValueError("interval must be positive")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                _SELECT_REALTIME_BAR_SERIES_STATE,
+                instrument.symbol,
+                realtime_source_id,
+                interval_seconds,
+            )
+        return _realtime_bar_series_state_from_row(row) if row is not None else None
+
+    async def commit_historical_bar_batch(
+        self,
+        instrument: Instrument,
+        *,
+        realtime_source_id: str,
+        upstream_channel_id: str,
+        provider_symbol: str,
+        batch: HistoricalBarBatch,
+        bars: Sequence[RealtimeBar],
+    ) -> RealtimeBarSeriesState:
+        """Atomically publish validated history, coverage, and series authority."""
+
+        interval_seconds = int(batch.interval.total_seconds())
+        if interval_seconds <= 0:
+            raise ValueError("historical batch interval must be positive")
+        if any(
+            candle.instrument != instrument
+            or candle.interval != batch.interval
+            or candle.source.provider != upstream_channel_id
+            or candle.source.provider_symbol != provider_symbol
+            for candle in batch.candles
+        ):
+            raise ValueError("historical batch contains foreign candle evidence")
+        if any(
+            bar.instrument != instrument
+            or bar.interval != batch.interval
+            or bar.source.provider != realtime_source_id
+            or bar.evidence_channel_id != upstream_channel_id
+            for bar in bars
+        ):
+            raise ValueError("historical batch contains foreign Bar projections")
+
+        latest_authoritative_open_time = max(
+            (
+                candle.open_time
+                for candle in batch.candles
+                if candle.open_time < batch.authoritative_through
+            ),
+            default=None,
+        )
+        coverage_start = batch.checked_start
+        coverage_end = min(batch.checked_end, batch.authoritative_through)
+        tail_checked_through = (
+            batch.checked_end if batch.checked_end > batch.authoritative_through else None
+        )
+        tail_checked_at = batch.checked_at if tail_checked_through is not None else None
+
+        pool = self._require_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
+            source_ids = {
+                realtime_source_id,
+                upstream_channel_id,
+                *(candle.source.provider for candle in batch.candles),
+                *(bar.source.provider for bar in bars),
+                *(bar.evidence_channel_id for bar in bars),
+            }
+            for source_id in source_ids:
+                await connection.execute(_UPSERT_SOURCE, source_id)
+
+            await connection.fetchval(
+                _LOCK_REALTIME_BAR_SERIES,
+                realtime_source_id,
+                instrument.symbol,
+                interval_seconds,
+            )
+            if batch.candles:
+                await connection.executemany(
+                    _UPSERT_CANDLE,
+                    [_candle_values(row) for row in batch.candles],
+                )
+            if bars:
+                await connection.executemany(
+                    _UPSERT_REALTIME_BAR,
+                    [_realtime_bar_values(row) for row in bars],
+                )
+
+            if coverage_end > coverage_start:
+                merged_rows = await connection.fetch(
+                    _DELETE_MERGED_CANDLE_CACHE_RANGES,
+                    instrument.symbol,
+                    realtime_source_id,
+                    interval_seconds,
+                    coverage_start,
+                    coverage_end,
+                )
+                merged_start = min((coverage_start, *(row["range_start"] for row in merged_rows)))
+                merged_end = max((coverage_end, *(row["range_end"] for row in merged_rows)))
+                row_count = await connection.fetchval(
+                    _COUNT_SOURCE_CANDLES_IN_RANGE,
+                    instrument.symbol,
+                    upstream_channel_id,
+                    provider_symbol,
+                    interval_seconds,
+                    merged_start,
+                    merged_end,
+                )
+                await connection.execute(
+                    _UPSERT_CANDLE_CACHE_RANGE,
+                    instrument.symbol,
+                    realtime_source_id,
+                    upstream_channel_id,
+                    provider_symbol,
+                    interval_seconds,
+                    merged_start,
+                    merged_end,
+                    int(row_count or 0),
+                )
+
+            state_row = await connection.fetchrow(
+                _UPSERT_REALTIME_BAR_SERIES_STATE,
+                instrument.symbol,
+                realtime_source_id,
+                upstream_channel_id,
+                provider_symbol,
+                interval_seconds,
+                latest_authoritative_open_time,
+                batch.authoritative_through,
+                batch.history_floor,
+                tail_checked_through,
+                tail_checked_at,
+                batch.evidence_version,
+            )
+            if state_row is None:
+                raise RuntimeError("historical series state was not persisted")
+        return _realtime_bar_series_state_from_row(state_row)
 
     async def candle_missing_ranges(
         self,

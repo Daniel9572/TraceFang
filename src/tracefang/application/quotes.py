@@ -242,10 +242,10 @@ class QuoteViewService:
         allow_stale: bool = False,
     ) -> QuoteView:
         if price is None:
-            raise ProviderUnavailableError("金十客户端行情暂时没有实时价格")
+            raise ProviderUnavailableError("金十统一行情暂时没有实时价格")
         price_is_stale = self._is_stale(JIN10_WEB_CHANNEL, price)
         if price_is_stale and not allow_stale:
-            raise ProviderUnavailableError("金十客户端行情的实时价格已过期")
+            raise ProviderUnavailableError("金十统一行情的实时价格已过期")
 
         unavailable_fields = [
             field_name for field_name in _PRICE_FIELDS if getattr(price, field_name) is None

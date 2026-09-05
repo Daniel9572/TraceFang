@@ -10,6 +10,7 @@ from typing import Protocol
 
 from tracefang.application.quotes import QuoteView
 from tracefang.application.realtime_bars import BarBackfillResult as _BarBackfillResult
+from tracefang.application.realtime_bars import HistoricalBarBatch
 from tracefang.application.realtime_bars import RealtimeBarContract as _RealtimeBarContract
 from tracefang.application.realtime_bars import RealtimeBarService as _RealtimeBarService
 from tracefang.domain.errors import ProviderUnavailableError
@@ -74,7 +75,7 @@ class HistoricalCandleProvider(Protocol):
         *,
         start: datetime,
         count: int,
-    ) -> tuple[Candle, ...]: ...
+    ) -> HistoricalBarBatch: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,11 +325,12 @@ class RealtimeKlineService:
             row_count = 0
             for missing_start, missing_end in missing:
                 missing_count = int((missing_end - missing_start) / timedelta(minutes=1))
-                values = await provider.fetch_historical_candles(
+                batch = await provider.fetch_historical_candles(
                     instrument,
                     start=missing_start,
                     count=missing_count,
                 )
+                values = batch.candles
                 for candle in values:
                     if (
                         candle.instrument != instrument

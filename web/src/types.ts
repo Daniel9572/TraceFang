@@ -58,7 +58,7 @@ export interface InstrumentEntry {
   price_unit: string;
   price_digits: number;
   quote_kind: "direct" | "derived";
-  history_available: boolean;
+  history_backfill_supported: boolean;
   source_ids: SourceId[];
   dependencies: string[];
   market_schedule?: MarketSchedule | null;
@@ -106,6 +106,7 @@ export interface SourceDescriptor {
   display_name: string;
   description: string;
   capabilities: string[];
+  history_backfill_configured: boolean;
   selectable: boolean;
   delayed: boolean;
   requires_running_app: boolean;
@@ -127,10 +128,16 @@ export interface SourceDescriptor {
 
 export interface CandleBackfillResult {
   source_id: SourceId;
-  state: "cached" | "fetched";
+  state: "cached" | "joined" | "fetched" | "advanced" | "exhausted" | "deferred";
   start: string;
   end: string;
   row_count: number;
+  covered_start: string | null;
+  covered_end: string | null;
+  authoritative_through: string | null;
+  history_floor: string | null;
+  retry_after: string | null;
+  evidence_version: string | null;
 }
 
 export interface SourceConnectionTest {
@@ -138,6 +145,7 @@ export interface SourceConnectionTest {
   code: string;
   state: string;
   detail: string | null;
+  history_backfill_configured: boolean;
   data_fresh: boolean;
   last: number | string | null;
   observed_at: string | null;
@@ -207,7 +215,26 @@ export interface ChartBarPage {
   period_id: string;
   items: Candle[];
   next_before: string | null;
+  next_cursor: string | null;
+  local_status: "ready" | "empty";
   has_more: boolean;
+}
+
+export type ChartHistorySourceStatus =
+  | "available"
+  | "deferred"
+  | "exhausted"
+  | "unsupported";
+
+export interface ChartHistoryResponse {
+  source_id: SourceId;
+  period_id: string;
+  local_status: "ready" | "empty";
+  source_status: ChartHistorySourceStatus;
+  page: ChartBarPage;
+  next_before: string | null;
+  next_cursor: string | null;
+  backfill: CandleBackfillResult | null;
 }
 
 export interface QuoteSample {
@@ -219,6 +246,7 @@ export interface QuoteSample {
   observed_at: string;
   received_at: string;
   value: number | string;
+  observation_kind: "event" | "snapshot";
   storage_id: number | null;
 }
 

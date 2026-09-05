@@ -51,24 +51,25 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
   border-bottom: 1px solid #e8edf4;
   z-index: 10;
 }
-.top-brand { display: flex; flex: 0 0 160px; align-items: center; gap: 9px; min-width: 0; }
+.tracefang-logo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+  filter: saturate(.92) drop-shadow(0 2px 3px rgba(20, 40, 43, .16));
+}
+.top-brand { display: flex; flex: 0 0 178px; align-items: center; gap: 8px; min-width: 0; }
 .top-brand-mark {
-  display: grid;
-  width: 32px;
+  display: block;
+  width: 44px;
   height: 32px;
-  flex: 0 0 32px;
-  place-items: center;
-  border-radius: 8px;
-  color: #fff;
-  background: #4d7fe9;
-  box-shadow: 0 5px 14px rgba(78, 125, 235, .18);
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: -2px;
+  flex: 0 0 44px;
 }
 .top-brand > div:last-child { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.top-brand small { color: #8fa1b7; font-size: 7px; font-weight: 700; letter-spacing: 1.25px; line-height: 1; }
-.top-brand strong { color: #4e7deb; font-size: 15px; line-height: 1.1; }
+.top-brand small { color: #7d929a; font-size: 7px; font-weight: 700; letter-spacing: 1.25px; line-height: 1; }
+.top-brand strong { color: #25343a; font-size: 15px; line-height: 1.1; }
 .top-tool-icons { display: flex; flex: 0 0 auto; gap: 2px; height: 36px; padding-right: 8px; margin-right: 6px; border-right: 1px solid #e1e7ef; }
 .top-tool-icons button { position: relative; display: grid; width: 34px; height: 34px; padding: 0; place-items: center; border: 0; border-radius: 6px; color: #7f8b99; background: transparent; cursor: pointer; transition: 150ms ease; }
 .top-tool-icons button:hover { color: var(--blue); background: #fff; }
@@ -618,7 +619,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
   .watch-sparkline { width: 88px; }
   .instrument-price strong { font-size: 20px; }
   .instrument-change strong { min-width: 66px; font-size: 14px; }
-  .top-brand { flex-basis: 145px; }
+  .top-brand { flex-basis: 160px; }
   .top-tool-icons { padding-right: 5px; margin-right: 3px; }
   .top-tool-icons button { width: 32px; }
   .content-tabs button { padding: 0 8px; }

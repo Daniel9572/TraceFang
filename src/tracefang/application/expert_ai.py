@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -189,6 +190,22 @@ class CommandResult:
 
 CommandRunner = Callable[[Sequence[str], str | None, float], Awaitable[CommandResult]]
 CommandFinder = Callable[[str], str | None]
+ExpertAiDiagnosticCode = Literal[
+    "analysis_failed",
+    "analysis_timeout",
+    "cli_not_found",
+    "cli_path_invalid",
+    "cli_start_failed",
+    "not_authenticated",
+    "status_timeout",
+    "status_unrecognized",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexCommandResolution:
+    command: str | None
+    diagnostic_code: ExpertAiDiagnosticCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +217,7 @@ class ExpertAiStatus:
     auth_mode: str | None
     detail: str
     checked_at: datetime
+    diagnostic_code: ExpertAiDiagnosticCode | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +231,7 @@ class ExpertAiAnalysisResult:
     source_id: str
     data_as_of: str | None
     bar_count: int
+    diagnostic_code: ExpertAiDiagnosticCode | None
 
 
 class CodexExpertAnalysisService:
@@ -228,30 +247,48 @@ class CodexExpertAnalysisService:
         status_timeout_seconds: float = 5.0,
         command: str | None = None,
         command_finder: CommandFinder = shutil.which,
+        environment: Mapping[str, str] | None = None,
+        fallback_commands: Sequence[Path] | None = None,
         runner: CommandRunner | None = None,
     ) -> None:
         self._working_directory = working_directory
         self._analysis_timeout_seconds = max(1.0, analysis_timeout_seconds)
         self._status_timeout_seconds = max(1.0, status_timeout_seconds)
-        self._command = command if command is not None else command_finder("codex")
+        self._command_override = command
+        self._command_finder = command_finder
+        self._environment = environment if environment is not None else os.environ
+        self._fallback_commands = tuple(
+            fallback_commands
+            if fallback_commands is not None
+            else self._default_fallback_commands()
+        )
         self._runner = runner or self._run_command
         self._analysis_lock = asyncio.Lock()
 
     async def status(self) -> ExpertAiStatus:
+        return await self._status_for(self._resolve_command())
+
+    async def _status_for(self, resolution: _CodexCommandResolution) -> ExpertAiStatus:
         checked_at = datetime.now(UTC)
-        if self._command is None:
+        if resolution.command is None:
+            invalid_override = resolution.diagnostic_code == "cli_path_invalid"
             return ExpertAiStatus(
                 provider=self.provider,
-                state="unavailable",
+                state="error" if invalid_override else "unavailable",
                 available=False,
                 authenticated=None,
                 auth_mode=None,
-                detail="本机未找到 Codex CLI。",
+                detail=(
+                    "TRACEFANG_CODEX_CLI_PATH 指向的文件不存在或不可执行。"
+                    if invalid_override
+                    else "未检测到可执行的 Codex CLI。"
+                ),
                 checked_at=checked_at,
+                diagnostic_code=resolution.diagnostic_code,
             )
         try:
             result = await self._runner(
-                (self._command, "login", "status"),
+                (resolution.command, "login", "status"),
                 None,
                 self._status_timeout_seconds,
             )
@@ -264,6 +301,7 @@ class CodexExpertAnalysisService:
                 auth_mode=None,
                 detail="读取本机 Codex 登录状态超时。",
                 checked_at=checked_at,
+                diagnostic_code="status_timeout",
             )
         except OSError:
             return ExpertAiStatus(
@@ -274,6 +312,7 @@ class CodexExpertAnalysisService:
                 auth_mode=None,
                 detail="本机 Codex CLI 无法启动。",
                 checked_at=checked_at,
+                diagnostic_code="cli_start_failed",
             )
 
         combined = f"{result.stdout}\n{result.stderr}".lower()
@@ -287,6 +326,7 @@ class CodexExpertAnalysisService:
                 auth_mode=auth_mode,
                 detail="本机 Codex 已登录, 可执行只读行情分析。",
                 checked_at=checked_at,
+                diagnostic_code=None,
             )
         if self._looks_unauthenticated(combined):
             return ExpertAiStatus(
@@ -297,6 +337,7 @@ class CodexExpertAnalysisService:
                 auth_mode=None,
                 detail="本机 Codex CLI 尚未登录。",
                 checked_at=checked_at,
+                diagnostic_code="not_authenticated",
             )
         return ExpertAiStatus(
             provider=self.provider,
@@ -306,6 +347,7 @@ class CodexExpertAnalysisService:
             auth_mode=auth_mode,
             detail="无法确认本机 Codex 登录状态。",
             checked_at=checked_at,
+            diagnostic_code="status_unrecognized",
         )
 
     async def analyze(
@@ -319,8 +361,9 @@ class CodexExpertAnalysisService:
         data_as_of = str(data_as_of_value) if data_as_of_value is not None else None
         bars_value = snapshot.get("bars")
         bar_count = len(bars_value) if isinstance(bars_value, Sequence) else 0
-        status = await self.status()
-        if status.state != "ready":
+        resolution = self._resolve_command()
+        status = await self._status_for(resolution)
+        if status.state != "ready" or resolution.command is None:
             return self._analysis_result(
                 state=status.state,
                 analysis=None,
@@ -329,6 +372,7 @@ class CodexExpertAnalysisService:
                 source_id=source_id,
                 data_as_of=data_as_of,
                 bar_count=bar_count,
+                diagnostic_code=status.diagnostic_code,
             )
 
         prompt = self._build_prompt(
@@ -336,7 +380,7 @@ class CodexExpertAnalysisService:
             enabled_strategies=enabled_strategies,
         )
         command = (
-            str(self._command),
+            resolution.command,
             "exec",
             "--json",
             "--ephemeral",
@@ -359,6 +403,7 @@ class CodexExpertAnalysisService:
                 source_id=source_id,
                 data_as_of=data_as_of,
                 bar_count=bar_count,
+                diagnostic_code="analysis_timeout",
             )
         except OSError:
             return self._analysis_result(
@@ -369,6 +414,7 @@ class CodexExpertAnalysisService:
                 source_id=source_id,
                 data_as_of=data_as_of,
                 bar_count=bar_count,
+                diagnostic_code="cli_start_failed",
             )
 
         analysis = self._agent_message(result.stdout)
@@ -381,6 +427,7 @@ class CodexExpertAnalysisService:
                 source_id=source_id,
                 data_as_of=data_as_of,
                 bar_count=bar_count,
+                diagnostic_code=None,
             )
         combined = f"{result.stdout}\n{result.stderr}".lower()
         if self._looks_unauthenticated(combined):
@@ -392,6 +439,7 @@ class CodexExpertAnalysisService:
                 source_id=source_id,
                 data_as_of=data_as_of,
                 bar_count=bar_count,
+                diagnostic_code="not_authenticated",
             )
         return self._analysis_result(
             state="failed",
@@ -401,6 +449,7 @@ class CodexExpertAnalysisService:
             source_id=source_id,
             data_as_of=data_as_of,
             bar_count=bar_count,
+            diagnostic_code="analysis_failed",
         )
 
     def _analysis_result(
@@ -413,6 +462,7 @@ class CodexExpertAnalysisService:
         source_id: str,
         data_as_of: str | None,
         bar_count: int,
+        diagnostic_code: ExpertAiDiagnosticCode | None,
     ) -> ExpertAiAnalysisResult:
         return ExpertAiAnalysisResult(
             provider=self.provider,
@@ -424,6 +474,44 @@ class CodexExpertAnalysisService:
             source_id=source_id,
             data_as_of=data_as_of,
             bar_count=bar_count,
+            diagnostic_code=diagnostic_code,
+        )
+
+    def _resolve_command(self) -> _CodexCommandResolution:
+        if self._command_override is not None:
+            return _CodexCommandResolution(command=self._command_override)
+
+        configured = self._environment.get("TRACEFANG_CODEX_CLI_PATH", "").strip()
+        if configured:
+            candidate = Path(configured).expanduser()
+            if candidate.is_absolute() and self._is_executable(candidate):
+                return _CodexCommandResolution(command=str(candidate))
+            return _CodexCommandResolution(
+                command=None,
+                diagnostic_code="cli_path_invalid",
+            )
+
+        discovered = self._command_finder("codex")
+        if discovered:
+            return _CodexCommandResolution(command=discovered)
+
+        for candidate in self._fallback_commands:
+            if self._is_executable(candidate):
+                return _CodexCommandResolution(command=str(candidate))
+        return _CodexCommandResolution(command=None, diagnostic_code="cli_not_found")
+
+    @staticmethod
+    def _is_executable(candidate: Path) -> bool:
+        return candidate.is_file() and os.access(candidate, os.X_OK)
+
+    @staticmethod
+    def _default_fallback_commands() -> tuple[Path, ...]:
+        if sys.platform != "darwin":
+            return ()
+        relative = Path("ChatGPT.app/Contents/Resources/codex")
+        return (
+            Path("/Applications") / relative,
+            Path.home() / "Applications" / relative,
         )
 
     @staticmethod

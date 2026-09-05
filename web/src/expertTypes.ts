@@ -653,7 +653,19 @@ export interface ExpertAiStatus {
   provider: string;
   detail: string;
   checked_at: string;
+  diagnostic_code: ExpertAiDiagnosticCode | null;
 }
+
+export type ExpertAiDiagnosticCode =
+  | "analysis_failed"
+  | "analysis_timeout"
+  | "cli_not_found"
+  | "cli_path_invalid"
+  | "cli_start_failed"
+  | "not_authenticated"
+  | "status_request_failed"
+  | "status_timeout"
+  | "status_unrecognized";
 
 export interface ExpertAiAnalysis {
   state: "completed" | "unavailable" | "not_authenticated" | "timeout" | "failed" | "error";
@@ -665,4 +677,5 @@ export interface ExpertAiAnalysis {
   source_id: string;
   data_as_of: string | null;
   bar_count: number;
+  diagnostic_code: ExpertAiDiagnosticCode | null;
 }

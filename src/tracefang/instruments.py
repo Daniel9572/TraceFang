@@ -102,7 +102,7 @@ class InstrumentDefinition:
     price_unit: str
     price_digits: int
     quote_kind: str
-    history_available: bool
+    history_backfill_supported: bool
     dependencies: tuple[Instrument, ...] = ()
     source_ids: tuple[str, ...] = ("jin10_client",)
     market_schedule_id: str = "spot_metals"
@@ -116,7 +116,7 @@ INSTRUMENT_CATALOG = (
         price_unit="美元/盎司",
         price_digits=2,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
     ),
     InstrumentDefinition(
         code="XAGUSD",
@@ -125,7 +125,7 @@ INSTRUMENT_CATALOG = (
         price_unit="美元/盎司",
         price_digits=3,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
     ),
     InstrumentDefinition(
         code="USDCNH",
@@ -134,7 +134,7 @@ INSTRUMENT_CATALOG = (
         price_unit="人民币/美元",
         price_digits=4,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         market_schedule_id="forex",
     ),
     InstrumentDefinition(
@@ -144,7 +144,7 @@ INSTRUMENT_CATALOG = (
         price_unit="人民币/克",
         price_digits=2,
         quote_kind="derived",
-        history_available=False,
+        history_backfill_supported=False,
         dependencies=(SPOT_GOLD, USD_CNH),
     ),
     InstrumentDefinition(
@@ -154,7 +154,7 @@ INSTRUMENT_CATALOG = (
         price_unit="人民币/克",
         price_digits=2,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="shfe_metals",
     ),
@@ -165,7 +165,7 @@ INSTRUMENT_CATALOG = (
         price_unit="人民币/千克",
         price_digits=0,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="shfe_metals",
     ),
@@ -176,7 +176,7 @@ INSTRUMENT_CATALOG = (
         price_unit="人民币/克",
         price_digits=2,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="shfe_metals",
     ),
@@ -187,7 +187,7 @@ INSTRUMENT_CATALOG = (
         price_unit="人民币/千克",
         price_digits=0,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="shfe_metals",
     ),
@@ -198,7 +198,7 @@ INSTRUMENT_CATALOG = (
         price_unit="点",
         price_digits=4,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="usd_index",
     ),
@@ -209,7 +209,7 @@ INSTRUMENT_CATALOG = (
         price_unit="美元/桶",
         price_digits=2,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="ice_brent",
     ),
@@ -220,7 +220,7 @@ INSTRUMENT_CATALOG = (
         price_unit="点",
         price_digits=2,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="sse",
     ),
@@ -231,7 +231,7 @@ INSTRUMENT_CATALOG = (
         price_unit="点",
         price_digits=3,
         quote_kind="direct",
-        history_available=True,
+        history_backfill_supported=True,
         source_ids=("tonghuashun_futures",),
         market_schedule_id="nasdaq",
     ),

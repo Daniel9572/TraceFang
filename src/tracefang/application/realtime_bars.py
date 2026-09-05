@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from enum import StrEnum
 from typing import Protocol
 
 from tracefang.application.quotes import QuoteView
-from tracefang.domain.errors import ProviderUnavailableError
+from tracefang.domain.errors import ProviderAuthenticationError, ProviderUnavailableError
 from tracefang.domain.market_events import (
     BarEvent,
     BarFinalityPolicy,
@@ -17,6 +17,8 @@ from tracefang.domain.market_events import (
     QuoteEvent,
     QuoteSample,
     RealtimeBar,
+    quote_event_id,
+    quote_observation_kind,
 )
 from tracefang.domain.models import (
     Candle,
@@ -125,6 +127,25 @@ class SourceBarStore(Protocol):
         interval: timedelta = timedelta(minutes=1),
     ) -> None: ...
 
+    async def load_realtime_bar_series_state(
+        self,
+        instrument: Instrument,
+        *,
+        realtime_source_id: str,
+        interval: timedelta = timedelta(minutes=1),
+    ) -> RealtimeBarSeriesState | None: ...
+
+    async def commit_historical_bar_batch(
+        self,
+        instrument: Instrument,
+        *,
+        realtime_source_id: str,
+        upstream_channel_id: str,
+        provider_symbol: str,
+        batch: HistoricalBarBatch,
+        bars: Sequence[RealtimeBar],
+    ) -> RealtimeBarSeriesState: ...
+
 
 class HistoricalBarProvider(Protocol):
     name: str
@@ -137,7 +158,7 @@ class HistoricalBarProvider(Protocol):
         *,
         start: datetime,
         count: int,
-    ) -> tuple[Candle, ...]: ...
+    ) -> HistoricalBarBatch: ...
 
 
 class RealtimeBarWriter(Protocol):
@@ -181,12 +202,148 @@ class RealtimeBarContract:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalBarBatch:
+    """Validated evidence returned by any same-source historical provider."""
+
+    candles: tuple[Candle, ...]
+    checked_start: datetime
+    checked_end: datetime
+    authoritative_through: datetime
+    evidence_version: str
+    checked_at: datetime
+    history_floor: datetime | None = None
+    interval: timedelta = timedelta(minutes=1)
+
+    def __post_init__(self) -> None:
+        if self.interval <= timedelta(0):
+            raise ValueError("historical batch interval must be positive")
+        for value, field_name in (
+            (self.checked_start, "checked_start"),
+            (self.checked_end, "checked_end"),
+            (self.authoritative_through, "authoritative_through"),
+            (self.checked_at, "checked_at"),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"historical batch {field_name} must be timezone-aware")
+        if self.history_floor is not None and (
+            self.history_floor.tzinfo is None or self.history_floor.utcoffset() is None
+        ):
+            raise ValueError("historical batch history_floor must be timezone-aware")
+        if self.checked_end <= self.checked_start:
+            raise ValueError("historical batch checked range must be positive")
+        if self.authoritative_through > self.checked_end:
+            raise ValueError("historical batch authority is outside the checked range")
+        if self.history_floor is not None and self.history_floor > self.authoritative_through:
+            raise ValueError("historical batch history_floor exceeds authority")
+        for value, field_name in (
+            (self.checked_start, "checked_start"),
+            (self.checked_end, "checked_end"),
+            (self.authoritative_through, "authoritative_through"),
+            (self.history_floor, "history_floor"),
+        ):
+            if value is not None and not self._is_aligned(value):
+                raise ValueError(f"historical batch {field_name} must be interval-aligned")
+        if not self.evidence_version.strip():
+            raise ValueError("historical batch evidence_version cannot be empty")
+        seen: set[datetime] = set()
+        for candle in self.candles:
+            if candle.interval != self.interval:
+                raise ValueError("historical batch candle interval does not match")
+            if not self.checked_start <= candle.open_time < self.checked_end:
+                raise ValueError("historical batch candle is outside the checked range")
+            if candle.open_time in seen:
+                raise ValueError("historical batch contains duplicate open times")
+            seen.add(candle.open_time)
+
+    def _is_aligned(self, value: datetime) -> bool:
+        interval_microseconds = int(self.interval / timedelta(microseconds=1))
+        timestamp_microseconds = int(value.timestamp() * 1_000_000)
+        return timestamp_microseconds % interval_microseconds == 0
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeBarSeriesState:
+    realtime_source_id: str
+    instrument_symbol: str
+    upstream_channel_id: str
+    provider_symbol: str
+    interval: timedelta
+    latest_authoritative_open_time: datetime | None
+    authoritative_through: datetime
+    history_floor: datetime | None
+    tail_checked_through: datetime | None
+    tail_checked_at: datetime | None
+    evidence_version: str
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.interval <= timedelta(0):
+            raise ValueError("series state interval must be positive")
+        if not self.realtime_source_id or not self.instrument_symbol:
+            raise ValueError("series state identity cannot be empty")
+        if not self.upstream_channel_id or not self.provider_symbol:
+            raise ValueError("series state upstream identity cannot be empty")
+        if not self.evidence_version:
+            raise ValueError("series state evidence version cannot be empty")
+        for value, field_name in (
+            (self.latest_authoritative_open_time, "latest_authoritative_open_time"),
+            (self.authoritative_through, "authoritative_through"),
+            (self.history_floor, "history_floor"),
+            (self.tail_checked_through, "tail_checked_through"),
+            (self.tail_checked_at, "tail_checked_at"),
+            (self.updated_at, "updated_at"),
+        ):
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+                raise ValueError(f"series state {field_name} must be timezone-aware")
+        if (
+            self.latest_authoritative_open_time is not None
+            and self.latest_authoritative_open_time >= self.authoritative_through
+        ):
+            raise ValueError("latest authoritative Bar must precede authority boundary")
+        if self.history_floor is not None and self.history_floor > self.authoritative_through:
+            raise ValueError("history floor cannot exceed authority boundary")
+
+
+class BarBackfillState(StrEnum):
+    CACHED = "cached"
+    JOINED = "joined"
+    FETCHED = "fetched"
+    ADVANCED = "advanced"
+    EXHAUSTED = "exhausted"
+    DEFERRED = "deferred"
+
+
+@dataclass(frozen=True, slots=True)
 class BarBackfillResult:
     source_id: str
-    state: str
+    state: BarBackfillState
     start: datetime
     end: datetime
     row_count: int
+    covered_start: datetime | None = None
+    covered_end: datetime | None = None
+    authoritative_through: datetime | None = None
+    history_floor: datetime | None = None
+    retry_after: datetime | None = None
+    evidence_version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BarBackfillMetrics:
+    cache_hits: int
+    upstream_calls: int
+    joined_calls: int
+    written_rows: int
+    failures: int
+    pending: int
+    last_failure_at: datetime | None
+    last_failure_type: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _BackfillFailure:
+    count: int
+    retry_after: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,8 +355,6 @@ class QuoteSamplePage:
 
 _BarKey = tuple[str, Instrument, timedelta, datetime]
 _SeriesKey = tuple[str, Instrument, timedelta]
-_SampleKey = tuple[str, str, str, str]
-_SampleObservation = tuple[datetime, Decimal, int | None]
 
 
 class RealtimeBarService:
@@ -211,6 +366,12 @@ class RealtimeBarService:
         *,
         contracts: tuple[RealtimeBarContract, ...],
         writer: RealtimeBarWriter | None = None,
+        history_concurrency: int = 2,
+        tail_cooldown: timedelta = timedelta(seconds=5),
+        revalidate_cooldown: timedelta = timedelta(seconds=30),
+        backoff_base: timedelta = timedelta(seconds=1),
+        backoff_max: timedelta = timedelta(minutes=1),
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not contracts:
             raise ValueError("at least one realtime Bar contract is required")
@@ -219,6 +380,12 @@ class RealtimeBarService:
         self._contracts = {item.source_id: item for item in contracts}
         if len(self._contracts) != len(contracts):
             raise ValueError("realtime Bar source ids must be unique")
+        if history_concurrency < 1:
+            raise ValueError("history_concurrency must be positive")
+        if min(tail_cooldown, revalidate_cooldown, backoff_base, backoff_max) <= timedelta(0):
+            raise ValueError("history cooldowns and backoff must be positive")
+        if backoff_max < backoff_base:
+            raise ValueError("backoff_max must be at least backoff_base")
 
         self._source_by_quote_channel: dict[str, str] = {}
         self._source_by_bar_channel: dict[str, str] = {}
@@ -238,12 +405,33 @@ class RealtimeBarService:
 
         self._bars: dict[_BarKey, RealtimeBar] = {}
         self._watermarks: dict[_SeriesKey, datetime] = {}
-        self._latest_sample_observations: dict[_SampleKey, _SampleObservation] = {}
+        self._series_states: dict[_SeriesKey, RealtimeBarSeriesState] = {}
         self._backfills: dict[
             tuple[str, Instrument, datetime, int, bool],
             asyncio.Task[BarBackfillResult],
         ] = {}
         self._backfill_locks: dict[tuple[str, Instrument], asyncio.Lock] = {}
+        self._history_semaphore = asyncio.Semaphore(history_concurrency)
+        self._tail_cooldown = tail_cooldown
+        self._revalidate_cooldown = revalidate_cooldown
+        self._backoff_base = backoff_base
+        self._backoff_max = backoff_max
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._backfill_failures: dict[tuple[str, Instrument], _BackfillFailure] = {}
+        self._revalidation_checks: dict[
+            tuple[str, Instrument, datetime, datetime, str | None],
+            datetime,
+        ] = {}
+        self._authoritative_watermarks: dict[_SeriesKey, datetime] = {}
+        self._backfill_metric_counts = {
+            "cache_hits": 0,
+            "upstream_calls": 0,
+            "joined_calls": 0,
+            "written_rows": 0,
+            "failures": 0,
+        }
+        self._last_backfill_failure_at: datetime | None = None
+        self._last_backfill_failure_type: str | None = None
 
     @staticmethod
     def _bind_channels(
@@ -301,48 +489,22 @@ class RealtimeBarService:
         event = self.normalize_quote(quote)
         return self.accept(event) if event is not None else False
 
-    def sample_from_quote_event(self, event: QuoteEvent) -> QuoteSample | None:
+    def sample_from_quote_event(self, event: QuoteEvent) -> QuoteSample:
         if event.source_id not in self._contracts:
             raise ProviderUnavailableError(
                 f"{event.source_id} has no source-bound timeline capability"
             )
         value = event.quote
-        sample_key = (
-            event.source_id,
-            event.channel_id,
-            value.instrument.symbol,
-            value.source.provider_symbol,
-        )
-        observation = (value.source.observed_at, value.last, event.sequence)
-        previous = self._latest_sample_observations.get(sample_key)
-        if previous is not None:
-            previous_time, previous_value, previous_sequence = previous
-            if value.source.observed_at < previous_time:
-                return None
-            if (
-                value.source.observed_at == previous_time
-                and value.last == previous_value
-                and (event.sequence is None or event.sequence == previous_sequence)
-            ):
-                return None
-        self._latest_sample_observations[sample_key] = observation
         return QuoteSample(
             source_id=event.source_id,
             channel_id=event.channel_id,
-            event_id=self._sample_event_id(
-                event.source_id,
-                event.channel_id,
-                value.source.provider_symbol,
-                value.source.observed_at,
-                value.source.received_at,
-                value.last,
-                sequence=event.sequence,
-            ),
+            event_id=quote_event_id(value),
             instrument=value.instrument,
             provider_symbol=value.source.provider_symbol,
             observed_at=value.source.observed_at,
             received_at=value.source.received_at,
             value=value.last,
+            observation_kind=quote_observation_kind(value),
         )
 
     async def get_quote_sample_page(
@@ -366,22 +528,7 @@ class RealtimeBarService:
         )
         has_more = len(rows) > page_size
         visible = rows[-page_size:] if has_more else rows
-        mapped = tuple(
-            replace(
-                row,
-                source_id=source_id,
-                event_id=self._sample_event_id(
-                    source_id,
-                    row.channel_id,
-                    row.provider_symbol,
-                    row.observed_at,
-                    row.received_at,
-                    row.value,
-                ),
-            )
-            for row in visible
-        )
-        items = self._collapse_repeated_observations(mapped)
+        items = tuple(replace(row, source_id=source_id) for row in visible)
         next_cursor = min((item.storage_id for item in visible if item.storage_id), default=None)
         return QuoteSamplePage(items, next_cursor, has_more)
 
@@ -504,9 +651,7 @@ class RealtimeBarService:
                     current.evidence_channel_id if authoritative else event.channel_id,
                     quote.source,
                     derivation=(
-                        "authoritative_bar_with_quote_overlay"
-                        if authoritative
-                        else "quote_event"
+                        "authoritative_bar_with_quote_overlay" if authoritative else "quote_event"
                     ),
                     last_event_channel_id=event.channel_id,
                 ),
@@ -559,6 +704,14 @@ class RealtimeBarService:
             raise ValueError("Bar event interval does not match the realtime Bar contract")
 
         series_key = (event.source_id, candle.instrument, candle.interval)
+        authority_boundary = (
+            candle.open_time + candle.interval
+            if event.state is BarState.FINAL
+            else candle.open_time
+        )
+        current_authority = self._authoritative_watermarks.get(series_key)
+        if current_authority is None or authority_boundary > current_authority:
+            self._authoritative_watermarks[series_key] = authority_boundary
         transitions: list[RealtimeBar] = []
         state = event.state
         if contract.finality_policy is BarFinalityPolicy.NEXT_AUTHORITATIVE_BAR:
@@ -601,9 +754,7 @@ class RealtimeBarService:
                 event.channel_id,
                 candle.source,
                 derivation=(
-                    "authoritative_history"
-                    if state is BarState.FINAL
-                    else "authoritative_bar"
+                    "authoritative_history" if state is BarState.FINAL else "authoritative_bar"
                 ),
             ),
             evidence_channel_id=event.channel_id,
@@ -614,6 +765,7 @@ class RealtimeBarService:
         if current is not None and self._same_projection(current, candidate):
             return transitions
         self._bars[key] = candidate
+        self._advance_live_series_authority(candidate)
         transitions.append(candidate)
         self._trim(event.source_id, candle.instrument, candle.interval)
         return transitions
@@ -645,8 +797,72 @@ class RealtimeBarService:
                 finalized_at=finalized_at,
             )
             self._bars[key] = value
+            self._advance_live_series_authority(value)
             values.append(value)
         return values
+
+    def _advance_live_series_authority(self, bar: RealtimeBar) -> None:
+        if bar.state is not BarState.FINAL:
+            return
+        derivation = (bar.source.raw_payload or {}).get("derivation")
+        if not isinstance(derivation, str) or not derivation.startswith("authoritative_"):
+            return
+        series_key = (bar.source.provider, bar.instrument, bar.interval)
+        boundary = bar.open_time + bar.interval
+        current = self._series_states.get(series_key)
+        if current is None:
+            state = RealtimeBarSeriesState(
+                realtime_source_id=bar.source.provider,
+                instrument_symbol=bar.instrument.symbol,
+                upstream_channel_id=bar.evidence_channel_id,
+                provider_symbol=bar.source.provider_symbol,
+                interval=bar.interval,
+                latest_authoritative_open_time=bar.open_time,
+                authoritative_through=boundary,
+                history_floor=None,
+                tail_checked_through=None,
+                tail_checked_at=None,
+                evidence_version=f"live:{bar.evidence_channel_id}",
+                updated_at=bar.source.received_at,
+            )
+        else:
+            authority_advanced = boundary >= current.authoritative_through
+            authoritative_through = max(current.authoritative_through, boundary)
+            latest_authoritative_open_time = max(
+                value
+                for value in (current.latest_authoritative_open_time, bar.open_time)
+                if value is not None
+            )
+            clears_tail = (
+                current.tail_checked_through is not None
+                and authoritative_through >= current.tail_checked_through
+            )
+            state = replace(
+                current,
+                upstream_channel_id=(
+                    bar.evidence_channel_id
+                    if authority_advanced
+                    else current.upstream_channel_id
+                ),
+                provider_symbol=(
+                    bar.source.provider_symbol if authority_advanced else current.provider_symbol
+                ),
+                latest_authoritative_open_time=latest_authoritative_open_time,
+                authoritative_through=authoritative_through,
+                tail_checked_through=(None if clears_tail else current.tail_checked_through),
+                tail_checked_at=(None if clears_tail else current.tail_checked_at),
+                evidence_version=(
+                    f"live:{bar.evidence_channel_id}"
+                    if current.evidence_version.startswith("live:")
+                    else current.evidence_version
+                ),
+                updated_at=max(current.updated_at, bar.source.received_at),
+            )
+        self._series_states[series_key] = state
+        self._authoritative_watermarks[series_key] = max(
+            self._authoritative_watermarks.get(series_key, boundary),
+            boundary,
+        )
 
     async def get_bars(
         self,
@@ -694,9 +910,7 @@ class RealtimeBarService:
                     ):
                         raise RuntimeError("source-bound Bar cache returned foreign evidence")
                     value = self._projection_from_raw_bar(source_id, candle)
-                    rows[candle.open_time] = self._merge_for_read(
-                        rows.get(candle.open_time), value
-                    )
+                    rows[candle.open_time] = self._merge_for_read(rows.get(candle.open_time), value)
                     authoritative_times.append(candle.open_time)
 
             for channel_id in contract.quote_channel_ids:
@@ -717,9 +931,12 @@ class RealtimeBarService:
                     )
 
         end = start + selected_interval * count if start is not None else None
-        for (candidate_source, candidate_instrument, candidate_interval, open_time), value in (
-            self._bars.items()
-        ):
+        for (
+            candidate_source,
+            candidate_instrument,
+            candidate_interval,
+            open_time,
+        ), value in self._bars.items():
             if (
                 candidate_source != source_id
                 or candidate_instrument != instrument
@@ -740,10 +957,7 @@ class RealtimeBarService:
         ):
             watermark = max(authoritative_times)
             for open_time, value in tuple(rows.items()):
-                if (
-                    open_time < watermark
-                    and value.state is BarState.PROVISIONAL_AUTHORITATIVE
-                ):
+                if open_time < watermark and value.state is BarState.PROVISIONAL_AUTHORITATIVE:
                     rows[open_time] = replace(
                         value,
                         state=BarState.FINAL,
@@ -809,7 +1023,12 @@ class RealtimeBarService:
                 if value.state is not BarState.PROVISIONAL_QUOTE:
                     authoritative_times.append(value.open_time)
 
-            if selected_interval == contract.interval:
+            # `realtime_bars` is the canonical, source-neutral series. Legacy raw
+            # candles and quote-derived bars are only a fallback for a cursor page
+            # that predates canonical storage; merging every evidence channel on
+            # every internal page turns large period reads into repeated full
+            # scans of the same history.
+            if not projected and selected_interval == contract.interval:
                 raw_bars = await self._store.load_source_candles_before(
                     instrument,
                     source_id=contract.authoritative_bar_channel_id,
@@ -819,29 +1038,31 @@ class RealtimeBarService:
                 )
                 for candle in raw_bars:
                     value = self._projection_from_raw_bar(source_id, candle)
-                    rows[candle.open_time] = self._merge_for_read(
-                        rows.get(candle.open_time), value
-                    )
+                    rows[candle.open_time] = self._merge_for_read(rows.get(candle.open_time), value)
                     authoritative_times.append(candle.open_time)
 
-            for channel_id in contract.quote_channel_ids:
-                quote_bars = await self._store.load_quote_candles_before(
-                    instrument,
-                    source_id=channel_id,
-                    interval=selected_interval,
-                    before=before,
-                    count=count,
-                )
-                for candle in quote_bars:
-                    value = self._projection_from_quote(source_id, candle)
-                    rows[candle.open_time] = self._merge_for_read(
-                        rows.get(candle.open_time),
-                        value,
+            if not rows:
+                for channel_id in contract.quote_channel_ids:
+                    quote_bars = await self._store.load_quote_candles_before(
+                        instrument,
+                        source_id=channel_id,
+                        interval=selected_interval,
+                        before=before,
+                        count=count,
                     )
+                    for candle in quote_bars:
+                        value = self._projection_from_quote(source_id, candle)
+                        rows[candle.open_time] = self._merge_for_read(
+                            rows.get(candle.open_time),
+                            value,
+                        )
 
-        for (candidate_source, candidate_instrument, candidate_interval, open_time), value in (
-            self._bars.items()
-        ):
+        for (
+            candidate_source,
+            candidate_instrument,
+            candidate_interval,
+            open_time,
+        ), value in self._bars.items():
             if (
                 candidate_source != source_id
                 or candidate_instrument != instrument
@@ -890,6 +1111,16 @@ class RealtimeBarService:
         """Restores the hot state machine from local storage before acquisition starts."""
 
         contract = self._contract(source_id)
+        if self._store is not None:
+            state = await self._store.load_realtime_bar_series_state(
+                instrument,
+                realtime_source_id=source_id,
+                interval=contract.interval,
+            )
+            if state is not None:
+                series_key = (source_id, instrument, contract.interval)
+                self._series_states[series_key] = state
+                self._authoritative_watermarks[series_key] = state.authoritative_through
         authoritative_rows: tuple[RealtimeBar, ...] = ()
         hydrated: list[RealtimeBar] = []
         for interval in contract.quote_projection_intervals:
@@ -933,6 +1164,7 @@ class RealtimeBarService:
         self._contract(source_id)
         key = (source_id, instrument, start, count, revalidate)
         task = self._backfills.get(key)
+        joined = task is not None
         if task is None:
             task = asyncio.create_task(
                 self._backfill_once(
@@ -946,7 +1178,11 @@ class RealtimeBarService:
             )
             self._backfills[key] = task
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
+            if joined:
+                self._backfill_metric_counts["joined_calls"] += 1
+                return replace(result, state=BarBackfillState.JOINED)
+            return result
         finally:
             if task.done() and self._backfills.get(key) is task:
                 del self._backfills[key]
@@ -968,68 +1204,353 @@ class RealtimeBarService:
         if provider is None:
             raise ProviderUnavailableError(f"{source_id} 没有可用的同源历史 Bar 通道")
         end = start + contract.interval * count
-        lock = self._backfill_locks.setdefault((source_id, instrument), asyncio.Lock())
-        async with lock:
-            missing = (
-                ((start, end),)
-                if revalidate
-                else await store.candle_missing_ranges(
+        series_id = (source_id, instrument)
+        series_key = (source_id, instrument, contract.interval)
+        lock = self._backfill_locks.setdefault(series_id, asyncio.Lock())
+        try:
+            async with lock:
+                now = self._now()
+                state = await store.load_realtime_bar_series_state(
                     instrument,
                     realtime_source_id=source_id,
-                    start=start,
-                    end=end,
                     interval=contract.interval,
+                )
+                if state is not None:
+                    self._series_states[series_key] = state
+
+                failure = self._backfill_failures.get(series_id)
+                if failure is not None and now < failure.retry_after:
+                    return BarBackfillResult(
+                        source_id,
+                        BarBackfillState.DEFERRED,
+                        start,
+                        end,
+                        0,
+                        authoritative_through=(
+                            state.authoritative_through if state is not None else None
+                        ),
+                        history_floor=(state.history_floor if state is not None else None),
+                        retry_after=failure.retry_after,
+                        evidence_version=(state.evidence_version if state is not None else None),
+                    )
+
+                evidence_version = state.evidence_version if state is not None else None
+                revalidation_key = (source_id, instrument, start, end, evidence_version)
+                if revalidate:
+                    last_check = self._revalidation_checks.get(revalidation_key)
+                    if last_check is not None and now < last_check + self._revalidate_cooldown:
+                        return BarBackfillResult(
+                            source_id,
+                            BarBackfillState.DEFERRED,
+                            start,
+                            end,
+                            0,
+                            authoritative_through=(
+                                state.authoritative_through if state is not None else None
+                            ),
+                            history_floor=(state.history_floor if state is not None else None),
+                            retry_after=last_check + self._revalidate_cooldown,
+                            evidence_version=(
+                                state.evidence_version if state is not None else None
+                            ),
+                        )
+
+                missing = (
+                    ((start, end),)
+                    if revalidate
+                    else await store.candle_missing_ranges(
+                        instrument,
+                        realtime_source_id=source_id,
+                        start=start,
+                        end=end,
+                        interval=contract.interval,
+                    )
+                )
+                history_floor = state.history_floor if state is not None else None
+                if history_floor is not None:
+                    missing = tuple(
+                        (max(range_start, history_floor), range_end)
+                        for range_start, range_end in missing
+                        if range_end > history_floor
+                    )
+                    if not missing and end <= history_floor:
+                        self._backfill_metric_counts["cache_hits"] += 1
+                        return BarBackfillResult(
+                            source_id,
+                            BarBackfillState.EXHAUSTED,
+                            start,
+                            end,
+                            0,
+                            authoritative_through=state.authoritative_through,
+                            history_floor=history_floor,
+                            evidence_version=state.evidence_version,
+                        )
+                if not missing:
+                    self._backfill_metric_counts["cache_hits"] += 1
+                    return BarBackfillResult(
+                        source_id,
+                        BarBackfillState.CACHED,
+                        start,
+                        end,
+                        0,
+                        covered_start=start,
+                        covered_end=end,
+                        authoritative_through=(
+                            state.authoritative_through if state is not None else None
+                        ),
+                        history_floor=history_floor,
+                        evidence_version=(state.evidence_version if state is not None else None),
+                    )
+
+                tail_retry_after: datetime | None = None
+                if (
+                    not revalidate
+                    and state is not None
+                    and state.tail_checked_through is not None
+                    and state.tail_checked_at is not None
+                ):
+                    live_authority = self._authoritative_watermarks.get(series_key)
+                    authority_advanced = (
+                        live_authority is not None and live_authority > state.authoritative_through
+                    )
+                    retry_after = state.tail_checked_at + self._tail_cooldown
+                    if not authority_advanced and now < retry_after:
+                        missing = self._subtract_covered_window(
+                            missing,
+                            state.authoritative_through,
+                            state.tail_checked_through,
+                        )
+                        tail_retry_after = retry_after
+                if not missing:
+                    self._backfill_metric_counts["cache_hits"] += 1
+                    return BarBackfillResult(
+                        source_id,
+                        BarBackfillState.DEFERRED,
+                        start,
+                        end,
+                        0,
+                        authoritative_through=(
+                            state.authoritative_through if state is not None else None
+                        ),
+                        history_floor=history_floor,
+                        retry_after=tail_retry_after,
+                        evidence_version=(state.evidence_version if state is not None else None),
+                    )
+
+                row_count = 0
+                covered_start: datetime | None = None
+                covered_end: datetime | None = None
+                for missing_start, missing_end in missing:
+                    missing_count = int((missing_end - missing_start) / contract.interval)
+                    batch = await self._fetch_historical_batch(
+                        provider,
+                        instrument,
+                        start=missing_start,
+                        count=missing_count,
+                    )
+                    values = batch.candles
+                    if (
+                        batch.checked_start != missing_start
+                        or batch.checked_end != missing_end
+                        or batch.interval != contract.interval
+                    ):
+                        raise RuntimeError("same-source Bar provider checked an unexpected range")
+                    for candle in values:
+                        if (
+                            candle.instrument != instrument
+                            or candle.source.provider != contract.authoritative_bar_channel_id
+                            or candle.interval != contract.interval
+                            or not missing_start <= candle.open_time < missing_end
+                        ):
+                            raise RuntimeError("same-source Bar provider returned foreign evidence")
+
+                    projections = self._historical_projections(
+                        source_id,
+                        contract.authoritative_bar_channel_id,
+                        values,
+                    )
+                    state = await store.commit_historical_bar_batch(
+                        instrument,
+                        realtime_source_id=source_id,
+                        upstream_channel_id=contract.authoritative_bar_channel_id,
+                        provider_symbol=provider.provider_symbol(instrument),
+                        batch=batch,
+                        bars=projections,
+                    )
+                    self._publish_historical_projections(projections)
+                    self._series_states[series_key] = state
+                    self._authoritative_watermarks[series_key] = max(
+                        self._authoritative_watermarks.get(
+                            series_key,
+                            state.authoritative_through,
+                        ),
+                        state.authoritative_through,
+                    )
+                    permanent_end = min(batch.checked_end, batch.authoritative_through)
+                    if permanent_end > batch.checked_start:
+                        covered_start = (
+                            batch.checked_start
+                            if covered_start is None
+                            else min(covered_start, batch.checked_start)
+                        )
+                        covered_end = (
+                            permanent_end
+                            if covered_end is None
+                            else max(covered_end, permanent_end)
+                        )
+                    row_count += len(values)
+                    self._backfill_metric_counts["written_rows"] += len(values)
+
+                self._backfill_failures.pop(series_id, None)
+                if revalidate and state is not None:
+                    self._revalidation_checks[
+                        (source_id, instrument, start, end, state.evidence_version)
+                    ] = now
+                result_state = BarBackfillState.FETCHED if row_count else BarBackfillState.ADVANCED
+                if (
+                    row_count == 0
+                    and state is not None
+                    and state.history_floor is not None
+                    and end <= state.history_floor
+                ):
+                    result_state = BarBackfillState.EXHAUSTED
+                return BarBackfillResult(
+                    source_id,
+                    result_state,
+                    start,
+                    end,
+                    row_count,
+                    covered_start=covered_start,
+                    covered_end=covered_end,
+                    authoritative_through=(
+                        state.authoritative_through if state is not None else None
+                    ),
+                    history_floor=(state.history_floor if state is not None else None),
+                    evidence_version=(state.evidence_version if state is not None else None),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._record_backfill_failure(series_id, error)
+            raise
+
+    async def _fetch_historical_batch(
+        self,
+        provider: HistoricalBarProvider,
+        instrument: Instrument,
+        *,
+        start: datetime,
+        count: int,
+    ) -> HistoricalBarBatch:
+        async with self._history_semaphore:
+            self._backfill_metric_counts["upstream_calls"] += 1
+            try:
+                return await provider.fetch_historical_candles(
+                    instrument,
+                    start=start,
+                    count=count,
+                )
+            except ProviderAuthenticationError:
+                refresh = getattr(provider, "refresh_session", None)
+                if not callable(refresh):
+                    raise
+                await refresh()
+                self._backfill_metric_counts["upstream_calls"] += 1
+                return await provider.fetch_historical_candles(
+                    instrument,
+                    start=start,
+                    count=count,
+                )
+
+    def _record_backfill_failure(
+        self,
+        series_id: tuple[str, Instrument],
+        error: Exception,
+    ) -> None:
+        previous = self._backfill_failures.get(series_id)
+        count = (previous.count + 1) if previous is not None else 1
+        multiplier = 2 ** min(count - 1, 16)
+        delay = min(self._backoff_base * multiplier, self._backoff_max)
+        failed_at = self._now()
+        self._backfill_failures[series_id] = _BackfillFailure(
+            count=count,
+            retry_after=failed_at + delay,
+        )
+        self._backfill_metric_counts["failures"] += 1
+        self._last_backfill_failure_at = failed_at
+        self._last_backfill_failure_type = type(error).__name__
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("history clock must return a timezone-aware datetime")
+        return value.astimezone(UTC)
+
+    @staticmethod
+    def _subtract_covered_window(
+        ranges: tuple[tuple[datetime, datetime], ...],
+        covered_start: datetime,
+        covered_end: datetime,
+    ) -> tuple[tuple[datetime, datetime], ...]:
+        result: list[tuple[datetime, datetime]] = []
+        for range_start, range_end in ranges:
+            if range_end <= covered_start or range_start >= covered_end:
+                result.append((range_start, range_end))
+                continue
+            if range_start < covered_start:
+                result.append((range_start, covered_start))
+            if range_end > covered_end:
+                result.append((covered_end, range_end))
+        return tuple(result)
+
+    def _historical_projections(
+        self,
+        source_id: str,
+        channel_id: str,
+        candles: Sequence[Candle],
+    ) -> tuple[RealtimeBar, ...]:
+        projections: list[RealtimeBar] = []
+        for candle in sorted(candles, key=lambda item: item.open_time):
+            key = (source_id, candle.instrument, candle.interval, candle.open_time)
+            current = self._bars.get(key)
+            projections.append(
+                RealtimeBar(
+                    instrument=candle.instrument,
+                    interval=candle.interval,
+                    open_time=candle.open_time,
+                    open=candle.open,
+                    high=candle.high,
+                    low=candle.low,
+                    close=candle.close,
+                    volume=candle.volume,
+                    source=self._public_metadata(
+                        source_id,
+                        channel_id,
+                        candle.source,
+                        derivation="authoritative_history",
+                    ),
+                    evidence_channel_id=channel_id,
+                    state=BarState.FINAL,
+                    revision=(current.revision + 1 if current is not None else 1),
+                    finalized_at=candle.source.received_at,
                 )
             )
-            if not missing:
-                return BarBackfillResult(source_id, "cached", start, end, 0)
+        return tuple(projections)
 
-            row_count = 0
-            for missing_start, missing_end in missing:
-                missing_count = int((missing_end - missing_start) / contract.interval)
-                values = await provider.fetch_historical_candles(
-                    instrument,
-                    start=missing_start,
-                    count=missing_count,
-                )
-                for candle in values:
-                    if (
-                        candle.instrument != instrument
-                        or candle.source.provider != contract.authoritative_bar_channel_id
-                        or candle.interval != contract.interval
-                        or not missing_start <= candle.open_time < missing_end
-                    ):
-                        raise RuntimeError("same-source Bar provider returned foreign evidence")
-
-                transitions: list[RealtimeBar] = []
-                for candle in sorted(values, key=lambda item: item.open_time):
-                    transitions.extend(
-                        self._apply(
-                            BarEvent(
-                                source_id=source_id,
-                                channel_id=contract.authoritative_bar_channel_id,
-                                candle=candle,
-                                state=BarState.FINAL,
-                                sequence=self._sequence(candle.source),
-                                finalized_at=candle.source.received_at,
-                            )
-                        )
-                    )
-                await store.save_candles(values)
-                if transitions:
-                    await store.save_realtime_bars(self._coalesce(transitions))
-                await store.record_candle_cache_range(
-                    instrument,
-                    realtime_source_id=source_id,
-                    upstream_channel_id=contract.authoritative_bar_channel_id,
-                    provider_symbol=provider.provider_symbol(instrument),
-                    start=missing_start,
-                    end=missing_end,
-                    row_count=len(values),
-                    interval=contract.interval,
-                )
-                row_count += len(values)
-            return BarBackfillResult(source_id, "fetched", start, end, row_count)
+    def _publish_historical_projections(self, bars: Sequence[RealtimeBar]) -> None:
+        for value in bars:
+            key = (
+                value.source.provider,
+                value.instrument,
+                value.interval,
+                value.open_time,
+            )
+            self._bars[key] = value
+            series_key = key[:3]
+            watermark = self._watermarks.get(series_key)
+            if watermark is None or value.open_time > watermark:
+                self._watermarks[series_key] = value.open_time
+            self._trim(*series_key)
 
     @staticmethod
     def _projection_from_raw_bar(source_id: str, candle: Candle) -> RealtimeBar:
@@ -1048,9 +1569,7 @@ class RealtimeBarService:
                 candle.source.provider,
                 candle.source,
                 derivation=(
-                    "authoritative_history"
-                    if state is BarState.FINAL
-                    else "authoritative_bar"
+                    "authoritative_history" if state is BarState.FINAL else "authoritative_bar"
                 ),
             ),
             evidence_channel_id=candle.source.provider,
@@ -1104,9 +1623,7 @@ class RealtimeBarService:
                     revision=max(current.revision, incoming.revision) + 1,
                 )
             return (
-                incoming
-                if incoming.source.received_at >= current.source.received_at
-                else current
+                incoming if incoming.source.received_at >= current.source.received_at else current
             )
         if incoming.state is BarState.PROVISIONAL_AUTHORITATIVE:
             return incoming
@@ -1156,50 +1673,6 @@ class RealtimeBarService:
         raw = metadata.raw_payload
         value = raw.get("sequence") if raw else None
         return value if isinstance(value, int) and value >= 0 else None
-
-    @staticmethod
-    def _sample_event_id(
-        source_id: str,
-        channel_id: str,
-        provider_symbol: str,
-        observed_at: datetime,
-        received_at: datetime,
-        value: object,
-        *,
-        sequence: int | None = None,
-    ) -> str:
-        return "|".join(
-            (
-                source_id,
-                channel_id,
-                provider_symbol,
-                observed_at.isoformat(timespec="microseconds"),
-                received_at.isoformat(timespec="microseconds"),
-                str(value),
-                "" if sequence is None else str(sequence),
-            )
-        )
-
-    @staticmethod
-    def _collapse_repeated_observations(
-        samples: tuple[QuoteSample, ...],
-    ) -> tuple[QuoteSample, ...]:
-        """Drops polling duplicates while preserving every ordered price revision."""
-
-        rows: list[QuoteSample] = []
-        previous: tuple[str, str, datetime, Decimal] | None = None
-        for sample in samples:
-            observation = (
-                sample.channel_id,
-                sample.provider_symbol,
-                sample.observed_at,
-                sample.value,
-            )
-            if observation == previous:
-                continue
-            rows.append(sample)
-            previous = observation
-        return tuple(rows)
 
     @staticmethod
     def _public_metadata(
@@ -1269,6 +1742,46 @@ class RealtimeBarService:
 
     def pending_backfill_count(self) -> int:
         return len(self._backfills)
+
+    def backfill_metrics(self) -> BarBackfillMetrics:
+        return BarBackfillMetrics(
+            cache_hits=self._backfill_metric_counts["cache_hits"],
+            upstream_calls=self._backfill_metric_counts["upstream_calls"],
+            joined_calls=self._backfill_metric_counts["joined_calls"],
+            written_rows=self._backfill_metric_counts["written_rows"],
+            failures=self._backfill_metric_counts["failures"],
+            pending=self.pending_backfill_count(),
+            last_failure_at=self._last_backfill_failure_at,
+            last_failure_type=self._last_backfill_failure_type,
+        )
+
+    def history_backfill_configured(self, source_id: str) -> bool:
+        """Return source-level setup state without exposing internal channel topology."""
+
+        return self._contract(source_id).history_provider is not None
+
+    def series_state(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        interval: timedelta | None = None,
+    ) -> RealtimeBarSeriesState | None:
+        contract = self._contract(source_id)
+        selected_interval = interval or contract.interval
+        return self._series_states.get((source_id, instrument, selected_interval))
+
+    def known_series_states(self) -> tuple[RealtimeBarSeriesState, ...]:
+        return tuple(
+            sorted(
+                self._series_states.values(),
+                key=lambda value: (
+                    value.realtime_source_id,
+                    value.instrument_symbol,
+                    value.interval,
+                ),
+            )
+        )
 
     async def close(self) -> None:
         tasks = tuple(self._backfills.values())

@@ -133,7 +133,11 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         coordinator = QuoteStreamCoordinator(load_quote=load)
         try:
-            async with coordinator.subscribe(SPOT_GOLD, source="jin10_client") as queue:
+            async with coordinator.subscribe(
+                SPOT_GOLD,
+                source="jin10_client",
+                period="1s",
+            ) as queue:
                 await asyncio.wait_for(queue.get(), 1)
                 await asyncio.wait_for(queue.get(), 1)
 
@@ -206,7 +210,11 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             value=value.last,
         )
         try:
-            async with coordinator.subscribe(SPOT_GOLD, source="jin10_client") as queue:
+            async with coordinator.subscribe(
+                SPOT_GOLD,
+                source="jin10_client",
+                period="1s",
+            ) as queue:
                 await asyncio.wait_for(queue.get(), 1)
                 await asyncio.wait_for(queue.get(), 1)
                 coordinator.publish_sample(sample)
@@ -217,11 +225,11 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(event.sample, sample)
                 self.assertIsNone(event.quote)
 
-                value = bar("jin10_client")
+                value = bar("jin10_client", interval=timedelta(seconds=1))
                 coordinator.publish_bar_update(value)
                 bar_event = await asyncio.wait_for(queue.get(), 0.05)
                 self.assertEqual(bar_event.kind, "bar")
-                self.assertEqual(bar_event.period_id, "1m")
+                self.assertEqual(bar_event.period_id, "1s")
                 self.assertEqual(bar_event.bar, value)
                 self.assertIsNone(bar_event.quote)
                 self.assertIsNone(bar_event.sample)

@@ -4,8 +4,10 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from tracefang.application.period_bars import (
+    PeriodBarBucketAggregate,
     PeriodBarInputChange,
     PeriodBarMaterializationState,
     PeriodBarService,
@@ -272,6 +274,11 @@ class _MaterializedPeriodStore:
     def _key(instrument, source_id, period_id, materialization_version):
         return instrument.symbol, source_id, period_id, materialization_version
 
+    @staticmethod
+    def _first_component_open_time(value: RealtimeBar) -> datetime:
+        raw_value = value.source.raw_payload.get("bucket_first_open_time")
+        return datetime.fromisoformat(str(raw_value)) if raw_value else value.open_time
+
     async def load_period_bar_materialization(
         self, instrument, *, source_id, period_id, materialization_version
     ):
@@ -303,7 +310,8 @@ class _MaterializedPeriodStore:
             (
                 value
                 for key, value in self.values.items()
-                if key[:4] == prefix and (before is None or value.open_time < before)
+                if key[:4] == prefix
+                and (before is None or self._first_component_open_time(value) < before)
             ),
             key=lambda value: value.open_time,
         )
@@ -365,6 +373,47 @@ class _MaterializedPeriodStore:
     def record_change(self, open_time: datetime) -> None:
         self.mutation_id += 1
         self.changes.append(PeriodBarInputChange(self.mutation_id, open_time))
+
+
+class _AggregateMaterializedPeriodStore(_MaterializedPeriodStore):
+    def __init__(self, reader: _TrackedMinuteReader) -> None:
+        super().__init__()
+        self.reader = reader
+        self.aggregate_calls: list[tuple[datetime, datetime]] = []
+
+    async def aggregate_realtime_bar_bucket(
+        self,
+        instrument,
+        *,
+        source_id,
+        start,
+        end,
+    ):
+        del instrument, source_id
+        self.aggregate_calls.append((start, end))
+        rows = tuple(row for row in self.reader.rows if start <= row.open_time < end)
+        if not rows:
+            return None
+        first = rows[0]
+        latest = rows[-1]
+        volumes = [row.volume for row in rows if row.volume is not None]
+        return PeriodBarBucketAggregate(
+            first_open_time=first.open_time,
+            open=first.open,
+            high=max(row.high for row in rows),
+            low=min(row.low for row in rows),
+            close=latest.close,
+            volume=sum(volumes, Decimal(0)) if volumes else None,
+            all_final=all(row.state is BarState.FINAL for row in rows),
+            any_authoritative=any(row.state is not BarState.PROVISIONAL_QUOTE for row in rows),
+            finalized_at=max(row.finalized_at for row in rows if row.finalized_at is not None),
+            revision=sum(row.revision for row in rows),
+            component_count=len(rows),
+            provider_symbol=latest.source.provider_symbol,
+            evidence_channel_id=latest.evidence_channel_id,
+            observed_at=max(row.source.observed_at for row in rows),
+            received_at=max(row.source.received_at for row in rows),
+        )
 
 
 class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
@@ -487,6 +536,180 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(reader.calls), cold_read_calls)
         self.assertFalse(store.states)
         self.assertFalse(store.values)
+
+    async def test_explicit_period_page_materialization_is_persistent_and_reused(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(1_440)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+
+        first = await service.materialize_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=3,
+        )
+        cold_read_calls = len(reader.calls)
+        second = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=3,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first.items), 3)
+        self.assertTrue(first.has_more)
+        self.assertGreater(cold_read_calls, 0)
+        self.assertEqual(len(reader.calls), cold_read_calls)
+        self.assertTrue(store.states)
+        self.assertTrue(store.values)
+
+    async def test_materialized_partial_oldest_bucket_uses_component_cursor_exclusively(
+        self,
+    ) -> None:
+        rows = (
+            bar("2026-08-11T09:00:00+08:00", "100"),
+            bar("2026-08-11T14:59:00+08:00", "101"),
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+
+        latest = await service.materialize_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="1d",
+            schedule=SHFE_SCHEDULE,
+            page_size=1,
+        )
+        older = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="1d",
+            schedule=SHFE_SCHEDULE,
+            before=latest.next_before,
+            page_size=1,
+        )
+
+        self.assertEqual(len(latest.items), 1)
+        self.assertGreater(latest.next_before, latest.items[0].open_time)  # type: ignore[operator]
+        self.assertEqual(older.items, ())
+        self.assertIsNone(older.next_before)
+        self.assertFalse(older.has_more)
+
+    async def test_read_falls_back_when_materialized_mutation_cursor_is_stale(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(480)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+        await service.materialize_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=2,
+        )
+        calls_after_materialization = len(reader.calls)
+        revised = bar((start + timedelta(minutes=479)).isoformat(), "99999", revision=2)
+        reader.replace(revised)
+        store.record_change(revised.open_time)
+
+        page = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=2,
+        )
+
+        self.assertGreater(len(reader.calls), calls_after_materialization)
+        self.assertEqual(page.items[-1].high, Decimal("99999"))
+
+    async def test_materialized_overlay_uses_store_aggregate_instead_of_scanning_bucket(
+        self,
+    ) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(480)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _AggregateMaterializedPeriodStore(reader)
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+        await service.materialize_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=2,
+        )
+        calls_after_materialization = len(reader.calls)
+        revised = bar((start + timedelta(minutes=479)).isoformat(), "99999", revision=2)
+        reader.replace(revised)
+        store.record_change(revised.open_time)
+
+        page = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=2,
+        )
+
+        self.assertEqual(len(reader.calls), calls_after_materialization)
+        self.assertEqual(len(store.aggregate_calls), 1)
+        self.assertEqual(page.items[-1].high, Decimal("99999"))
+
+    async def test_older_canonical_input_reopens_an_exhausted_materialization(self) -> None:
+        start = datetime(2025, 1, 2, tzinfo=UTC)
+        initial = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(1_440)
+        )
+        reader = _TrackedMinuteReader(initial)
+        store = _MaterializedPeriodStore()
+        service = PeriodBarService(reader, store=store)  # type: ignore[arg-type]
+        await service.materialize_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            page_size=20,
+        )
+        state = next(iter(store.states.values()))
+        self.assertTrue(state.history_exhausted)
+
+        older = tuple(
+            bar(
+                (start - timedelta(days=1) + timedelta(minutes=index)).isoformat(),
+                str(50 + index),
+            )
+            for index in range(1_440)
+        )
+        reader.rows = sorted([*reader.rows, *older], key=lambda row: row.open_time)
+        store.record_change(older[-1].open_time)
+        page = await service.materialize_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="4h",
+            schedule=None,
+            before=start,
+            page_size=3,
+        )
+
+        self.assertEqual(len(page.items), 3)
+        self.assertTrue(all(item.open_time < start for item in page.items))
 
     async def test_derived_period_get_reflects_a_minute_revision_without_writing(self) -> None:
         start = datetime(2025, 1, 1, tzinfo=UTC)
@@ -641,6 +864,30 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(reader.calls), cold_read_calls)
         self.assertFalse(store.states)
         self.assertFalse(store.values)
+
+    async def test_large_read_projects_accumulated_minutes_only_once(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(20_130)
+        )
+        reader = _TrackedMinuteReader(rows)
+        service = PeriodBarService(reader)  # type: ignore[arg-type]
+
+        with patch(
+            "tracefang.application.period_bars.project_period_bars",
+            wraps=project_period_bars,
+        ) as projector:
+            page = await service.get_page(
+                INSTRUMENT,
+                source_id="tonghuashun_futures",
+                period_id="30m",
+                schedule=None,
+                page_size=671,
+            )
+
+        self.assertEqual(len(page.items), 671)
+        self.assertEqual(projector.call_count, 1)
 
 
 if __name__ == "__main__":

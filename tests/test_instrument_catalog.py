@@ -55,7 +55,7 @@ class InstrumentCatalogTests(unittest.TestCase):
 
         self.assertEqual(definition.instrument, SPOT_GOLD_CNH_PER_GRAM)
         self.assertEqual(definition.quote_kind, "derived")
-        self.assertFalse(definition.history_available)
+        self.assertFalse(definition.history_backfill_supported)
         self.assertEqual(direct_requirements(definition), (SPOT_GOLD, USD_CNH))
 
     def test_tonghuashun_instruments_use_the_dedicated_public_source(self) -> None:

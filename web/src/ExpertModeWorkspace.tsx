@@ -4,7 +4,7 @@ import {
   Bot,
   BrainCircuit,
   CalendarClock,
-  ChevronLeft,
+  CandlestickChart,
   Eye,
   EyeOff,
   Gauge,
@@ -102,7 +102,13 @@ import { PeriodToolbar } from "./PeriodToolbar";
 import type { RealtimeBarStream } from "./realtimeBarStream";
 import { StrategyDetailDrawer } from "./StrategyDetailDrawer";
 import { strategyById } from "./strategyCatalog";
-import type { HistoryLoadOutcome, HistoryWindow } from "./historyLoading";
+import { TraceFangLogo } from "./TraceFangLogo";
+import {
+  enabledStrategyWarmupBars,
+  type HistoryDemand,
+  type HistoryLoadOutcome,
+  type HistoryWindow,
+} from "./historyLoading";
 import type {
   Candle,
   HoverCandle,
@@ -146,12 +152,13 @@ interface ExpertModeWorkspaceProps {
     update: (current: ChartLayerWorkspace) => ChartLayerWorkspace,
   ) => void;
   historyLoading: boolean;
+  historyActivityVisible: boolean;
   loading: boolean;
   error: string | null;
   onPeriodChange: (period: ChartPeriodId) => void;
-  onRequestOlderHistory: () => Promise<HistoryLoadOutcome>;
-  onRequestHistoryGap: (window: HistoryWindow) => void;
-  onExit: () => void;
+  onRequestOlderHistory: (demand: HistoryDemand) => Promise<HistoryLoadOutcome>;
+  onRequestHistoryGap: (window: HistoryWindow) => Promise<void>;
+  onOpenMarket: () => void;
 }
 
 const TIME_ZONES = [
@@ -320,6 +327,18 @@ function optionMarketStateLabel(state: string): string {
   return state;
 }
 
+function expertAiConnectionTitle(status: ExpertAiStatus | null): string {
+  if (status?.state === "ready" && status.authenticated === true) {
+    return "本机 ChatGPT 已连接";
+  }
+  if (status === null) return "正在检测本机 AI";
+  if (status.diagnostic_code === "cli_not_found") return "未检测到 Codex CLI";
+  if (status.diagnostic_code === "cli_path_invalid") return "Codex CLI 路径无效";
+  if (status.diagnostic_code === "not_authenticated") return "Codex 尚未登录";
+  if (status.diagnostic_code === "status_timeout") return "Codex 状态检测超时";
+  return "本机 AI 暂不可用";
+}
+
 function formatOptionMetric(value: number | null, digits = 2): string {
   return value === null || !Number.isFinite(value) ? "—" : value.toFixed(digits);
 }
@@ -388,17 +407,19 @@ export function ExpertModeWorkspace({
   layerWorkspace,
   onLayerWorkspaceChange,
   historyLoading,
+  historyActivityVisible,
   loading,
   error,
   onPeriodChange,
   onRequestOlderHistory,
   onRequestHistoryGap,
-  onExit,
+  onOpenMarket,
 }: ExpertModeWorkspaceProps) {
   const period = chartPeriodById(periodId);
   const expertBarPeriodId = barDataPeriodId(period);
   const [displayTimeZone, setDisplayTimeZone] = useState("Asia/Shanghai");
   const [enabledStrategies, setEnabledStrategies] = useState<ExpertStrategyId[]>(readStrategies);
+  const strategyWarmupBars = enabledStrategyWarmupBars(enabledStrategies);
   const [selectedStrategyId, setSelectedStrategyId] = useState<ExpertStrategyId | null>(null);
   const [capitalDominanceEnabled, setCapitalDominanceEnabled] = useState(readCapitalDominanceStrategy);
   const setLayerWorkspace = onLayerWorkspaceChange;
@@ -650,9 +671,10 @@ export function ExpertModeWorkspace({
           available: false,
           authenticated: null,
           auth_mode: null,
-          provider: "local_codex_chatgpt",
+          provider: "local_codex",
           detail: requestError instanceof Error ? requestError.message : String(requestError),
           checked_at: new Date().toISOString(),
+          diagnostic_code: "status_request_failed",
         });
       });
     return () => { disposed = true; };
@@ -1132,19 +1154,20 @@ export function ExpertModeWorkspace({
   return (
     <div className="expert-workspace" data-replay={replayState}>
       <header className="expert-command-deck">
+        <div className="expert-brand" title="TraceFang">
+          <span className="expert-brand-mark"><TraceFangLogo /></span>
+          <div><small>TRACEFANG · MARKET INTELLIGENCE</small><strong>专家工作台</strong></div>
+        </div>
         <button
           type="button"
-          className="expert-exit"
-          onClick={onExit}
-          title="返回普通行情"
-          aria-label="返回普通行情"
+          className="expert-market-entry"
+          onClick={onOpenMarket}
+          title="打开基础行情"
+          aria-label="打开基础行情"
         >
-          <ChevronLeft size={17} />
+          <CandlestickChart size={15} />
+          <span>基础行情</span>
         </button>
-        <div className="expert-brand">
-          <span className="expert-brand-mark"><Sparkles size={18} /></span>
-          <div><small>GOLD DESK · EXPERIMENTAL</small><strong>专家模式</strong></div>
-        </div>
         <div className="expert-symbol-block">
           <span>{instrumentName}</span>
           <strong>{code}</strong>
@@ -1186,7 +1209,7 @@ export function ExpertModeWorkspace({
                   ? "回放完成"
                   : "回放已停止"
               : marketPhase === "closed" ? "休市" : "实时"}</strong>
-            <small>{replayActive ? REPLAY_RATE_LABEL : historyLoading ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small>
+            <small>{replayActive ? REPLAY_RATE_LABEL : historyActivityVisible ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small>
           </div>
         </div>
       </header>
@@ -1321,10 +1344,16 @@ export function ExpertModeWorkspace({
           historyLoading={replayActive ? false : historyLoading}
           onRequestOlderHistory={replayActive
             ? async () => ({ state: "exhausted", added: 0, advancedMinutes: 0 })
-            : onRequestOlderHistory}
-          onRequestHistoryGap={replayActive ? () => undefined : onRequestHistoryGap}
+            : (demand) => onRequestOlderHistory({
+                ...demand,
+                indicatorWarmupBars: Math.max(
+                  demand.indicatorWarmupBars,
+                  strategyWarmupBars,
+                ),
+              })}
+          onRequestHistoryGap={replayActive ? async () => undefined : onRequestHistoryGap}
           onHover={setHover}
-          appearance="expert"
+          appearance="default"
           displayTimeZone={displayTimeZone}
           replayMode={replayActive}
           replayIndex={replayActive ? candles.length - 1 : null}
@@ -1787,7 +1816,7 @@ export function ExpertModeWorkspace({
                 <div>
                   <strong>{replayActive
                     ? "回放未接入历史 AI 分析"
-                    : aiReady ? "本机 ChatGPT 已连接" : "等待本机 GPT"}</strong>
+                    : expertAiConnectionTitle(displayedAiStatus)}</strong>
                   <span>{replayActive
                     ? REPLAY_DERIVED_DOMAIN_NOTICE
                     : displayedAiStatus?.detail ?? "正在检测 Codex 账户状态"}</span>

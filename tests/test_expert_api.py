@@ -70,6 +70,7 @@ class _ExpertAi:
             auth_mode="chatgpt",
             detail="ready",
             checked_at=datetime(2026, 8, 9, tzinfo=UTC),
+            diagnostic_code=None,
         )
 
     async def analyze(
@@ -91,6 +92,7 @@ class _ExpertAi:
             source_id=str(snapshot["source_id"]),
             data_as_of=str(snapshot["data_as_of"]),
             bar_count=len(bars) if isinstance(bars, list) else 0,
+            diagnostic_code=None,
         )
 
 
@@ -289,6 +291,7 @@ class ExpertApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status["state"], "ready")
         self.assertTrue(status["authenticated"])
+        self.assertIsNone(status["diagnostic_code"])
         self.assertEqual(options["contract_version"], "gold-options-v2")
         self.assertEqual(options["state"], "unconfigured")
         self.assertFalse(options["available"])

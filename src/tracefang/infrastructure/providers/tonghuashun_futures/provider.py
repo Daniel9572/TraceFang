@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from uuid import uuid4
 import httpx
 
 from tracefang.application.provider_frames import ProviderFrame, RawFrameSink
+from tracefang.application.realtime_bars import HistoricalBarBatch
 from tracefang.domain.errors import (
     ProviderDataError,
     ProviderError,
@@ -131,11 +133,13 @@ class TonghuashunFuturesProvider:
     ) -> tuple[Candle, ...]:
         self._validate_window(start, count)
         if start is not None:
-            return await self.fetch_historical_candles(
-                instrument,
-                start=start,
-                count=count,
-            )
+            return (
+                await self.fetch_historical_candles(
+                    instrument,
+                    start=start,
+                    count=count,
+                )
+            ).candles
         provider_code = self.provider_symbol(instrument)
         period = self.settings.minute_line_period
         file = "last.js"
@@ -165,7 +169,7 @@ class TonghuashunFuturesProvider:
         *,
         start: datetime,
         count: int,
-    ) -> tuple[Candle, ...]:
+    ) -> HistoricalBarBatch:
         self._validate_window(start, count)
         provider_code = self.provider_symbol(instrument)
         line_time_zone = self.symbol_mapper.line_time_zone(instrument)
@@ -181,7 +185,7 @@ class TonghuashunFuturesProvider:
                 for year in range(first_year, last_year + 1)
             )
         )
-        return tuple(
+        candles = tuple(
             candle
             for batch in batches
             for candle in self._to_candles(
@@ -189,6 +193,21 @@ class TonghuashunFuturesProvider:
                 tuple(row for row in batch.rows if start <= row.open_time < end),
                 history_file="tonghuashun_public_line_61_year",
             )
+        )
+        checked_at = datetime.now(UTC)
+        current_minute = checked_at.replace(second=0, microsecond=0)
+        evidence = "\n".join(
+            f"{batch.response.provider_code}|{batch.response.kind.value}|"
+            f"{hashlib.sha256(batch.response.content).hexdigest()}"
+            for batch in batches
+        ).encode()
+        return HistoricalBarBatch(
+            candles=candles,
+            checked_start=start.astimezone(UTC),
+            checked_end=end.astimezone(UTC),
+            authoritative_through=min(end.astimezone(UTC), current_minute),
+            evidence_version=hashlib.sha256(evidence).hexdigest(),
+            checked_at=checked_at,
         )
 
     @staticmethod
@@ -352,6 +371,7 @@ class TonghuashunFuturesProvider:
                 received_at=decoded.received_at,
                 raw_payload={
                     "channel": "tonghuashun_public_time_v6",
+                    "observation_kind": "snapshot",
                     "frame_channel": tonghuashun_frame_channel(response.kind),
                     "response_kind": response.kind.value,
                     "name": wire.name,

@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS quote_events (
     id BIGSERIAL PRIMARY KEY,
     instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
     source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    event_id TEXT,
     provider_symbol TEXT NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL,
     received_at TIMESTAMPTZ NOT NULL,
@@ -50,9 +51,13 @@ CREATE TABLE IF NOT EXISTS quote_events (
 );
 
 ALTER TABLE quote_events DROP CONSTRAINT IF EXISTS uq_quote_event;
+ALTER TABLE quote_events ADD COLUMN IF NOT EXISTS event_id TEXT;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_quote_event_received
-    ON quote_events (source_id, provider_symbol, received_at);
+DROP INDEX IF EXISTS uq_quote_event_received;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quote_event_identity
+    ON quote_events (source_id, event_id)
+    WHERE event_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ix_quote_events_instrument_observed
     ON quote_events (instrument_symbol, observed_at DESC);
@@ -270,6 +275,53 @@ CREATE INDEX IF NOT EXISTS ix_realtime_candle_cache_coverage
         interval_seconds,
         range_start,
         range_end
+    );
+
+CREATE TABLE IF NOT EXISTS realtime_bar_series_state (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    upstream_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    latest_authoritative_open_time TIMESTAMPTZ,
+    authoritative_through TIMESTAMPTZ NOT NULL,
+    history_floor TIMESTAMPTZ,
+    tail_checked_through TIMESTAMPTZ,
+    tail_checked_at TIMESTAMPTZ,
+    evidence_version TEXT NOT NULL CHECK (length(evidence_version) > 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (
+        latest_authoritative_open_time IS NULL
+        OR latest_authoritative_open_time < authoritative_through
+    ),
+    CHECK (history_floor IS NULL OR history_floor <= authoritative_through),
+    CHECK (
+        mod(EXTRACT(EPOCH FROM authoritative_through)::numeric, interval_seconds) = 0
+    ),
+    CHECK (
+        latest_authoritative_open_time IS NULL
+        OR mod(
+            EXTRACT(EPOCH FROM latest_authoritative_open_time)::numeric,
+            interval_seconds
+        ) = 0
+    ),
+    CHECK (
+        history_floor IS NULL
+        OR mod(EXTRACT(EPOCH FROM history_floor)::numeric, interval_seconds) = 0
+    ),
+    CHECK (
+        tail_checked_through IS NULL
+        OR mod(EXTRACT(EPOCH FROM tail_checked_through)::numeric, interval_seconds) = 0
+    ),
+    PRIMARY KEY (realtime_source_id, instrument_symbol, interval_seconds)
+);
+
+CREATE INDEX IF NOT EXISTS ix_realtime_bar_series_authority
+    ON realtime_bar_series_state (
+        realtime_source_id,
+        instrument_symbol,
+        interval_seconds,
+        authoritative_through
     );
 
 CREATE TABLE IF NOT EXISTS candle_validation_results (
