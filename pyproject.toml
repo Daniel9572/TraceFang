@@ -32,6 +32,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tracefang = ["windows_task.ps1"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

@@ -33,18 +33,45 @@
 
 ## 快速开始
 
-Windows 首次运行双击 `setup.cmd` 安装并构建，之后双击 `start.cmd` 启动。
-macOS 完成同样的 `uv sync` 与网页依赖安装后，双击 `start.command` 即可安装并启动
-当前用户的独立后台服务。
+### 应用窗口模式（最新调整）
+
+用户当前选择的是“打开应用才运行，关闭应用就停止”，不再以永久后台常驻为日常默认。
+外层项目文件夹的 `TraceFang.app` 指向代码目录的 `dist/TraceFang.app`，替代先前外层
+`启动 TraceFang.command`。应用窗口显示服务状态；关闭窗口或选择“停止并退出”会请求
+停止后端及本项目 PostgreSQL/NATS 容器，确认成功后退出，保留持久化数据。
+关闭浏览器页不等于关闭应用控制窗口；窗口上已明确说明这一点。
+
+macOS 本机构建入口：`.venv/bin/python scripts/build-macos-app.py`，首次构建需要 Apple
+命令行开发工具。源码在仓库内，生成的应用在被忽略的 `dist` 下，不提交二进制或本机路径。
+新应用首次读取位于“文稿”中的代码与运行环境时，需要用户允许系统文件夹访问提示；
+本机授权后已实测关闭应用窗口：应用与会话进程退出，后端端口无监听，两个项目容器
+均停止。本地重新编译会改变签名，macOS 可能再次要求文件夹授权。
+
+Windows 对应的无控制台入口是 `TraceFang.vbs`，打开原生 WPF 控制窗口，使用相同的
+Python `session` 生命周期逻辑。Windows 新窗口尚未实机验证；旧 `.cmd/.command`
+入口仍作为显式后台管理命令保留，不等同于应用窗口模式。
+
+应用与会话进程之间以管道保持连接，无周期健康轮询；关闭或应用崩溃导致管道断开时，
+会话进程负责停止服务。停止失败不伪装成功，窗口保留重试入口。独占锁防止第二个会话
+停止第一个会话的服务；强杀会话进程本身仍可能使清理来不及执行，不作绝对保证。
+macOS 服务注册迁出登录自动加载目录，旧注册内容保留；Windows 新注册不含登录触发器。
+以下命令行后台模式与历史性能结果仅用于维护及对照，不代表应用窗口模式的最终验收。
+
+Windows 首次双击 `setup.cmd` 安装并注册后台运行版本，之后双击 `start.cmd` 打开。
+现有 Windows 安装可双击 `update.cmd` 升级为系统托管入口。Windows 适配已实现，实机
+任务注册、恢复及效能尚未验证；当前证据见下方验证记录。
+macOS 完成 `uv sync`、Docker Desktop 安装和本机环境配置后，首次双击 `update.command`
+准备并启动独立运行版本。之后双击 `start.command` 打开已安装版本。
 
 `setup.cmd` 会在被 Git 忽略的 `.env.local` 中生成本机 PostgreSQL 随机凭据；启动入口
 会统一启动项目专用 PostgreSQL 与 NATS/JetStream 容器。
 
-复制本机环境文件模板后即可启动。macOS 标准安装若已登录金十客户端，历史能力会自动复用该本机会话；需要覆盖自动发现或在其他平台运行时，再填写桌面会话配置。MCP 配置已从模板和应用运行时移除：
+需要人工配置时，在安装运行版本前复制本机环境文件模板。macOS 标准安装若已登录金十客户端，历史能力会自动复用该本机会话；需要覆盖自动发现或在其他平台运行时，再填写桌面会话配置。MCP 配置已从模板和应用运行时移除：
 
 ```powershell
 Copy-Item .env.example .env
 # 按需填写本地会话覆盖值；不要把真实 Token 写回 .env.example
+.\setup.cmd
 .\start.cmd
 ```
 
@@ -57,26 +84,65 @@ Copy-Item .env.example .env
 `/Applications/ChatGPT.app/Contents/Resources/codex`。非标准安装可在 `.env.local` 中填写
 可执行文件完整路径；登录状态以 `codex login status` 为准。
 
-浏览器会打开 `http://127.0.0.1:8000`。也可以完全从终端安装和启动：
+浏览器会打开 `http://127.0.0.1:8000`。需预先安装 uv、提供 corepack 的 Node.js 环境和
+Docker Desktop。Windows 也可以完全从终端安装和启动：
 
 ```powershell
-uv sync --python 3.13
-cd web
-corepack pnpm@10.32.0 install --frozen-lockfile
-corepack pnpm@10.32.0 build
-cd ..
-$env:PYTHONPATH = Join-Path $PWD "src"
-uv run tracefang-server
+.\setup.cmd
+.\start.cmd
 ```
 
-macOS 日常运行可直接双击 `start.command`。入口只在网页源码变化时重新构建，随后更新
-`~/Library/Application Support/TraceFang/runtime` 中的最小运行快照和独立虚拟环境，
-再更新 `~/Library/LaunchAgents/com.tracefang.local.plist` 并等待健康检查通过。运行时不
-直接读取受 macOS 隐私保护的“文稿”源码目录；终端窗口可以立即关闭，FastAPI 仍由
-`launchd` 独立托管，并在异常退出后自动拉起。它在
-`http://127.0.0.1:8000` 同时提供页面与 API，因此不存在 5173 前端仍在、8000 后端
-已经退出的分裂生命周期。双击 `status.command` 检查状态，双击 `stop.command` 停止并
-移除后台服务；服务日志保存在 `~/Library/Logs/TraceFang/`。
+后续修改工作区配置或代码，需通过更新入口部署到独立运行版本；直接运行
+`tracefang-server` 是前台开发方式，不具备上述系统托管行为。
+
+macOS 日常双击 `start.command`：服务就绪时只打开页面；未运行时按 Docker、PostgreSQL、
+NATS、后端的依赖顺序恢复。多个启动、更新或停止操作通过同一个系统文件锁串行处理。
+日常启动不构建网页、不安装依赖、不读取 Git 远端；代码修改需显式运行 `update.command`。
+
+更新会先在 `~/Library/Application Support/TraceFang/release-*` 准备最小运行快照、独立
+虚拟环境并检查模块导入，成功后才切换系统注册。新版本启动失败会尝试恢复上一运行版本。
+上一版本保留在本机；更新不迁移或回滚数据库，因此不保证未来不兼容数据库变更可回退。
+旧版 `runtime` 目录继续兼容，当前生效目录以 `~/Library/Application Support/TraceFang/service.plist`
+为准。日志保存在 `~/Library/Logs/TraceFang/`。
+
+后端由 macOS 独立托管，启动完成后关闭终端不影响运行，异常退出会由系统自动拉起。
+React 前端在浏览器执行，构建产物与 API 同由 `http://127.0.0.1:8000` 提供；正式模式没有
+常驻 Vite 进程。`/api/ready` 只检查本机数据库、采集管理器和消息连接，启动器同时检查页面
+可访问，不因上游休市或暂时不可用反复重启。上游行情健康度仍由 `/api/health` 和页面呈现。
+
+双击 `status.command` 检查状态；`stop.command` 等待后端退出后停止本项目两个容器，并禁用
+下次登录自动启动，保留系统注册与所有数据。再次启动会重新启用。关闭浏览器不会停止采集。
+需要单独移除系统注册时，在代码目录运行
+`PYTHONPATH=src .venv/bin/python -m tracefang.service uninstall`；该操作仍保留数据和运行版本。
+同一命令将 `uninstall` 换成 `restart` 可只重启已安装版本。首次环境缺失时显示缺失项，不自动安装
+系统软件。Docker 完全未运行时由入口尝试打开 Docker Desktop，并限时等待就绪。
+
+状态转换、可复现实验和本机测量结果见 [启动器验证记录](docs/launcher-validation.md)。
+
+两种系统共用 Python 启动、就绪检查、更新回退和操作锁流程。日常入口一一对应：
+
+| 操作 | macOS | Windows |
+| --- | --- | --- |
+| 打开 / 启动 | `start.command` | `start.cmd` |
+| 停止 | `stop.command` | `stop.cmd` |
+| 查看状态 | `status.command` | `status.cmd` |
+| 部署本地代码更新 | `update.command` | `update.cmd` |
+
+Windows 使用当前用户的任务计划程序，直接运行无控制台的 `pythonw.exe`，不需要常驻
+PowerShell 窗口。运行版本和日志分别位于 `%LOCALAPPDATA%\TraceFang\release-*` 和 `logs`；
+当前版本记录在该目录的 `service.plist`。系统任务按用户 SID 区分，仅在该用户登录期间
+接受按需启动，不设置登录触发器，也不保存账户密码。关闭旧命令行启动窗口不会主动
+停止任务；关闭新的应用控制窗口则会停止服务。停止入口禁用任务及其自动重试。
+任务失败配置为间隔一分钟、最多三次自动重试，重复任务采用 IgnoreNew。系统机制不同，
+恢复时间不承诺与 macOS 相同。系统策略拒绝任务注册时直接报告失败，不静默退回前台运行。
+Windows 任务停止通过系统终止进程，退出清理语义与 macOS 的信号清理存在差异；已落盘
+数据保留，未完成的内存工作可能被中断。
+
+Windows 可在代码目录运行以下命令复现实验；冷启动与恢复测试会短暂中断本机采集：
+
+```powershell
+.venv\Scripts\python.exe scripts\benchmark-launcher.py --cold-runs 10 --recovery --idle-seconds 600
+```
 
 开发时先停止后台服务，再双击 `dev.command`，或运行
 `python3 scripts/run-local.py --dev`。开发入口会统一管理 Vite 与 FastAPI，任一进程

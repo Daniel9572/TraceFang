@@ -1291,6 +1291,23 @@ async def provider_error(_: Request, error: ProviderError):
     return JSONResponse(status_code=502, content={"detail": str(error)})
 
 
+@app.get("/api/ready")
+async def readiness() -> dict[str, Any]:
+    """Local readiness only; never probe upstream providers from the launcher."""
+    database = runtime.persistence.health().state if runtime.persistence else "unconfigured"
+    acquisition = "running" if runtime.acquisition is not None else "stopped"
+    capture = runtime.frame_store is not None and runtime.frame_store.is_connected
+    return {
+        "process_id": os.getpid(),
+        "status": "ok"
+        if database == "healthy" and acquisition == "running" and capture
+        else "degraded",
+        "database": {"state": database},
+        "acquisition": {"state": acquisition},
+        "capture": {"state": "connected" if capture else "unavailable"},
+    }
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     manager = _manager()
@@ -2188,4 +2205,6 @@ if _web_dist.exists():
 def run() -> None:
     host = os.environ.get("TRACEFANG_HOST", "127.0.0.1")
     port = int(os.environ.get("TRACEFANG_PORT", "8000"))
-    uvicorn.run("tracefang.api:app", host=host, port=port, reload=False)
+    uvicorn.run(
+        "tracefang.api:app", host=host, port=port, reload=False, timeout_graceful_shutdown=5
+    )
