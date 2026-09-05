@@ -33,9 +33,12 @@
 
 ## 快速开始
 
-首次运行，双击 `setup.cmd` 安装并构建，之后双击 `start.cmd` 启动。
+Windows 首次运行双击 `setup.cmd` 安装并构建，之后双击 `start.cmd` 启动。
+macOS 完成同样的 `uv sync` 与网页依赖安装后，双击 `start.command` 即可安装并启动
+当前用户的独立后台服务。
 
-`setup.cmd` 会在被 Git 忽略的 `.env.local` 中生成本机 PostgreSQL 随机凭据；`start.cmd` 会在 Docker Desktop 已运行时启动项目专用 PostgreSQL 容器。
+`setup.cmd` 会在被 Git 忽略的 `.env.local` 中生成本机 PostgreSQL 随机凭据；启动入口
+会统一启动项目专用 PostgreSQL 与 NATS/JetStream 容器。
 
 复制本机环境文件模板后即可启动。macOS 标准安装若已登录金十客户端，历史能力会自动复用该本机会话；需要覆盖自动发现或在其他平台运行时，再填写桌面会话配置。MCP 配置已从模板和应用运行时移除：
 
@@ -59,17 +62,25 @@ Copy-Item .env.example .env
 ```powershell
 uv sync --python 3.13
 cd web
-corepack pnpm install --frozen-lockfile
-corepack pnpm build
+corepack pnpm@10.32.0 install --frozen-lockfile
+corepack pnpm@10.32.0 build
 cd ..
+$env:PYTHONPATH = Join-Path $PWD "src"
 uv run tracefang-server
 ```
 
-macOS 日常运行可直接双击 `start.command`。它先构建网页，再由同一个 FastAPI
-进程在 `http://127.0.0.1:8000` 提供页面与 API，因此不存在 5173 前端仍在、8000
-后端已经退出的分裂生命周期。开发时双击 `dev.command`，或运行
-`python3 scripts/run-local.py --dev`；开发入口会统一管理 Vite 与 FastAPI，任一进程
-退出都会停止另一项，避免留下只能显示旧页面、却无法连接实时服务的孤儿进程。
+macOS 日常运行可直接双击 `start.command`。入口只在网页源码变化时重新构建，随后更新
+`~/Library/Application Support/TraceFang/runtime` 中的最小运行快照和独立虚拟环境，
+再更新 `~/Library/LaunchAgents/com.tracefang.local.plist` 并等待健康检查通过。运行时不
+直接读取受 macOS 隐私保护的“文稿”源码目录；终端窗口可以立即关闭，FastAPI 仍由
+`launchd` 独立托管，并在异常退出后自动拉起。它在
+`http://127.0.0.1:8000` 同时提供页面与 API，因此不存在 5173 前端仍在、8000 后端
+已经退出的分裂生命周期。双击 `status.command` 检查状态，双击 `stop.command` 停止并
+移除后台服务；服务日志保存在 `~/Library/Logs/TraceFang/`。
+
+开发时先停止后台服务，再双击 `dev.command`，或运行
+`python3 scripts/run-local.py --dev`。开发入口会统一管理 Vite 与 FastAPI，任一进程
+退出都会停止另一项；开发服务仍有意绑定当前终端，不会与正式后台服务争用端口。
 
 页面把两类故障明确分开：浏览器到 TraceFang 的 WebSocket 关闭显示“本机实时服务”
 状态；WebSocket 仍连接但数据源报告不可用时，显示具体“上游行情”恢复状态。临时

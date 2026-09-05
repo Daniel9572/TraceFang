@@ -13,10 +13,10 @@ if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $webI
 if (Get-Command docker -ErrorAction SilentlyContinue) {
     docker info *> $null
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $localEnvFile)) {
-        docker compose --env-file $localEnvFile up -d postgres
+        docker compose --env-file $localEnvFile up -d postgres nats
     }
     elseif ($LASTEXITCODE -ne 0) {
-        Write-Warning "Docker Desktop is not running. PostgreSQL persistence will remain unavailable until it starts."
+        Write-Warning "Docker Desktop is not running. PostgreSQL and NATS will remain unavailable until it starts."
     }
 }
 else {
@@ -28,6 +28,7 @@ $openBrowser = "Start-Sleep -Seconds 2; Start-Process '$url'"
 Start-Process powershell.exe -ArgumentList "-NoProfile", "-Command", $openBrowser -WindowStyle Hidden
 Push-Location $projectRoot
 try {
+    $env:PYTHONPATH = Join-Path $projectRoot "src"
     & $python -m uvicorn tracefang.api:app --host 127.0.0.1 --port 8000
 }
 finally {

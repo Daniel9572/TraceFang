@@ -22,6 +22,7 @@ dependencies = [
 [project.scripts]
 tracefang = "tracefang.cli:main"
 tracefang-server = "tracefang.api:run"
+tracefang-service = "tracefang.service:main"
 
 [dependency-groups]
 dev = [
