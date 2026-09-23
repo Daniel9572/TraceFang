@@ -445,6 +445,15 @@
 
 .expert-options-panel,
 .expert-ai-panel { display: flex; flex-direction: column; gap: 10px; }
+.expert-ai-settings { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 8px; }
+.expert-ai-field { display: flex; min-width: 0; flex-direction: column; gap: 5px; color: var(--expert-text); font-size: 10px; }
+.expert-ai-field textarea,
+.expert-ai-field select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--expert-line-strong); border-radius: 6px; background: var(--expert-panel); color: var(--expert-text); font: inherit; line-height: 1.5; }
+.expert-ai-field textarea { min-height: 90px; resize: vertical; }
+.expert-ai-field textarea:focus-visible { outline: 2px solid var(--expert-gold); outline-offset: 2px; }
+.expert-ai-field textarea:disabled,
+.expert-ai-field select:disabled { background: var(--expert-panel-raised); color: var(--expert-muted); }
+.expert-ai-answer .expert-ai-answer-context { padding-bottom: 8px; border-bottom: 1px solid var(--expert-line-strong); overflow-wrap: anywhere; }
 .expert-capability-state,
 .expert-ai-connection { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; padding: 10px; border: 1px solid #e2e7ee; border-radius: 7px; background: #fff; }
 .expert-capability-state { display: flex; flex-direction: column; }

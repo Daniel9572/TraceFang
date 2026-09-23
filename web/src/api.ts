@@ -14,6 +14,7 @@ import type {
 } from "./types";
 import type {
   ExpertAiAnalysis,
+  ExpertAiModel,
   ExpertAiStatus,
   ExpertGoldEventCatalogSnapshot,
   ExpertMultiTimeframeContext,
@@ -294,6 +295,9 @@ export interface ExpertAiAnalysisRequest {
   code: string;
   period: string;
   enabled_strategies: string[];
+  custom_prompt: string;
+  model: string;
+  reasoning_effort: string;
 }
 
 export const marketApi = {
@@ -392,6 +396,7 @@ export const marketApi = {
       { method: "POST" },
     ),
   expertAiStatus: () => request<ExpertAiStatus>("/api/expert/ai/status"),
+  expertAiModels: () => request<{ models: ExpertAiModel[] }>("/api/expert/ai/models"),
   expertAiAnalyze: (payload: ExpertAiAnalysisRequest) =>
     request<ExpertAiAnalysis>("/api/expert/ai/analyze", {
       method: "POST",

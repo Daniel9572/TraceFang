@@ -656,6 +656,14 @@ export interface ExpertAiStatus {
   diagnostic_code: ExpertAiDiagnosticCode | null;
 }
 
+export interface ExpertAiModel {
+  model: string;
+  display_name: string;
+  reasoning_efforts: string[];
+  default_reasoning_effort: string;
+  is_default: boolean;
+}
+
 export type ExpertAiDiagnosticCode =
   | "analysis_failed"
   | "analysis_timeout"

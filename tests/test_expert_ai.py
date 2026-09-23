@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from tracefang.application.codex_models import CodexModel, parse_model
 from tracefang.application.expert_ai import (
     CodexExpertAnalysisService,
     CommandResult,
@@ -32,6 +34,99 @@ class _Runner:
 
 
 class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_catalog_is_cached_and_concurrent_requests_are_coalesced(self) -> None:
+        model = CodexModel("test-model", "Test model", ("low", "high"), "low", True)
+        reader = AsyncMock(return_value=(model,))
+        service = CodexExpertAnalysisService(working_directory=Path.cwd(), command="codex")
+        with patch("tracefang.application.expert_ai.read_codex_models", reader):
+            results = await asyncio.gather(service.models(), service.models(), service.models())
+        self.assertEqual(results, [(model,)] * 3)
+        reader.assert_awaited_once()
+
+    async def test_custom_prompt_and_selection_reach_codex(self) -> None:
+        runner = _Runner(
+            CommandResult(0, "Logged in using ChatGPT", ""),
+            CommandResult(
+                0,
+                '{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"缺少成交量, 无法判断量价关系。"}}',
+                "",
+            ),
+        )
+        model = CodexModel("test-model", "Test model", ("low", "high"), "low", True)
+        service = CodexExpertAnalysisService(
+            working_directory=Path.cwd(),
+            command="codex",
+            runner=runner,
+        )
+        with patch.object(service, "models", AsyncMock(return_value=(model,))):
+            result = await service.analyze(
+                {"bars": []},
+                enabled_strategies=(),
+                custom_prompt="只解释缺失数据。",
+                model="test-model",
+                reasoning_effort="high",
+            )
+        self.assertEqual(result.state, "completed")
+        command, prompt, _ = runner.calls[1]
+        self.assertEqual(
+            command[-5:],
+            (
+                "--model",
+                "test-model",
+                "-c",
+                'model_reasoning_effort="high"',
+                "-",
+            ),
+        )
+        self.assertIn('"user_question":"只解释缺失数据。"', prompt or "")
+        self.assertNotIn("只解释缺失数据", " ".join(command))
+
+    async def test_invalid_model_or_effort_never_launches_analysis(self) -> None:
+        model = CodexModel("test-model", "Test model", ("low", "high"), "low", True)
+        runner = _Runner()
+        service = CodexExpertAnalysisService(
+            working_directory=Path.cwd(),
+            command="codex",
+            runner=runner,
+        )
+        with patch.object(service, "models", AsyncMock(return_value=(model,))):
+            for selected, effort in [("missing", "low"), ("test-model", "ultra"), (None, "low")]:
+                with self.subTest(model=selected, effort=effort), self.assertRaises(ValueError):
+                    await service.analyze(
+                        {}, enabled_strategies=(), model=selected, reasoning_effort=effort
+                    )
+        self.assertEqual(runner.calls, [])
+
+    async def test_catalog_failure_does_not_expose_process_details(self) -> None:
+        service = CodexExpertAnalysisService(working_directory=Path.cwd(), command="codex")
+        with (
+            patch(
+                "tracefang.application.expert_ai.read_codex_models",
+                AsyncMock(side_effect=ValueError("private diagnostic")),
+            ),
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            await service.models()
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_catalog_preserves_effort_order_and_ignores_hidden_models(self) -> None:
+        entry = {
+            "model": "test-model",
+            "displayName": "Test model",
+            "isDefault": True,
+            "defaultReasoningEffort": "high",
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": effort} for effort in ("low", "medium", "high", "ultra")
+            ],
+        }
+        model = parse_model(entry)
+        self.assertIsNotNone(model)
+        self.assertEqual(model.reasoning_efforts, ("low", "medium", "high", "ultra"))
+        self.assertEqual(model.default_reasoning_effort, "high")
+        self.assertIsNone(parse_model({**entry, "hidden": True}))
+        self.assertIsNone(parse_model({**entry, "model": "--injected-option"}))
+
     async def test_status_reports_chatgpt_login_without_forwarding_cli_output(self) -> None:
         runner = _Runner(CommandResult(0, "Logged in using ChatGPT\n", ""))
         service = CodexExpertAnalysisService(
@@ -145,8 +240,7 @@ class ExpertAiServiceTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(
             (
                 '{"type":"thread.started","thread_id":"private"}',
-                '{"type":"item.completed","item":{"type":"command_execution",'
-                '"text":"ignored"}}',
+                '{"type":"item.completed","item":{"type":"command_execution","text":"ignored"}}',
                 '{"type":"item.completed","item":{"type":"agent_message",'
                 '"text":"趋势仍偏强, 但需观察失效位。"}}',
             )

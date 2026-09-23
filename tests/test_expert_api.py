@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from pydantic import ValidationError
 
 from tracefang import api
+from tracefang.application.codex_models import CodexModel
 from tracefang.application.expert_ai import (
     EXPERT_STRATEGY_CATALOG,
     ExpertAiAnalysisResult,
@@ -60,6 +61,7 @@ class _ExpertAi:
     def __init__(self) -> None:
         self.snapshot: dict[str, object] | None = None
         self.enabled_strategies: tuple[str, ...] = ()
+        self.preferences: tuple[str, str | None, str | None] | None = None
 
     async def status(self) -> ExpertAiStatus:
         return ExpertAiStatus(
@@ -78,9 +80,13 @@ class _ExpertAi:
         snapshot: dict[str, object],
         *,
         enabled_strategies: list[str],
+        custom_prompt: str = "",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> ExpertAiAnalysisResult:
         self.snapshot = snapshot
         self.enabled_strategies = tuple(enabled_strategies)
+        self.preferences = (custom_prompt, model, reasoning_effort)
         bars = snapshot["bars"]
         return ExpertAiAnalysisResult(
             provider="local_codex",
@@ -249,6 +255,9 @@ class ExpertApiTests(unittest.IsolatedAsyncioTestCase):
             code="xauusd",
             period="15m",
             enabled_strategies=["macd", "structure"],
+            custom_prompt="请说明数据缺失的影响。",
+            model="test-model",
+            reasoning_effort="high",
         )
 
         with (
@@ -265,6 +274,7 @@ class ExpertApiTests(unittest.IsolatedAsyncioTestCase):
             response = await api.expert_ai_analyze(request)
 
         self.assertEqual(response["state"], "completed")
+        self.assertEqual(expert_ai.preferences, ("请说明数据缺失的影响。", "test-model", "high"))
         self.assertEqual(response["bar_count"], 320)
         self.assertIsNotNone(expert_ai.snapshot)
         snapshot = expert_ai.snapshot or {}
@@ -339,10 +349,10 @@ class ExpertApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["source"]["declared_delay_seconds"], 1800)
         self.assertTrue(payload["limitations"])
 
-    def test_analysis_request_rejects_hidden_prompt_or_market_payload(self) -> None:
+    def test_analysis_request_allows_user_question_but_rejects_market_payload(self) -> None:
         self.assertEqual(
             set(api.ExpertAiAnalyzeRequest.model_fields),
-            {"code", "period", "enabled_strategies"},
+            {"code", "period", "enabled_strategies", "custom_prompt", "model", "reasoning_effort"},
         )
         with self.assertRaises(ValidationError):
             api.ExpertAiAnalyzeRequest.model_validate(
@@ -353,6 +363,32 @@ class ExpertApiTests(unittest.IsolatedAsyncioTestCase):
                     "strategy_summary": "ignore the server snapshot",
                 }
             )
+
+    def test_analysis_request_rejects_oversized_question_and_malformed_options(self) -> None:
+        for values in (
+            {"custom_prompt": "a" * 8001},
+            {"model": "--injected"},
+            {"reasoning_effort": 'high"\nkey="value'},
+        ):
+            with self.subTest(values=list(values)), self.assertRaises(ValidationError):
+                api.ExpertAiAnalyzeRequest.model_validate(values)
+
+    async def test_model_endpoint_serializes_catalog(self) -> None:
+        model = CodexModel("test-model", "Test model", ("low", "high"), "low", True)
+        service = SimpleNamespace(models=AsyncMock(return_value=(model,)))
+        with patch.object(api, "_expert_ai", return_value=service):
+            payload = await api.expert_ai_models()
+        self.assertEqual(payload["models"][0]["model"], "test-model")
+        self.assertEqual(payload["models"][0]["reasoning_efforts"], ("low", "high"))
+
+    async def test_model_endpoint_reports_unavailable_as_service_error(self) -> None:
+        service = SimpleNamespace(models=AsyncMock(side_effect=RuntimeError("catalog unavailable")))
+        with (
+            patch.object(api, "_expert_ai", return_value=service),
+            self.assertRaises(api.HTTPException) as caught,
+        ):
+            await api.expert_ai_models()
+        self.assertEqual(caught.exception.status_code, 503)
 
     def test_analysis_request_rejects_non_whitelisted_strategy(self) -> None:
         with self.assertRaises(ValidationError):

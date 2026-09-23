@@ -369,6 +369,13 @@ class ExpertAiAnalyzeRequest(BaseModel):
 
     code: _ExpertCode = "XAUUSD"
     period: _ExpertPeriod = "15m"
+    custom_prompt: str = Field(default="", max_length=8000)
+    model: Annotated[str, StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][\w./:-]*$",
+    )] | None = None
+    reasoning_effort: Annotated[str, StringConstraints(
+        min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]*$",
+    )] | None = None
     enabled_strategies: list[ExpertStrategyId] = Field(
         default_factory=list,
         max_length=EXPERT_STRATEGY_COUNT,
@@ -1708,6 +1715,14 @@ async def expert_ai_status() -> dict[str, Any]:
     return asdict(await _expert_ai().status())
 
 
+@app.get("/api/expert/ai/models")
+async def expert_ai_models() -> dict[str, Any]:
+    try:
+        return {"models": [asdict(model) for model in await _expert_ai().models()]}
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
 @app.get("/api/expert/options/gold")
 async def expert_gold_options() -> dict[str, Any]:
     return jsonable_encoder(asdict(await _gold_options().snapshot()))
@@ -1800,10 +1815,18 @@ async def expert_ai_analyze(request: ExpertAiAnalyzeRequest) -> dict[str, Any]:
     )
     option_snapshot = await _gold_options().snapshot()
     snapshot["gold_options"] = GoldOptionsService.ai_context(option_snapshot)
-    result = await _expert_ai().analyze(
-        snapshot,
-        enabled_strategies=request.enabled_strategies,
-    )
+    try:
+        result = await _expert_ai().analyze(
+            snapshot,
+            enabled_strategies=request.enabled_strategies,
+            custom_prompt=request.custom_prompt,
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return asdict(result)
 
 

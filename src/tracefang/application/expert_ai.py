@@ -8,11 +8,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+
+from tracefang.application.codex_models import CodexModel, read_codex_models
 
 EXPERT_AI_MAX_BARS = 320
 ExpertStrategyId = Literal[
@@ -111,16 +114,14 @@ EXPERT_STRATEGY_CATALOG: dict[ExpertStrategyId, dict[str, str]] = {
     "vix-gvz": {
         "label": "VIX / GVZ 风险与黄金波动",
         "definition": (
-            "仅使用 Cboe 官方日频历史值描述股票与黄金隐含波动环境; "
-            "波动率指数不提供金价方向。"
+            "仅使用 Cboe 官方日频历史值描述股票与黄金隐含波动环境; 波动率指数不提供金价方向。"
         ),
         "data_quality": "conditional",
     },
     "volume-open-interest": {
         "label": "期货量价持仓结构",
         "definition": (
-            "使用 SHFE 延迟的单边成交量与总持仓量作为市场参与度上下文; "
-            "总持仓不能辨别多空方向。"
+            "使用 SHFE 延迟的单边成交量与总持仓量作为市场参与度上下文; 总持仓不能辨别多空方向。"
         ),
         "data_quality": "conditional",
     },
@@ -264,6 +265,32 @@ class CodexExpertAnalysisService:
         )
         self._runner = runner or self._run_command
         self._analysis_lock = asyncio.Lock()
+        self._models_lock = asyncio.Lock()
+        self._models_cache: tuple[CodexModel, ...] = ()
+        self._models_cache_command: str | None = None
+        self._models_cached_at = 0.0
+
+    async def models(self) -> tuple[CodexModel, ...]:
+        command = self._resolve_command().command
+        if command is None:
+            raise RuntimeError("未找到可执行的 Codex, 请先检查本机安装和登录状态。")
+        async with self._models_lock:
+            if (
+                self._models_cache
+                and command == self._models_cache_command
+                and time.monotonic() - self._models_cached_at < 300
+            ):
+                return self._models_cache
+            try:
+                models = await read_codex_models(command, self._sanitized_environment())
+            except (OSError, ValueError, TimeoutError) as from_error:
+                raise RuntimeError(
+                    "无法读取 Codex 模型列表, 请检查登录和网络后重试。"
+                ) from from_error
+            self._models_cache = models
+            self._models_cache_command = command
+            self._models_cached_at = time.monotonic()
+            return models
 
     async def status(self) -> ExpertAiStatus:
         return await self._status_for(self._resolve_command())
@@ -355,7 +382,21 @@ class CodexExpertAnalysisService:
         snapshot: Mapping[str, object],
         *,
         enabled_strategies: Sequence[ExpertStrategyId],
+        custom_prompt: str = "",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> ExpertAiAnalysisResult:
+        if len(custom_prompt) > 8000:
+            raise ValueError("自定义问题最多 8000 个字符。")
+        if model is not None:
+            selected = next((item for item in await self.models() if item.model == model), None)
+            if selected is None:
+                raise ValueError("所选模型已不可用, 请刷新模型列表后重新选择。")
+            reasoning_effort = reasoning_effort or selected.default_reasoning_effort
+            if reasoning_effort not in selected.reasoning_efforts:
+                raise ValueError("所选模型不支持此推理强度, 请重新选择。")
+        elif reasoning_effort is not None:
+            raise ValueError("请先选择模型, 再选择推理强度。")
         source_id = str(snapshot.get("source_id", "unknown"))
         data_as_of_value = snapshot.get("data_as_of")
         data_as_of = str(data_as_of_value) if data_as_of_value is not None else None
@@ -378,6 +419,7 @@ class CodexExpertAnalysisService:
         prompt = self._build_prompt(
             snapshot,
             enabled_strategies=enabled_strategies,
+            custom_prompt=custom_prompt,
         )
         command = (
             resolution.command,
@@ -389,6 +431,11 @@ class CodexExpertAnalysisService:
             "--skip-git-repo-check",
             "--ignore-user-config",
             "--ignore-rules",
+            *(
+                ("--model", model, "-c", f'model_reasoning_effort="{reasoning_effort}"')
+                if model is not None
+                else ()
+            ),
             "-",
         )
         try:
@@ -519,6 +566,7 @@ class CodexExpertAnalysisService:
         snapshot: Mapping[str, object],
         *,
         enabled_strategies: Sequence[ExpertStrategyId],
+        custom_prompt: str = "",
     ) -> str:
         strategies = [
             {"id": strategy_id, **EXPERT_STRATEGY_CATALOG[strategy_id]}
@@ -527,6 +575,7 @@ class CodexExpertAnalysisService:
         payload = {
             "market_snapshot": snapshot,
             "enabled_strategies": strategies,
+            "user_question": custom_prompt.strip(),
         }
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         return (
@@ -535,6 +584,8 @@ class CodexExpertAnalysisService:
             "必须用中文, 明确数据来源和截止时间; "
             "区分事实、规则信号和推测; 不得伪造缺失的成交量、订单流、期权、事件或预测置信度; "
             "不得作收益承诺或把内容表述为投资建议。先给简短结论, 再列证据、风险和失效条件。\n"
+            "若 user_question 非空, 优先回答该问题并遵循其分析侧重点与输出格式; "
+            "若提供的数据不足以回答, 明确指出缺失信息。\n"
             f"<expert_market_payload>{encoded}</expert_market_payload>"
         )
 

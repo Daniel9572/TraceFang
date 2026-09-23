@@ -24,6 +24,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { marketApi } from "./api";
+import { reasoningEffortLabel, resolveAiPreferences, type ExpertAiPreferences } from "./expertAiPreferences";
 import {
   buildExpertAnalysisAt,
   buildExpertIndicatorSeriesAt,
@@ -82,6 +83,7 @@ import {
 } from "./expertSessions";
 import type {
   ExpertAiAnalysis,
+  ExpertAiModel,
   ExpertAiStatus,
   ExpertDrawingSnapMode,
   ExpertDrawingTool,
@@ -444,6 +446,18 @@ export function ExpertModeWorkspace({
   const [aiAnalysis, setAiAnalysis] = useState<ExpertAiAnalysis | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiModels, setAiModels] = useState<ExpertAiModel[] | null>(null);
+  const [aiModelsError, setAiModelsError] = useState<string | null>(null);
+  const [aiModelsRetry, setAiModelsRetry] = useState(0);
+  const [aiPreferences, setAiPreferences] = useState<ExpertAiPreferences>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("tracefang.ai.preferences") ?? "null");
+      if (typeof saved?.model === "string" && typeof saved?.reasoning_effort === "string") return saved;
+    } catch { /* Use the catalog default if storage is unavailable. */ }
+    return { model: "", reasoning_effort: "" };
+  });
+  const [aiAnswerContext, setAiAnswerContext] = useState<string | null>(null);
   const replaySocketRef = useRef<WebSocket | null>(null);
   const [replayBounds, setReplayBounds] = useState<ReplayFrameBounds | null>(null);
   const [replayCursor, setReplayCursor] = useState<number | null>(null);
@@ -679,6 +693,28 @@ export function ExpertModeWorkspace({
       });
     return () => { disposed = true; };
   }, []);
+
+  useEffect(() => {
+    if (intelligenceTab !== "ai" || aiStatus?.state !== "ready" || aiModels !== null) return;
+    let disposed = false;
+    setAiModelsError(null);
+    void marketApi.expertAiModels().then(({ models }) => {
+      if (disposed) return;
+      if (!models.length) throw new Error("当前账户没有可用模型，请检查 Codex 登录后重试。");
+      setAiModels(models);
+      setAiPreferences((current) => resolveAiPreferences(models, current));
+    }).catch((error) => {
+      if (!disposed) setAiModelsError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { disposed = true; };
+  }, [intelligenceTab, aiStatus?.state, aiModels, aiModelsRetry]);
+
+  useEffect(() => {
+    if (!aiModels || !aiPreferences.model) return;
+    try {
+      localStorage.setItem("tracefang.ai.preferences", JSON.stringify(aiPreferences));
+    } catch { /* Analysis works even when preference storage is unavailable. */ }
+  }, [aiModels, aiPreferences]);
 
   useEffect(() => {
     if (replayActive || intelligenceTab !== "options" || !goldOptionsApplicable) return;
@@ -1038,6 +1074,8 @@ export function ExpertModeWorkspace({
   }, [selectedOptionExpiryValue]);
   const aiReady = displayedAiStatus?.state === "ready"
     && displayedAiStatus.authenticated === true;
+  const aiSelectedModel = aiModels?.find((item) => item.model === aiPreferences.model);
+  const aiSelectionReady = !!aiSelectedModel?.reasoning_efforts.includes(aiPreferences.reasoning_effort);
 
   const toggleStrategy = (strategyId: ExpertStrategyId) => {
     setEnabledStrategies((current) => current.includes(strategyId)
@@ -1076,6 +1114,7 @@ export function ExpertModeWorkspace({
       setAiError(REPLAY_DERIVED_DOMAIN_NOTICE);
       return;
     }
+    if (aiBusy || !aiSelectionReady) return;
     setAiBusy(true);
     setAiError(null);
     try {
@@ -1083,15 +1122,20 @@ export function ExpertModeWorkspace({
         code,
         period: period.mode === "timeline" ? "1m" : period.id,
         enabled_strategies: enabledStrategies,
+        custom_prompt: aiPrompt.trim(),
+        model: aiPreferences.model,
+        reasoning_effort: aiPreferences.reasoning_effort,
       });
       setAiAnalysis(result);
+      setAiAnswerContext(`${code} · ${period.mode === "timeline" ? "1 分钟数据" : period.label} · ${aiSelectedModel?.display_name ?? aiPreferences.model} · 推理${reasoningEffortLabel(aiPreferences.reasoning_effort)}\n问题：${aiPrompt.trim() || "默认行情研判"}`);
       if (result.state !== "completed" || !result.analysis) setAiError(result.detail);
     } catch (requestError) {
       setAiError(requestError instanceof Error ? requestError.message : String(requestError));
     } finally {
       setAiBusy(false);
     }
-  }, [code, enabledStrategies, period.id, period.mode, replayActive]);
+  }, [code, enabledStrategies, period.id, period.mode, period.label, replayActive,
+    aiBusy, aiSelectionReady, aiPrompt, aiPreferences, aiSelectedModel]);
 
   const eventReferenceTime = replayCutoff ?? Date.now() / 1_000;
   const latestEvent = !importantEventsEnabled || eventReferenceTime === null
@@ -1822,17 +1866,44 @@ export function ExpertModeWorkspace({
                     : displayedAiStatus?.detail ?? "正在检测 Codex 账户状态"}</span>
                 </div>
               </div>
-              <button type="button" className="expert-ai-run" disabled={replayActive || !aiReady || aiBusy || candles.length === 0} onClick={() => void requestAiAnalysis()}>
+              <label className="expert-ai-field">
+                <span>你想分析什么？</span>
+                <textarea value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)}
+                  maxLength={8000} rows={4} disabled={replayActive || aiBusy}
+                  placeholder="例如：比较当前支撑与压力的证据，指出还缺哪些数据。留空则进行默认行情研判。" />
+              </label>
+              <div className="expert-ai-settings">
+                <label className="expert-ai-field">
+                  <span>模型</span>
+                  <select value={aiPreferences.model} disabled={replayActive || aiBusy || !aiModels}
+                    onChange={(event) => setAiPreferences(resolveAiPreferences(aiModels ?? [], { model: event.target.value }))}>
+                    {!aiModels ? <option value={aiPreferences.model}>{aiModelsError ? "模型列表不可用" : aiReady ? "正在读取可用模型…" : "等待 Codex 连接"}</option> : null}
+                    {aiModels?.map((item) => <option key={item.model} value={item.model}>{item.display_name}</option>)}
+                  </select>
+                </label>
+                <label className="expert-ai-field">
+                  <span>推理强度</span>
+                  <select value={aiPreferences.reasoning_effort} disabled={replayActive || aiBusy || !aiSelectedModel}
+                    onChange={(event) => setAiPreferences((current) => ({ ...current, reasoning_effort: event.target.value }))}>
+                    {!aiSelectedModel ? <option value={aiPreferences.reasoning_effort}>等待模型</option> : null}
+                    {aiSelectedModel?.reasoning_efforts.map((effort) => <option key={effort} value={effort}>{reasoningEffortLabel(effort)}</option>)}
+                  </select>
+                </label>
+              </div>
+              {aiModelsError ? <div className="expert-ai-error" role="alert">{aiModelsError} <button type="button" onClick={() => setAiModelsRetry((value) => value + 1)}>重试读取</button></div> : null}
+              <small className="expert-ai-quota-note">仅显示模型支持的推理强度。较高强度通常需要更长时间。</small>
+              <button type="button" className="expert-ai-run" disabled={replayActive || !aiReady || !aiSelectionReady || aiBusy || candles.length === 0} onClick={() => void requestAiAnalysis()}>
                 {!replayActive && aiBusy ? <RotateCcw className="spin" size={15} /> : <Sparkles size={15} />}
-                {replayActive ? "回放隔离中" : aiBusy ? "分析行情中" : "用当前账户分析"}
+                {replayActive ? "回放隔离中" : aiBusy ? "分析行情中" : "发送给 Codex 分析"}
               </button>
               <small className="expert-ai-quota-note">{replayActive
                 ? "不会把当前实时状态发送给 AI，也不会用当前 AI 结论解释历史回放。"
-                : "只读临时会话；发送来源、截止时间、最近 Bar 与已启用策略，会消耗本机 Codex/ChatGPT 配额。"}</small>
+                : "每次独立分析，不携带上次对话。发送你的问题、当前品种与周期、最新报价、最多 320 根 K 线、已启用策略说明及可用的黄金期权摘要；联网处理并消耗本机 Codex/ChatGPT 配额。"}</small>
               {displayedAiError ? <div className="expert-ai-error">{displayedAiError}</div> : null}
               {displayedAiAnalysis ? (
                 <div className="expert-ai-answer">
                   <header><strong>GPT 行情研判</strong><span>{displayedAiAnalysis.data_as_of ?? displayedAiAnalysis.generated_at}</span></header>
+                  {aiAnswerContext ? <p className="expert-ai-answer-context">{aiAnswerContext}</p> : null}
                   <p>{displayedAiAnalysis.analysis ?? displayedAiAnalysis.detail}</p>
                   <small>{displayedAiAnalysis.source_id} · {displayedAiAnalysis.bar_count} 根 Bar</small>
                 </div>
