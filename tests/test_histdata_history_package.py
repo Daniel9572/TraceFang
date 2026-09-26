@@ -27,6 +27,8 @@ class HistDataHistoryPackageTests(unittest.TestCase):
             / "histdata"
             / "2026-07"
         )
+        if not (package_root / "manifest.json").is_file():
+            raise unittest.SkipTest("optional local HistData package is not installed")
         loader = HistDataPackageLoader(package_root)
         cls.gold = loader.load("XAUUSD")
         cls.silver = loader.load("XAGUSD")

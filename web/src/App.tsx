@@ -551,6 +551,31 @@ export default function App() {
       if (firstCursor !== null) {
         historyCursorRef.current = firstCursor;
       }
+      // An empty chart has no visible range, so it cannot trigger edge pagination.
+      // Bootstrap once from the server cursor instead of waiting for a pan forever.
+      if (firstCursor !== null && recent.items.length === 0 && historyBackfillEnabled) {
+        historyLoadInFlightRef.current = true;
+        setHistorySyncing(true);
+        const activityId = beginHistoryActivity();
+        try {
+          const filled = await marketApi.olderCandleHistory(
+            selectedCode, selectedSource, selectedBarPeriodId, firstCursor.token, 300, controller.signal,
+          );
+          if (requestId !== candleRequestRef.current) return;
+          setCandles((current) => mergeCandleRows(filled.page.items, current));
+          historyCursorRef.current = historyPageCursor(filled.page);
+        } catch (failure) {
+          if (!isAbortError(failure) && requestId === candleRequestRef.current) {
+            setHistoryError(`首屏历史读取失败：${translateError(failure)}`);
+          }
+        } finally {
+          endHistoryActivity(activityId);
+          if (requestId === candleRequestRef.current) {
+            historyLoadInFlightRef.current = false;
+            setHistorySyncing(false);
+          }
+        }
+      }
     } catch (error) {
       if (isAbortError(error)) return;
       if (requestId !== candleRequestRef.current) return;
@@ -562,7 +587,7 @@ export default function App() {
       }
       if (requestId === candleRequestRef.current) setLoadingCandles(false);
     }
-  }, [resetHistoryActivity, selectedBarPeriodId, selectedCode, selectedSource]);
+  }, [beginHistoryActivity, endHistoryActivity, historyBackfillEnabled, resetHistoryActivity, selectedBarPeriodId, selectedCode, selectedSource]);
 
   const loadOlderCandles = useCallback(async (
     demand: HistoryDemand,

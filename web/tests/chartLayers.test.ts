@@ -84,6 +84,18 @@ test("migrates legacy drawings into the first drawing layer", () => {
   assert.deepEqual(activeDrawingLayer(workspace).drawings, [drawing]);
 });
 
+test("round-trips rectangle and Fibonacci anchors and migrates invisible legacy colors", () => {
+  let workspace = createDefaultChartLayerWorkspace();
+  for (const type of ["rectangle", "fibonacci"] as const) {
+    workspace = appendDrawingToActiveLayer(workspace, { ...drawing, id: type, type, color: "#e5edf1" });
+  }
+  const restored = readChartLayerWorkspace(JSON.stringify(workspace));
+  const objects = activeDrawingLayer(restored).drawings;
+  assert.deepEqual(objects.map((item) => item.type), ["rectangle", "fibonacci"]);
+  assert.ok(objects.every((item) => item.color === "#245c8c"));
+  assert.deepEqual(objects[0].end, drawing.end);
+});
+
 test("adds RSI without crowding an existing persisted indicator workspace", () => {
   const serialized = JSON.stringify({
     version: 1,

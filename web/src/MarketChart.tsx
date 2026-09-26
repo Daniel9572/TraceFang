@@ -59,6 +59,8 @@ import {
   type TimelineLayout,
   type TimelineSessionGap,
 } from "./chartTimeAxis";
+import { DrawingOverlay, type DrawingProjection } from "./DrawingOverlay";
+import "./chart-overlays.css";
 import { weakDrawingSnap } from "./expertDrawing";
 import type { ChartIndicatorLayer, ChartLayer } from "./chartLayers";
 import {
@@ -110,7 +112,9 @@ interface MarketChartProps {
   drawingTool?: ExpertDrawingTool | null;
   drawingSnapMode?: ExpertDrawingSnapMode;
   onDrawingCommit?: (drawing: ExpertDrawing) => void;
+  onDrawingUpdate?: (drawing: ExpertDrawing) => void;
   onIndicatorPaneResize?: (layerId: string, height: number) => void;
+  priceStatusLabel?: string;
   replayMode?: boolean;
   replayIndex?: number | null;
   replayCutoff?: number | null;
@@ -215,13 +219,6 @@ interface MacdIndicatorRuntime {
 }
 
 type IndicatorRuntime = RsiIndicatorRuntime | KdjIndicatorRuntime | MacdIndicatorRuntime;
-
-interface DrawingLayerRuntime {
-  series: Array<ISeriesApi<"Line">>;
-  priceLines: IPriceLine[];
-  priceLineOwner: MainSeriesApi;
-}
-
 interface SystemLineRuntime {
   series: Array<ISeriesApi<"Line">>;
 }
@@ -549,7 +546,9 @@ export function MarketChart({
   drawingTool = null,
   drawingSnapMode = "off",
   onDrawingCommit,
+  onDrawingUpdate,
   onIndicatorPaneResize,
+  priceStatusLabel,
   replayMode = false,
   replayIndex = null,
   replayCutoff = null,
@@ -697,7 +696,10 @@ export function MarketChart({
   const renderedCandlesRef = useRef<Candle[] | null>(null);
   const referenceLineRef = useRef<IPriceLine | null>(null);
   const eventMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const drawingLayerRuntimeRef = useRef<Map<string, DrawingLayerRuntime>>(new Map());
+  const drawingLayersRef = useRef(drawingLayers);
+  drawingLayersRef.current = drawingLayers;
+  const [drawingPositions, setDrawingPositions] = useState<DrawingProjection[]>([]);
+  const [drawingViewport, setDrawingViewport] = useState({ width: 0, height: 0 });
   const systemLineRuntimeRef = useRef<SystemLineRuntime>({ series: [] });
   const indicatorRuntimeRef = useRef<Map<string, IndicatorRuntime>>(new Map());
   const strategyPriceLinesRef = useRef<IPriceLine[]>([]);
@@ -1096,6 +1098,23 @@ export function MarketChart({
       layer.style.right = `${priceScaleWidth}px`;
       const paneHeight = Math.round(chart.panes()[0]?.getHeight() ?? 0);
       if (paneHeight > 0) layer.style.height = `${paneHeight}px`;
+      setDrawingViewport((current) => current.width === plotWidth && current.height === paneHeight ? current : { width: plotWidth, height: paneHeight });
+      const positions: DrawingProjection[] = [];
+      for (const entry of drawingLayersRef.current) {
+        if (!entry.definition.visible) continue;
+        for (const drawing of entry.definition.drawings) {
+          const startTime = nearestChartTimeForActual(drawing.start.time);
+          const endTime = nearestChartTimeForActual(drawing.end.time);
+          const x1 = startTime === null ? null : chart.timeScale().timeToCoordinate(startTime as Time);
+          const x2 = endTime === null ? null : chart.timeScale().timeToCoordinate(endTime as Time);
+          const y1 = series.priceToCoordinate(drawing.start.price);
+          const y2 = series.priceToCoordinate(drawing.end.price);
+          if (y1 === null || y2 === null) continue;
+          if (drawing.type !== "horizontal" && (x1 === null || x2 === null)) continue;
+          positions.push({ drawing, x1: x1 ?? plotWidth * .25, x2: x2 ?? plotWidth * .75, y1, y2 });
+        }
+      }
+      setDrawingPositions(positions);
       const fragment = document.createDocumentFragment();
       const timelineMode = periodRef.current.mode === "timeline";
       const plottedTimes = timelineMode ? projectedTimesRef.current : candleTimesRef.current;
@@ -1662,7 +1681,7 @@ export function MarketChart({
       timelineSeriesRef.current = null;
       referenceLineRef.current = null;
       eventMarkersRef.current = null;
-      drawingLayerRuntimeRef.current.clear();
+
       systemLineRuntimeRef.current.series = [];
       indicatorRuntimeRef.current.clear();
       strategyPriceLinesRef.current = [];
@@ -2322,46 +2341,6 @@ export function MarketChart({
     const chart = chartRef.current;
     const series = activeMainSeries();
     if (!chart || !series) return;
-    for (const runtime of drawingLayerRuntimeRef.current.values()) {
-      for (const value of runtime.series) chart.removeSeries(value);
-      for (const value of runtime.priceLines) runtime.priceLineOwner.removePriceLine(value);
-    }
-    drawingLayerRuntimeRef.current.clear();
-    for (const layer of drawingLayers) {
-      if (!layer.definition.visible) continue;
-      const runtime: DrawingLayerRuntime = { series: [], priceLines: [], priceLineOwner: series };
-      for (const drawing of layer.definition.drawings) {
-        if (drawing.type === "horizontal") {
-          runtime.priceLines.push(series.createPriceLine({
-            price: drawing.start.price,
-            color: drawing.color,
-            lineWidth: 2,
-            lineStyle: LineStyle.Dashed,
-            axisLabelVisible: true,
-            title: drawing.label,
-          }));
-          continue;
-        }
-        const startTime = nearestChartTimeForActual(drawing.start.time);
-        const endTime = nearestChartTimeForActual(drawing.end.time);
-        if (startTime === null || endTime === null || startTime === endTime) continue;
-        const drawingSeries = chart.addSeries(LineSeries, {
-          color: drawing.color,
-          lineWidth: 2,
-          lineStyle: LineStyle.Solid,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-        });
-        const values: LineData<Time>[] = [
-          { time: startTime as Time, value: drawing.start.price },
-          { time: endTime as Time, value: drawing.end.price },
-        ].sort((left, right) => Number(left.time) - Number(right.time));
-        drawingSeries.setData(values);
-        runtime.series.push(drawingSeries);
-      }
-      drawingLayerRuntimeRef.current.set(layer.definition.id, runtime);
-    }
     refreshExpertDecorations();
   // The drawing signature owns content changes; data-range changes cover replay and history prepend.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2489,11 +2468,11 @@ export function MarketChart({
 
   useEffect(() => {
     const refreshCountdown = () => {
-      const value = replayMode
+      const value = priceStatusLabel ?? (replayMode
         ? "回放"
         : marketPhase === "closed"
         ? "休市"
-        : formatBarCountdown(secondsUntilBackendBarClose(candles, period));
+        : formatBarCountdown(secondsUntilBackendBarClose(candles, period)));
       if (countdownRef.current && countdownRef.current.textContent !== value) {
         countdownRef.current.textContent = value;
       }
@@ -2502,7 +2481,7 @@ export function MarketChart({
       if (layer && price !== null) {
         layer.setAttribute(
           "aria-label",
-          replayMode
+          priceStatusLabel ? `${priceStatusLabel} ${price.toFixed(priceDigits)}` : replayMode
             ? `回放价格 ${price.toFixed(priceDigits)}`
             : marketPhase === "closed"
             ? `休市最后价 ${price.toFixed(priceDigits)}，等待下一交易时段`
@@ -2515,15 +2494,12 @@ export function MarketChart({
     if (replayMode || marketPhase === "closed") return;
     const timer = window.setInterval(refreshCountdown, 250);
     return () => window.clearInterval(timer);
-  }, [candles, marketPhase, period, priceDigits, replayMode]);
+  }, [candles, marketPhase, period, priceDigits, replayMode, priceStatusLabel]);
 
-  const pointerDrawingLocation = useCallback((event: ReactPointerEvent<HTMLDivElement>): PointerDrawingLocation | null => {
+  const drawingLocation = useCallback((x: number, y: number): PointerDrawingLocation | null => {
     const chart = chartRef.current;
     const series = activeMainSeries();
     if (!chart || !series) return null;
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const x = event.clientX - bounds.left;
-    const y = event.clientY - bounds.top;
     const chartTime = chart.timeScale().coordinateToTime(x as Coordinate);
     const price = series.coordinateToPrice(y as Coordinate);
     if (chartTime === null || price === null || !Number.isFinite(price)) return null;
@@ -2570,8 +2546,14 @@ export function MarketChart({
     return { point: { time: actualTime, price }, x, y, snapped: false };
   }, [activeMainSeries, actualTimeForChartCoordinate, bars, candleTimes, projectedTimelineData, visibleCandleCount, visibleTimelineCount]);
 
+  const pointerDrawingLocation = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return drawingLocation(event.clientX - bounds.left, event.clientY - bounds.top);
+  }, [drawingLocation]);
+
   const beginDrawing = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!drawingToolRef.current) return;
+    if (drawingDraftRef.current) return;
     const location = pointerDrawingLocation(event);
     if (!location) return;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -2611,13 +2593,13 @@ export function MarketChart({
     const tool = drawingToolRef.current;
     if (!current || !tool) return;
     const endLocation = pointerDrawingLocation(event);
-    drawingDraftRef.current = null;
-    setDrawingDraft(null);
     if (!endLocation || !onDrawingCommitRef.current) return;
     if (
-      tool === "trend"
-      && Math.hypot(current.currentX - current.startX, current.currentY - current.startY) < 4
+      tool !== "horizontal"
+      && Math.hypot(endLocation.x - current.startX, endLocation.y - current.startY) < 4
     ) return;
+    drawingDraftRef.current = null;
+    setDrawingDraft(null);
     const end = tool === "horizontal"
       ? { ...endLocation.point, price: current.start.price }
       : endLocation.point;
@@ -2626,8 +2608,8 @@ export function MarketChart({
       type: tool,
       start: current.start,
       end,
-      color: tool === "horizontal" ? "#d5a84b" : "#e5edf1",
-      label: tool === "horizontal" ? "手动画线" : "趋势线",
+      color: "#245c8c",
+      label: ({ horizontal: "水平线", trend: "趋势线", rectangle: "矩形区间", fibonacci: "斐波那契" })[tool],
     });
   }, [pointerDrawingLocation]);
 
@@ -2635,6 +2617,8 @@ export function MarketChart({
     drawingDraftRef.current = null;
     setDrawingDraft(null);
   }, []);
+
+  useEffect(() => { cancelDrawing(); }, [drawingTool, period.id, cancelDrawing]);
 
   const returnToRealtime = () => {
     const chart = chartRef.current;
@@ -2651,11 +2635,11 @@ export function MarketChart({
     }, 420);
   };
 
-  const renderedCountdown = replayMode
+  const renderedCountdown = priceStatusLabel ?? (replayMode
     ? "回放"
     : marketPhase === "closed"
     ? "休市"
-    : formatBarCountdown(secondsUntilBackendBarClose(candles, period));
+    : formatBarCountdown(secondsUntilBackendBarClose(candles, period)));
   const markerStyle = {
     "--live-color": liveColor,
   } as CSSProperties;
@@ -2681,13 +2665,15 @@ export function MarketChart({
         className="expert-chart-overlays"
         aria-label="专家分析图层"
       />
+      <DrawingOverlay items={drawingPositions} {...drawingViewport} enabled={!drawingTool}
+        onUpdate={onDrawingUpdate} locate={(x, y) => drawingLocation(x, y)?.point ?? null} />
       {drawingsVisible && drawingTool ? (
         <div
           className="chart-drawing-surface"
           data-tool={drawingTool}
           style={mainPaneHeight === null ? undefined : { height: `${mainPaneHeight}px`, bottom: "auto" }}
           role="application"
-          aria-label={drawingTool === "horizontal" ? "点击价格位置绘制水平线" : "拖动绘制趋势线"}
+          aria-label={drawingTool === "horizontal" ? "点击价格位置绘制水平线" : "点击起点和终点，或拖动绘制"}
           onPointerDown={beginDrawing}
           onPointerMove={updateDrawing}
           onPointerUp={finishDrawing}
@@ -2699,12 +2685,17 @@ export function MarketChart({
         >
           {drawingDraft ? (
             <svg className="chart-drawing-preview" aria-hidden="true">
-              <line
+              {drawingTool === "rectangle" ? <rect
+                x={Math.min(drawingDraft.startX, drawingDraft.currentX)}
+                y={Math.min(drawingDraft.startY, drawingDraft.currentY)}
+                width={Math.abs(drawingDraft.currentX - drawingDraft.startX)}
+                height={Math.abs(drawingDraft.currentY - drawingDraft.startY)}
+                fill="rgba(36,92,140,.08)" stroke="#245c8c" /> : <line
                 x1={drawingDraft.startX}
                 y1={drawingDraft.startY}
                 x2={drawingDraft.currentX}
                 y2={drawingDraft.currentY}
-              />
+              />}
               {drawingDraft.startSnapped ? (
                 <circle className="is-snapped" cx={drawingDraft.startX} cy={drawingDraft.startY} r="4" />
               ) : null}
@@ -2720,7 +2711,7 @@ export function MarketChart({
           ref={liveLayerRef}
           className={`live-price-layer ${marketPhase === "closed" || replayMode ? "is-market-closed" : ""}`}
           style={markerStyle}
-          aria-label={replayMode
+          aria-label={priceStatusLabel ? `${priceStatusLabel} ${livePrice.toFixed(priceDigits)}` : replayMode
             ? `回放价格 ${livePrice.toFixed(priceDigits)}`
             : marketPhase === "closed"
             ? `休市最后价 ${livePrice.toFixed(priceDigits)}，等待下一交易时段`

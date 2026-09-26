@@ -285,7 +285,7 @@ export interface ExpertEventAssessment {
   evidence: string[];
 }
 
-export type ExpertDrawingTool = "trend" | "horizontal";
+export type ExpertDrawingTool = "trend" | "horizontal" | "rectangle" | "fibonacci";
 export type ExpertDrawingSnapMode = "off" | "weak";
 
 export interface ExpertDrawingPoint {

@@ -56,6 +56,7 @@ from tracefang.application.realtime_bars import (
     RealtimeBarService,
 )
 from tracefang.application.replay import FrameDecoder, MarketReplayProjector
+from tracefang.application.research import ResearchDataService
 from tracefang.application.sources import (
     MarketSourceManager,
     ProviderProbe,
@@ -129,6 +130,7 @@ from tracefang.instruments import (
     direct_requirements,
     instrument_definition,
 )
+from tracefang.research_api import ResearchAnalysisJobs, research_router
 
 _repo_root = Path(__file__).resolve().parents[2]
 load_project_environment(_repo_root)
@@ -168,6 +170,15 @@ class Runtime:
 
 
 runtime = Runtime()
+research_jobs = ResearchAnalysisJobs()
+research_data: ResearchDataService | None = None
+
+
+def _research_data() -> ResearchDataService:
+    global research_data
+    if research_data is None:
+        research_data = ResearchDataService(_source_store_path().parent / "research.sqlite3")
+    return research_data
 
 
 async def _close_expert_context_providers() -> None:
@@ -370,12 +381,29 @@ class ExpertAiAnalyzeRequest(BaseModel):
     code: _ExpertCode = "XAUUSD"
     period: _ExpertPeriod = "15m"
     custom_prompt: str = Field(default="", max_length=8000)
-    model: Annotated[str, StringConstraints(
-        strip_whitespace=True, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][\w./:-]*$",
-    )] | None = None
-    reasoning_effort: Annotated[str, StringConstraints(
-        min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]*$",
-    )] | None = None
+    model: (
+        Annotated[
+            str,
+            StringConstraints(
+                strip_whitespace=True,
+                min_length=1,
+                max_length=128,
+                pattern=r"^[a-zA-Z0-9][\w./:-]*$",
+            ),
+        ]
+        | None
+    ) = None
+    reasoning_effort: (
+        Annotated[
+            str,
+            StringConstraints(
+                min_length=1,
+                max_length=32,
+                pattern=r"^[a-z][a-z0-9_-]*$",
+            ),
+        ]
+        | None
+    ) = None
     enabled_strategies: list[ExpertStrategyId] = Field(
         default_factory=list,
         max_length=EXPERT_STRATEGY_COUNT,
@@ -389,6 +417,7 @@ def _source_store_path() -> Path:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global research_data
     frame_store: FrameStore | None = None
     frame_sink: JetStreamRawFrameSink | None = None
     runtime.frame_store_setup_error = None
@@ -714,9 +743,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         writer=runtime.persistence,
     )
     runtime.market_data_recovery = (
-        MarketDataRecoveryCoordinator(runtime.realtime_bars)
-        if kline_store is not None
-        else None
+        MarketDataRecoveryCoordinator(runtime.realtime_bars) if kline_store is not None else None
     )
     runtime.bar_contracts = bar_contracts
     runtime.period_bars = PeriodBarService(runtime.realtime_bars, store=kline_store)
@@ -947,10 +974,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         for instrument, source_id in hydration_targets:
             rows = await runtime.realtime_bars.hydrate(instrument, source_id=source_id)
             definition = definition_for_instrument(instrument)
-            if (
-                runtime.market_data_recovery is not None
-                and definition.history_backfill_supported
-            ):
+            if runtime.market_data_recovery is not None and definition.history_backfill_supported:
                 runtime.market_data_recovery.register_series(
                     instrument,
                     source_id=source_id,
@@ -971,6 +995,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await research_jobs.close()
+        if research_data is not None:
+            await research_data.close()
+            research_data = None
         await _close_expert_context_providers()
     if runtime.acquisition is not None:
         await runtime.acquisition.stop()
@@ -2199,6 +2227,9 @@ async def quote_stream(websocket: WebSocket, code: str) -> None:
                 await websocket.send_json(jsonable_encoder(asdict(event)))
     except WebSocketDisconnect:
         return
+
+
+app.include_router(research_router(_research_data, _expert_ai, research_jobs))
 
 
 @app.api_route(

@@ -152,7 +152,7 @@ function indicatorHeight(value: unknown): number {
 function validDrawing(value: unknown): value is ExpertDrawing {
   if (!isRecord(value) || !isRecord(value.start) || !isRecord(value.end)) return false;
   return typeof value.id === "string"
-    && (value.type === "trend" || value.type === "horizontal")
+    && (["trend", "horizontal", "rectangle", "fibonacci"].includes(String(value.type)))
     && Number.isFinite(value.start.time)
     && Number.isFinite(value.start.price)
     && Number.isFinite(value.end.time)
@@ -163,7 +163,7 @@ function parseDrawings(value: unknown): ExpertDrawing[] {
   if (!Array.isArray(value)) return [];
   return value.filter(validDrawing).map((drawing) => ({
     ...drawing,
-    color: typeof drawing.color === "string" ? drawing.color : "#e5edf1",
+    color: typeof drawing.color === "string" && drawing.color !== "#e5edf1" ? drawing.color : "#245c8c",
     label: typeof drawing.label === "string" ? drawing.label : "画线",
   }));
 }

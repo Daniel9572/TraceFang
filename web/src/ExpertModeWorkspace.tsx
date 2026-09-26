@@ -1,3 +1,4 @@
+import { DrawingControls, replaceDrawing, useDrawingHistory } from "./DrawingControls";
 import {
   Activity,
   BookOpen,
@@ -424,14 +425,15 @@ export function ExpertModeWorkspace({
   const strategyWarmupBars = enabledStrategyWarmupBars(enabledStrategies);
   const [selectedStrategyId, setSelectedStrategyId] = useState<ExpertStrategyId | null>(null);
   const [capitalDominanceEnabled, setCapitalDominanceEnabled] = useState(readCapitalDominanceStrategy);
-  const setLayerWorkspace = onLayerWorkspaceChange;
+  const drawingHistory = useDrawingHistory(layerWorkspace, onLayerWorkspaceChange, code);
+  const setLayerWorkspace = drawingHistory.change;
   const sessionLayerNormalizedRef = useRef(false);
-  const [layerManagerOpen, setLayerManagerOpen] = useState(true);
+  const [layerManagerOpen, setLayerManagerOpen] = useState(false);
   const [drawingTool, setDrawingTool] = useState<ExpertDrawingTool | null>(null);
   const [drawingSnapMode, setDrawingSnapMode] = useState<ExpertDrawingSnapMode>("weak");
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [backtestRevision, setBacktestRevision] = useState(0);
-  const [intelligenceTab, setIntelligenceTab] = useState<"signals" | "options" | "ai">("signals");
+  const [intelligenceTab, setIntelligenceTab] = useState<"signals" | "strategies" | "options" | "ai">("signals");
   const [optionsStatus, setOptionsStatus] = useState<ExpertOptionsStatus | null>(null);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [selectedOptionExpiryKey, setSelectedOptionExpiryKey] = useState<string | null>(null);
@@ -1252,7 +1254,7 @@ export function ExpertModeWorkspace({
                 : replayState === "completed"
                   ? "回放完成"
                   : "回放已停止"
-              : marketPhase === "closed" ? "休市" : "实时"}</strong>
+              : sourceState !== "live" ? "等待行情" : marketPhase === "closed" ? "休市" : "实时"}</strong>
             <small>{replayActive ? REPLAY_RATE_LABEL : historyActivityVisible ? `历史加载中 · ${sourceLabel}` : sourceLabel}</small>
           </div>
         </div>
@@ -1328,6 +1330,9 @@ export function ExpertModeWorkspace({
       </aside>
 
       <main className="expert-chart-stage">
+        <DrawingControls workspace={layerWorkspace} tool={drawingTool} onTool={setDrawingTool}
+          snap={drawingSnapMode} onSnap={setDrawingSnapMode} history={drawingHistory}
+          onManageLayers={() => setLayerManagerOpen((current) => !current)} />
         <div className="expert-chart-readout">
           <div>
             <span>{displayedBar ? formatDateTimeInTimeZone(displayedBar.time, displayTimeZone) : "等待行情"}</span>
@@ -1405,6 +1410,7 @@ export function ExpertModeWorkspace({
           layers={chartLayers}
           drawingTool={drawingTool}
           drawingSnapMode={drawingSnapMode}
+          onDrawingUpdate={(drawing) => setLayerWorkspace((current) => replaceDrawing(current, drawing, drawing.id))}
           onDrawingCommit={(drawing) => {
             setLayerWorkspace((current) => appendDrawingToActiveLayer(current, drawing));
             setDrawingTool(null);
@@ -1424,7 +1430,7 @@ export function ExpertModeWorkspace({
       </main>
 
       <aside className="expert-intelligence" aria-label="策略与智能分析">
-        <section className="expert-strategy-stack">
+        {intelligenceTab === "strategies" ? <section className="expert-strategy-stack">
           <header><div><Layers3 size={15} /><strong>策略层</strong></div><span>{enabledStrategies.length + Number(capitalDominanceEnabled) + Number(importantEventsEnabled) + Number(openingGapEnabled)}/{EXPERT_STRATEGIES.length + 3}</span></header>
           <div className="expert-strategy-list">
             <button
@@ -1526,9 +1532,12 @@ export function ExpertModeWorkspace({
               );
             })}
           </div>
-        </section>
+        </section> : null}
 
         <div className="expert-intelligence-tabs" role="tablist" aria-label="智能分析类别">
+          <button type="button" role="tab" aria-selected={intelligenceTab === "strategies"}
+            className={intelligenceTab === "strategies" ? "is-active" : ""}
+            onClick={() => setIntelligenceTab("strategies")}>策略</button>
           <button
             type="button"
             id="expert-intelligence-tab-signals"
