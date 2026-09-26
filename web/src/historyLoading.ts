@@ -29,6 +29,7 @@ export type HistoryLoadOutcome = {
 
 export interface HistoryDemandResolution {
   active: boolean;
+  stopped: boolean;
   emptyAdvanceMinutes: number;
   retryAfterMs?: number;
 }
@@ -54,7 +55,7 @@ export function resolveHistoryDemandOutcome(
   outcome: HistoryLoadOutcome,
 ): HistoryDemandResolution {
   if (outcome.state === "loaded") {
-    return { active: true, emptyAdvanceMinutes: 0 };
+    return { active: true, stopped: false, emptyAdvanceMinutes: 0 };
   }
   if (outcome.state === "advanced") {
     const nextEmptyAdvance = emptyAdvanceMinutes + Math.max(0, outcome.advancedMinutes);
@@ -63,6 +64,7 @@ export function resolveHistoryDemandOutcome(
       // this browser demand. A later real drag can explicitly request the next
       // bounded step; chart redraws must not form a request waterfall.
       active: false,
+      stopped: true,
       emptyAdvanceMinutes: nextEmptyAdvance,
       retryAfterMs: outcome.retryAfterMs,
     };
@@ -70,11 +72,12 @@ export function resolveHistoryDemandOutcome(
   if (outcome.state === "busy") {
     return {
       active: true,
+      stopped: false,
       emptyAdvanceMinutes,
       retryAfterMs: outcome.retryAfterMs,
     };
   }
-  return { active: false, emptyAdvanceMinutes };
+  return { active: false, stopped: true, emptyAdvanceMinutes };
 }
 
 export function historyDemandBars(
@@ -295,10 +298,11 @@ export function shouldActivateOlderHistoryDemand(
   dataLength: number,
   userInitiated: boolean,
   confirmedAdvanceMinutes = 0,
+  stopped = false,
 ): boolean {
   if (!range || !isNearOlderHistoryEdge(range, dataLength)) return false;
   const wholeLoadedSeriesIsVisible = range.to >= dataLength - 1;
-  return userInitiated || (wholeLoadedSeriesIsVisible && confirmedAdvanceMinutes <= 0);
+  return userInitiated || (!stopped && wholeLoadedSeriesIsVisible && confirmedAdvanceMinutes <= 0);
 }
 
 export function historyDemandFor(

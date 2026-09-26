@@ -607,6 +607,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
   white-space: normal;
 }
 .history-loading-indicator.is-error svg { flex: 0 0 auto; color: #d78a35; animation: none; }
+.history-loading-indicator.is-error button { pointer-events: auto; flex: 0 0 auto; padding: 3px 6px; border: 1px solid #e8c9b4; border-radius: 3px; color: #864e2c; background: #fff; cursor: pointer; }
 
 .spin { animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

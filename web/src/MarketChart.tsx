@@ -103,6 +103,7 @@ interface MarketChartProps {
   marketPhase: MarketPhase;
   marketSchedule: MarketSchedule | null | undefined;
   historyLoading: boolean;
+  historyResetKey?: number;
   onRequestOlderHistory: (demand: HistoryDemand) => Promise<HistoryLoadOutcome>;
   onRequestHistoryGap: (window: HistoryWindow) => Promise<void>;
   onHover: (value: HoverCandle | null) => void;
@@ -537,6 +538,7 @@ export function MarketChart({
   marketPhase,
   marketSchedule,
   historyLoading,
+  historyResetKey = 0,
   onRequestOlderHistory,
   onRequestHistoryGap,
   onHover,
@@ -721,10 +723,13 @@ export function MarketChart({
   const returningRef = useRef(false);
   const returnTimerRef = useRef<number | null>(null);
   const historyInteractionUntilRef = useRef(0);
+  const historyWheelUntilRef = useRef(0);
   const historyLoadingRef = useRef(historyLoading);
   const requestOlderHistoryRef = useRef(onRequestOlderHistory);
   const requestHistoryGapRef = useRef(onRequestHistoryGap);
   const historyDemandActiveRef = useRef(false);
+  const historyDemandStoppedRef = useRef(false);
+  const historyDemandEpochRef = useRef(0);
   const historyRequestPendingRef = useRef(false);
   const historyRetryTimerRef = useRef<number | null>(null);
   const indicatorWarmupBarsRef = useRef(indicatorWarmupBars);
@@ -1503,7 +1508,11 @@ export function MarketChart({
       }
     });
 
-    const markHistoryInteraction = () => {
+    const markHistoryInteraction = (newGesture = false) => {
+      // A failed request consumes the current gesture, including drag/momentum
+      // events still arriving after the failure. A fresh gesture can retry.
+      if (historyDemandStoppedRef.current && !newGesture) return;
+      if (newGesture) historyDemandStoppedRef.current = false;
       historyInteractionUntilRef.current = window.performance.now() + 800;
     };
     const repairVisibleCandleGaps = (range: LogicalRange) => {
@@ -1529,23 +1538,29 @@ export function MarketChart({
     const runOlderHistoryRequest = (demand: HistoryDemand) => {
       if (historyRequestPendingRef.current || historyLoadingRef.current) return;
       historyRequestPendingRef.current = true;
+      const epoch = historyDemandEpochRef.current;
       let nextEvaluationDelay: number | null = null;
       void Promise.resolve(requestOlderHistoryRef.current(demand))
         .then((outcome) => {
-          if (chartRef.current !== chart) return;
+          if (chartRef.current !== chart || historyDemandEpochRef.current !== epoch) return;
           const resolution = resolveHistoryDemandOutcome(
             emptyHistoryAdvanceMinutesRef.current,
             outcome,
           );
           emptyHistoryAdvanceMinutesRef.current = resolution.emptyAdvanceMinutes;
           historyDemandActiveRef.current = resolution.active;
+          historyDemandStoppedRef.current = resolution.stopped;
+          if (resolution.stopped) historyInteractionUntilRef.current = 0;
           nextEvaluationDelay = nextHistoryDemandEvaluationDelay(outcome, resolution);
         })
         .catch(() => {
-          if (chartRef.current === chart) historyDemandActiveRef.current = false;
+          if (chartRef.current !== chart || historyDemandEpochRef.current !== epoch) return;
+          historyDemandActiveRef.current = false;
+          historyDemandStoppedRef.current = true;
+          historyInteractionUntilRef.current = 0;
         })
         .finally(() => {
-          if (chartRef.current !== chart) return;
+          if (chartRef.current !== chart || historyDemandEpochRef.current !== epoch) return;
           historyRequestPendingRef.current = false;
           if (!historyDemandActiveRef.current || nextEvaluationDelay === null) return;
           if (historyRetryTimerRef.current !== null) {
@@ -1575,6 +1590,7 @@ export function MarketChart({
         dataLengthRef.current,
         userInitiated,
         emptyHistoryAdvanceMinutesRef.current,
+        historyDemandStoppedRef.current,
       )) {
         historyDemandActiveRef.current = true;
       }
@@ -1626,10 +1642,12 @@ export function MarketChart({
       }
     };
     const handlePointerDown = () => {
-      markHistoryInteraction();
+      markHistoryInteraction(true);
     };
     const handleWheel = () => {
-      markHistoryInteraction();
+      const now = window.performance.now();
+      markHistoryInteraction(now > historyWheelUntilRef.current);
+      historyWheelUntilRef.current = now + 250;
       scheduleLiveMarker();
       refreshExpertDecorations();
     };
@@ -1699,6 +1717,9 @@ export function MarketChart({
       candleSeriesRenderStateRef.current = null;
       renderedCandlesRef.current = null;
       historyDemandActiveRef.current = false;
+      historyDemandStoppedRef.current = false;
+      historyInteractionUntilRef.current = 0;
+      historyWheelUntilRef.current = 0;
       historyRequestPendingRef.current = false;
       historyRetryTimerRef.current = null;
       emptyHistoryAdvanceMinutesRef.current = 0;
@@ -1726,17 +1747,23 @@ export function MarketChart({
     candleSeriesGaps,
     chartData.length,
     historyLoading,
+    historyResetKey,
     period.id,
   ]);
 
   useEffect(() => {
+    historyDemandEpochRef.current += 1;
     historyDemandActiveRef.current = false;
+    historyDemandStoppedRef.current = false;
+    historyRequestPendingRef.current = false;
+    historyInteractionUntilRef.current = 0;
+    historyWheelUntilRef.current = 0;
     emptyHistoryAdvanceMinutesRef.current = 0;
     if (historyRetryTimerRef.current !== null) {
       window.clearTimeout(historyRetryTimerRef.current);
       historyRetryTimerRef.current = null;
     }
-  }, [period.id, realtimeBarStreamKey]);
+  }, [period.id, realtimeBarStreamKey, historyResetKey]);
 
   useEffect(() => {
     if (replayMode) return;

@@ -273,6 +273,7 @@
 
 .expert-chart-message { position: absolute; z-index: 12; top: 50%; left: 50%; display: flex; align-items: center; gap: 7px; padding: 8px 12px; border: 1px solid #dce4ef; border-radius: 7px; color: var(--expert-muted); background: rgba(255, 255, 255, .94); box-shadow: 0 5px 18px rgba(48, 62, 81, .1); font-size: 9px; transform: translate(-50%, -50%); }
 .expert-chart-message.is-error { color: #bc5261; border-color: #efc7ce; }
+.expert-chart-message.is-error button { flex: 0 0 auto; padding: 4px 7px; border: 1px solid #efc7ce; border-radius: 4px; color: #a34553; background: #fff; cursor: pointer; }
 .expert-drawing-hint { position: absolute; z-index: 12; bottom: 38px; left: 50%; padding: 6px 10px; border: 1px solid #cbd8ef; border-radius: 6px; color: #4669ad; background: rgba(247, 250, 255, .95); font-size: 8px; transform: translateX(-50%); pointer-events: none; }
 
 .expert-intelligence { grid-area: intelligence; display: flex; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid #e3e8ef; background: #fbfcfe; }

@@ -68,6 +68,31 @@ test("turns one display gap into the exact missing minute window", () => {
   });
 });
 
+test("stops failed or exhausted initial fills across redraws until a fresh user demand", () => {
+  const range = { from: -12, to: 50 };
+  for (const state of ["failed", "exhausted"] as const) {
+    const resolution = resolveHistoryDemandOutcome(0, {
+      state, added: 0, advancedMinutes: 0,
+    });
+    assert.equal(resolution.active, false);
+    for (let redraw = 0; redraw < 100; redraw += 1) {
+      assert.equal(shouldActivateOlderHistoryDemand(
+        range, 50, false, resolution.emptyAdvanceMinutes, resolution.stopped,
+      ), false);
+    }
+    assert.equal(shouldActivateOlderHistoryDemand(
+      range, 50, true, resolution.emptyAdvanceMinutes, resolution.stopped,
+    ), true);
+    const recovered = resolveHistoryDemandOutcome(0, {
+      state: "loaded", added: 250, advancedMinutes: 250,
+    });
+    assert.equal(recovered.stopped, false);
+    assert.equal(shouldActivateOlderHistoryDemand(
+      { from: -12, to: 300 }, 300, false, recovered.emptyAdvanceMinutes, recovered.stopped,
+    ), true);
+  }
+});
+
 test("continues past a final local page using its earliest Bar as the next cursor", () => {
   assert.deepEqual(historyPageCursor({
     next_cursor: "opaque-page-2",

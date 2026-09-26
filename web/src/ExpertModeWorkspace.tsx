@@ -155,6 +155,8 @@ interface ExpertModeWorkspaceProps {
     update: (current: ChartLayerWorkspace) => ChartLayerWorkspace,
   ) => void;
   historyLoading: boolean;
+  historyResetKey?: number;
+  onRetryHistory?: () => void;
   historyActivityVisible: boolean;
   loading: boolean;
   error: string | null;
@@ -410,6 +412,8 @@ export function ExpertModeWorkspace({
   layerWorkspace,
   onLayerWorkspaceChange,
   historyLoading,
+  historyResetKey,
+  onRetryHistory,
   historyActivityVisible,
   loading,
   error,
@@ -1391,6 +1395,7 @@ export function ExpertModeWorkspace({
           marketPhase={marketPhase}
           marketSchedule={marketSchedule}
           historyLoading={replayActive ? false : historyLoading}
+          historyResetKey={historyResetKey}
           onRequestOlderHistory={replayActive
             ? async () => ({ state: "exhausted", added: 0, advancedMinutes: 0 })
             : (demand) => onRequestOlderHistory({
@@ -1420,7 +1425,7 @@ export function ExpertModeWorkspace({
           }}
         />
         {loading && candles.length === 0 ? <div className="expert-chart-message"><RotateCcw className="spin" size={18} />正在读取{instrumentName}</div> : null}
-        {error ? <div className="expert-chart-message is-error">{error}</div> : null}
+        {error ? <div className="expert-chart-message is-error" role="alert"><span>{error}</span>{onRetryHistory ? <button type="button" disabled={loading || historyLoading} onClick={onRetryHistory}>重试历史</button> : null}</div> : null}
         {drawingTool ? (
           <div className="expert-drawing-hint">
             {currentDrawingLayer.name} · {drawingTool === "trend" ? "在图上拖动两个锚点" : "点击目标价格位置"}

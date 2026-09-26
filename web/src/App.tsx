@@ -364,6 +364,7 @@ export default function App() {
   const watchlistQuoteStreamsRef = useRef(
     new Map<string, { sourceId: SourceId; stop: () => void }>(),
   );
+  const watchQuoteSnapshotRetryRef = useRef(new Map<string, number>());
 
   const beginHistoryActivity = useCallback((): number => {
     const activityId = ++nextHistoryActivityIdRef.current;
@@ -1065,7 +1066,7 @@ export default function App() {
   }, [refreshSourceSnapshot, sources]);
 
   useEffect(() => {
-    if (!instrumentSourcesLoaded || !sourcesLoaded) return;
+    if (expertMode || !instrumentSourcesLoaded || !sourcesLoaded) return;
     const missing = instruments.filter(
       (item) => item.provider_code !== selectedCode && !watchQuotes[item.provider_code],
     );
@@ -1075,12 +1076,22 @@ export default function App() {
         const source = instrumentSources[item.provider_code] ?? "jin10_client";
         const descriptor = sourceById.get(source);
         if (!descriptor || (descriptor.manual_connection_required && !descriptor.connection_active)) return;
-        const value = await marketApi.quote(item.provider_code);
-        setWatchQuotes((current) => ({ ...current, [item.provider_code]: value }));
-        setWatchPriceSeries((current) => appendWatchPriceSample(current, item.provider_code, value));
+        const key = `${source}:${item.provider_code}`;
+        if (Date.now() < (watchQuoteSnapshotRetryRef.current.get(key) ?? 0)) return;
+        // Each successful quote rerenders the watchlist. Keep the other pending
+        // or failed snapshots from being dispatched again by those renders.
+        watchQuoteSnapshotRetryRef.current.set(key, Number.POSITIVE_INFINITY);
+        try {
+          const value = await marketApi.quote(item.provider_code);
+          if (value.source_id !== source) return;
+          setWatchQuotes((current) => ({ ...current, [item.provider_code]: value }));
+          setWatchPriceSeries((current) => appendWatchPriceSample(current, item.provider_code, value));
+        } finally {
+          watchQuoteSnapshotRetryRef.current.set(key, Date.now() + 30_000);
+        }
       }),
     );
-  }, [instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded, watchQuotes]);
+  }, [expertMode, instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded, watchQuotes]);
 
   useEffect(() => {
     if (!instrumentSourcesLoaded || !sourcesLoaded) return;
@@ -1323,6 +1334,8 @@ export default function App() {
         layerWorkspace={layerWorkspace}
         onLayerWorkspaceChange={updateLayerWorkspace}
         historyLoading={chartHistoryLoading}
+        historyResetKey={candleRequestRef.current}
+        onRetryHistory={historyError || candleError ? () => void loadCandles() : undefined}
         historyActivityVisible={historyIndicatorVisible}
         loading={loadingQuote || loadingCandles}
         error={quoteError ?? candleError ?? historyError}
@@ -1694,6 +1707,7 @@ export default function App() {
             marketPhase={marketSession.phase}
             marketSchedule={selectedInstrument.market_schedule}
             historyLoading={chartHistoryLoading}
+            historyResetKey={candleRequestRef.current}
             onRequestOlderHistory={loadOlderCandles}
             onRequestHistoryGap={repairVisibleHistoryGap}
             onHover={setHover}
@@ -1719,6 +1733,7 @@ export default function App() {
             <div className="history-loading-indicator is-error" role="alert">
               <CircleHelp size={12} aria-hidden="true" />
               <span>{historyError}</span>
+              <button type="button" onClick={() => void loadCandles()}>重试历史</button>
             </div>
           ) : null}
           {loadingCandles && candles.length === 0 ? <div className="chart-state"><RefreshCw size={20} className="spin" /><strong>正在读取 K 线</strong></div> : null}

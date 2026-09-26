@@ -888,6 +888,7 @@ function MarketResearch({
             marketPhase="closed"
             marketSchedule={null}
             historyLoading={loading || olderLoading}
+            historyResetKey={refresh}
             onRequestOlderHistory={older}
             onRequestHistoryGap={async () => undefined}
             onHover={setHover}
