@@ -94,6 +94,7 @@ export interface Candle {
   low: number | string;
   close: number | string;
   volume: number | string | null;
+  open_interest?: number | null;
   source: SourceMetadata;
   evidence_channel_id: string;
   state: "provisional_quote" | "provisional_authoritative" | "final";

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { marketApi } from "./api";
 import {
   OPTION_TEMPLATES,
@@ -9,7 +9,12 @@ import {
   validatePortfolio,
   type OptionLeg,
 } from "./optionPortfolio";
-import { downloadText, researchApi } from "./researchApi";
+import {
+  downloadText,
+  researchApi,
+  type OptionMonths,
+  type OptionUnderlying,
+} from "./researchApi";
 
 const number = (value: number) =>
   Number.isNaN(value)
@@ -30,6 +35,8 @@ type Contract = {
   multiplier: number;
   currency: string;
   referenceSpot?: number | null;
+  futuresModel?: boolean;
+  source?: string;
 };
 const defaultExpiry = () =>
   new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
@@ -101,8 +108,16 @@ export function OptionsLab() {
   const [futures, setFutures] = useState(savedScenario.futures);
   const [fees, setFees] = useState(savedScenario.fees);
   const [legs, setLegs] = useState<OptionLeg[]>(readPortfolio);
-  const [chainSource, setChainSource] = useState("alpaca");
+  const [chainSource, setChainSource] = useState("akshare");
   const [symbol, setSymbol] = useState("SPY");
+  const [akSymbol, setAkSymbol] = useState("510050.SH");
+  const [underlyings, setUnderlyings] = useState<OptionUnderlying[]>([]);
+  const [months, setMonths] = useState<OptionMonths["months"]>([]);
+  const [month, setMonth] = useState("");
+  const [monthBusy, setMonthBusy] = useState(false);
+  const [monthRefresh, setMonthRefresh] = useState(0);
+  const [chainStale, setChainStale] = useState(false);
+  const chainController = useRef<AbortController | null>(null);
   const [chain, setChain] = useState<Contract[]>([]);
   const [chainFilter, setChainFilter] = useState("");
   const [chainExpiry, setChainExpiry] = useState("");
@@ -112,6 +127,42 @@ export function OptionsLab() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scenario, setScenario] = useState(savedScenario.spot);
+  useEffect(() => () => chainController.current?.abort(), []);
+  useEffect(() => {
+    if (chainSource !== "akshare") return;
+    const abort = new AbortController();
+    setMonthBusy(true);
+    setError(null);
+    setMonths([]);
+    setMonth("");
+    setChain([]);
+    setChainMessage("正在读取并核对有效合约月份与实际到期日…");
+    void Promise.all([
+      researchApi.optionUnderlyings(abort.signal),
+      researchApi.optionMonths(akSymbol, abort.signal),
+    ])
+      .then(([choices, result]) => {
+        if (abort.signal.aborted) return;
+        setUnderlyings(choices);
+        setMonths(result.months);
+        setMonth(result.months[0]?.month ?? "");
+        setChainMessage(
+          result.months.length
+            ? "已核对合约月份与实际到期日，选择月份后加载期权链。"
+            : "当前目录没有该标的的有效月份合约。",
+        );
+      })
+      .catch((failure) => {
+        if (!abort.signal.aborted)
+          setError(
+            failure instanceof Error ? failure.message : "合约月份读取失败",
+          );
+      })
+      .finally(() => {
+        if (!abort.signal.aborted) setMonthBusy(false);
+      });
+    return () => abort.abort();
+  }, [chainSource, akSymbol, monthRefresh]);
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -200,12 +251,17 @@ export function OptionsLab() {
       current.map((leg) => (leg.id === id ? { ...leg, ...values } : leg)),
     );
   const loadChain = async () => {
+    chainController.current?.abort();
+    const abort = new AbortController();
+    chainController.current = abort;
     setBusy(true);
     setError(null);
     setChain([]);
+    setChainStale(false);
     try {
       if (chainSource === "shfe") {
         const result = await marketApi.expertGoldOptions();
+        if (abort.signal.aborted) return;
         setChain(
           result.contracts.map((item) => ({
             symbol: item.contract_id,
@@ -219,6 +275,8 @@ export function OptionsLab() {
             observed: item.observed_at,
             multiplier: item.contract_multiplier,
             currency: "CNY",
+            futuresModel: true,
+            source: "上期所",
             referenceSpot: result.expiries.find(
               (entry) =>
                 entry.underlying_contract_id === item.underlying_contract_id,
@@ -230,28 +288,52 @@ export function OptionsLab() {
         );
       } else {
         const result = await researchApi.chain(
-          symbol.trim().toUpperCase(),
-          chainExpiry || undefined,
+          chainSource === "akshare" ? akSymbol : symbol.trim().toUpperCase(),
+          chainSource === "akshare" ? undefined : chainExpiry || undefined,
+          abort.signal,
+          chainSource === "akshare" ? "akshare" : "alpaca",
+          chainSource === "akshare" ? month : undefined,
         );
+        if (abort.signal.aborted) return;
+        if (
+          chainSource === "akshare" &&
+          result.contracts.some(
+            (item) =>
+              !item.multiplier ||
+              item.multiplier <= 0 ||
+              item.currency !== "CNY",
+          )
+        ) {
+          throw new Error("期权链缺少有效合约乘数或币种，无法导入策略。");
+        }
+        setChainStale(result.cache_state === "stale");
         setChain(
           result.contracts.map((item) => ({
             ...item,
             observed: item.observed_at,
-            multiplier: 100,
-            currency: "USD",
+            multiplier: item.multiplier ?? 100,
+            currency: item.currency ?? "USD",
+            referenceSpot: result.reference_spot,
+            futuresModel: result.pricing_model === "black76",
+            source: result.feed,
           })),
         );
         setChainMessage(
-          `${result.note}${result.truncated ? " 当前为部分目录，请按到期日缩小查询。" : ""}`,
+          `${result.note}${result.truncated ? " 当前为部分目录，请缩小查询。" : ""} ${(result.warnings ?? []).join(" ")} · 读取 ${new Date(result.fetched_at).toLocaleString()}`,
         );
       }
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "加载期权链失败");
+      if (!abort.signal.aborted)
+        setError(failure instanceof Error ? failure.message : "加载期权链失败");
     } finally {
-      setBusy(false);
+      if (!abort.signal.aborted) setBusy(false);
     }
   };
   const addContract = (contract: Contract, side: 1 | -1) => {
+    if (chainStale) {
+      setError("当前为过期缓存，请重新读取成功后再导入报价。");
+      return;
+    }
     const premium = (side === 1 ? contract.ask : contract.bid) ?? contract.last;
     if (premium === null) {
       setError("该合约没有可用价格，请选择有报价的合约。");
@@ -267,7 +349,7 @@ export function OptionsLab() {
       multiplier: contract.multiplier,
       contract: contract.symbol,
       underlying: contract.underlying,
-      source: `${chainSource} · ${(side === 1 ? contract.ask : contract.bid) !== null ? (side === 1 ? "卖价" : "买价") : "最后成交"}`,
+      source: `${contract.source ?? chainSource} · ${(side === 1 ? contract.ask : contract.bid) !== null ? (side === 1 ? "卖价" : "买价") : "最后成交"}`,
       currency: contract.currency,
       observedAt: contract.observed,
     };
@@ -285,7 +367,7 @@ export function OptionsLab() {
           `${current} ${price > 0 ? "已带入对应标的延迟价格作为情景初值。" : "本期权链未提供标的价格，请填写情景价格后再计算。"}`,
       );
     }
-    setFutures(chainSource === "shfe");
+    setFutures(contract.futuresModel ?? chainSource === "shfe");
     setExpiry(contract.expiry);
   };
   const useModel = () =>
@@ -378,8 +460,64 @@ export function OptionsLab() {
             >
               <option value="alpaca">Alpaca · 美股期权</option>
               <option value="shfe">上期所 · 黄金期权</option>
+              <option value="akshare">
+                AKShare · 国内 ETF / 股指 / 商品期权
+              </option>
             </select>
           </label>
+          {chainSource === "akshare" ? (
+            <>
+              <label>
+                期权标的
+                <select
+                  aria-label="国内期权标的"
+                  value={akSymbol}
+                  disabled={busy}
+                  onChange={(event) => setAkSymbol(event.target.value)}
+                >
+                  {underlyings.length ? (
+                    underlyings.map((item) => (
+                      <option key={item.symbol} value={item.symbol}>
+                        {item.name} · {item.symbol}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="510050.SH">上证50 ETF · 510050.SH</option>
+                  )}
+                </select>
+              </label>
+              <label>
+                合约月份
+                <select
+                  aria-label="期权合约月份"
+                  value={month}
+                  disabled={busy || monthBusy}
+                  onChange={(event) => {
+                    setMonth(event.target.value);
+                    setChain([]);
+                  }}
+                >
+                  {months.length ? (
+                    months.map((item) => (
+                      <option key={item.month} value={item.month}>
+                        {item.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">
+                      {monthBusy ? "读取有效月份…" : "暂无有效月份"}
+                    </option>
+                  )}
+                </select>
+              </label>
+              <button
+                disabled={busy || monthBusy}
+                onClick={() => setMonthRefresh((value) => value + 1)}
+              >
+                重读合约月份
+              </button>
+            </>
+          ) : null}
           {chainSource === "alpaca" ? (
             <>
               <label>
@@ -409,7 +547,12 @@ export function OptionsLab() {
               </label>
             </>
           ) : null}
-          <button disabled={busy} onClick={() => void loadChain()}>
+          <button
+            disabled={
+              busy || (chainSource === "akshare" && (monthBusy || !month))
+            }
+            onClick={() => void loadChain()}
+          >
             {busy ? "读取期权链…" : "加载期权链"}
           </button>
           <p className="muted">{chainMessage}</p>
@@ -447,15 +590,21 @@ export function OptionsLab() {
                       <small>
                         {item.expiry} · {item.bid ?? "—"} / {item.ask ?? "—"}
                       </small>
+                      <small>
+                        乘数 {item.multiplier} · {item.currency} ·{" "}
+                        {item.observed
+                          ? new Date(item.observed).toLocaleString()
+                          : "报价时间未提供"}
+                      </small>
                       <div>
                         <button
-                          disabled={legs.length >= 12}
+                          disabled={legs.length >= 12 || chainStale}
                           onClick={() => addContract(item, 1)}
                         >
                           买入
                         </button>
                         <button
-                          disabled={legs.length >= 12}
+                          disabled={legs.length >= 12 || chainStale}
                           onClick={() => addContract(item, -1)}
                         >
                           卖出

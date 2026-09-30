@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Mapping
-from contextlib import closing
+from contextlib import closing, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -20,6 +22,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+
+from tracefang.akshare_worker import AK_UNDERLYINGS, contract_key
 
 
 class ResearchError(Exception):
@@ -31,7 +35,7 @@ class ResearchError(Exception):
 class ResearchQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["eastmoney", "sina", "tushare", "alpaca", "tencent"]
+    source: Literal["eastmoney", "sina", "tushare", "alpaca", "tencent", "akshare"]
     symbol: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9.\-]+$")
     asset: Literal["equity", "etf", "index", "future", "option"] = "equity"
     period: Literal["1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"] = "1d"
@@ -96,6 +100,24 @@ SOURCE_SPECS = (
         "url": "https://docs.alpaca.markets/us/docs/historical-stock-data-1",
         "mode": "snapshot",
     },
+    {
+        "id": "akshare",
+        "name": "AKShare · 国内市场",
+        "assets": ["future", "option", "equity", "etf"],
+        "periods": ["1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"],
+        "asset_periods": {
+            "future": ["1m", "5m", "15m", "30m", "1h", "1d"],
+            "option": ["1d"],
+            "equity": ["1d", "1w", "1M"],
+            "etf": ["1d", "1w", "1M"],
+        },
+        "credentials": [],
+        "market": "国内股票 / ETF / 期货分钟线 / ETF、股指与商品期权",
+        "note": "股票来自东方财富, 期货与期权报价来自新浪, 合约元数据来自 OpenCTP。"
+        "分钟历史仅为来源可提供的近期窗口; 不承诺完整历史或实时推送。",
+        "url": "https://github.com/akfamily/akshare",
+        "mode": "snapshot",
+    },
 )
 
 
@@ -131,7 +153,7 @@ def research_catalog() -> list[dict[str, Any]]:
         ),
         ("tencent", "index", "CNY", [("000001.SH", "上证指数"), ("399001.SZ", "深证成指")]),
         (
-            "sina",
+            "akshare",
             "future",
             "CNY",
             [
@@ -270,6 +292,9 @@ def normalize_bars(rows: list[dict[str, Any]], query: ResearchQuery) -> tuple[li
             volume = None if row.get("volume") is None else _number(row["volume"])
             if volume is not None and volume < 0:
                 raise ValueError("negative volume")
+            open_interest = _optional_number(row.get("open_interest"))
+            if open_interest is not None and open_interest < 0:
+                open_interest = None
             iso = stamp.isoformat()
             normalized[iso] = {
                 "instrument": {
@@ -286,6 +311,7 @@ def normalize_bars(rows: list[dict[str, Any]], query: ResearchQuery) -> tuple[li
                 "low": lo,
                 "close": close,
                 "volume": volume,
+                **({"open_interest": open_interest} if query.source == "akshare" else {}),
                 "source": {
                     "provider": query.source,
                     "provider_symbol": query.symbol.upper(),
@@ -339,7 +365,8 @@ class ResearchDataService:
                 **spec,
                 "configured": all(
                     bool(self.environment.get(key, "").strip()) for key in spec["credentials"]
-                ),
+                )
+                and (spec["id"] != "akshare" or importlib.util.find_spec("akshare") is not None),
                 "diagnostic": self.diagnostics.get(spec["id"]),
             }
             for spec in SOURCE_SPECS
@@ -348,18 +375,22 @@ class ResearchDataService:
     def validate(self, query: ResearchQuery) -> None:
         spec = next(item for item in self.sources() if item["id"] == query.source)
         if not spec["configured"]:
+            if query.source == "akshare":
+                raise ResearchError("AKShare 运行依赖尚未安装, 请更新应用运行版本。", 409)
             raise ResearchError(
                 f"{spec['name']} 尚未配置。请在 .env.local 设置 "
                 + "、".join(spec["credentials"])
                 + " 后重启服务。",
                 409,
             )
-        if query.asset not in spec["assets"] or query.period not in spec["periods"]:
+        periods = spec.get("asset_periods", {}).get(query.asset, spec["periods"])
+        if query.asset not in spec["assets"] or query.period not in periods:
             raise ResearchError("该来源不支持此资产或周期, 请切换来源或周期。", 422)
         if query.source == "tencent" and query.limit > 639:
             raise ResearchError("腾讯行情每页最多 639 根, 请使用分页读取。", 422)
         if query.adjustment != "raw" and (
-            query.source not in {"eastmoney", "tencent"} or query.asset == "index"
+            query.source not in {"eastmoney", "tencent", "akshare"}
+            or query.asset not in {"equity", "etf"}
         ):
             raise ResearchError("此来源/资产仅支持不复权研究。", 422)
         patterns = {
@@ -368,6 +399,11 @@ class ResearchDataService:
             "sina": r"[A-Z]{1,3}\d{1,4}",
             "tushare": r"[A-Z0-9-]{1,28}\.(SH|SZ|BJ|SHF|DCE|CZC|CFX|INE|GFE)",
             "alpaca": r"[A-Z][A-Z0-9.]{0,29}",
+            "akshare": r"\d{6}\.(SH|SZ|BJ)"
+            if query.asset in {"equity", "etf"}
+            else r"[A-Z]{1,3}\d{1,4}"
+            if query.asset == "future"
+            else r"(?:[19]\d{7}(?:\.(?:SH|SZ))?|[A-Z]{1,3}\d{3,4}-?[CP]-?\d+(?:\.\d+)?)",
         }
         if not re.fullmatch(patterns[query.source], query.symbol.upper()):
             raise ResearchError("证券代码格式不正确, 请参考来源旁的示例。", 422)
@@ -440,6 +476,16 @@ class ResearchDataService:
                     if query.asset != "option"
                     else "期权历史至少延迟 15 分钟, 数据权限依账户而定。"
                 )
+            if query.source == "akshare":
+                warnings.append("AKShare 是采集适配器; 原始来源为东方财富或新浪, 非授权实时专线。")
+                if query.asset == "future" and query.period != "1d":
+                    warnings.append(
+                        "分钟线仅覆盖上游近期窗口; 分页耗尽不代表上市以来的历史已完整。"
+                    )
+                if query.asset == "option":
+                    warnings.append(
+                        "期权无成交日可能缺少 K 线; 请核对截止时间, 读取成功不代表最新交易日。"
+                    )
             payload = {
                 "query": query.model_dump(mode="json"),
                 "items": bars,
@@ -452,6 +498,8 @@ class ResearchDataService:
                 "warnings": warnings,
                 "volume_unit": "来源原始单位(市场定义为手/股)"
                 if query.source == "tencent"
+                else "张"
+                if query.source == "akshare" and query.asset == "option"
                 else "手"
                 if query.source != "alpaca"
                 else "张"
@@ -460,8 +508,16 @@ class ResearchDataService:
                 "currency": "USD" if query.source == "alpaca" else "CNY",
                 "feed": "IEX"
                 if query.source == "alpaca" and query.asset != "option"
+                else "AKShare / 东方财富"
+                if query.source == "akshare" and query.asset in {"equity", "etf"}
+                else "AKShare / 新浪"
+                if query.source == "akshare"
                 else query.source,
-                "frequency": "历史快照" if query.source == "alpaca" else "日频研究",
+                "frequency": "分钟快照"
+                if query.period.endswith(("m", "h"))
+                else "历史快照"
+                if query.source == "alpaca"
+                else "日频研究",
                 "empty_reason": None
                 if bars
                 else "该范围没有行情。请检查代码、上市/到期日、来源权限或向前查询。",
@@ -738,7 +794,197 @@ class ResearchDataService:
             for row in result
         ]
 
-    async def contracts(self, asset: str, exchange: str) -> list[dict]:
+    async def _akshare_call(self, operation: str, params: dict) -> Any:
+        process = None
+        try:
+            async with asyncio.timeout(35), self.gates["akshare"]:
+                delay = 0.35 - (time.monotonic() - self.last_request.get("akshare", 0))
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "tracefang.akshare_worker",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                output, _ = await process.communicate(
+                    json.dumps(
+                        {
+                            "operation": operation,
+                            "params": params,
+                        }
+                    ).encode()
+                )
+                self.last_request["akshare"] = time.monotonic()
+                if process.returncode != 0:
+                    raise ResearchError("AKShare 采集进程异常, 请重试。")
+                packet = json.loads(output)
+                if "error" in packet:
+                    raise ResearchError("AKShare 上游连接或数据格式异常, 请稍后重试。")
+                return packet["result"]
+        except TimeoutError:
+            raise ResearchError("AKShare 读取超时, 已停止本次采集; 可稍后重试。", 504) from None
+        except (OSError, ValueError, KeyError):
+            raise ResearchError("AKShare 运行环境或返回格式异常, 请更新应用后重试。") from None
+        finally:
+            if process is not None and process.returncode is None:
+                with suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+
+    async def _akshare_resource(self, operation: str, params: dict, ttl: int) -> dict:
+        key = hashlib.sha256(
+            ("ak-v2:" + operation + json.dumps(params, sort_keys=True)).encode()
+        ).hexdigest()
+        try:
+            cached = await asyncio.to_thread(self._cache, key)
+        except (sqlite3.Error, OSError, ValueError):
+            cached = None
+        if cached and time.time() - cached["cached_at"] < ttl:
+            return {**cached, "cache_state": "cached"}
+        if key not in self.inflight:
+            if len(self.inflight) >= 24:
+                raise ResearchError("数据请求较多, 请稍后重试。", 429)
+
+            async def load() -> dict:
+                try:
+                    result = await self._akshare_call(operation, params)
+                    payload = {
+                        "result": result,
+                        "cached_at": time.time(),
+                        "fetched_at": datetime.now(UTC).isoformat(),
+                        "cache_state": "fresh",
+                    }
+                    with suppress(sqlite3.Error, OSError):
+                        await asyncio.to_thread(self._cache, key, payload)
+                    return payload
+                except ResearchError:
+                    if cached:
+                        return {**cached, "cache_state": "stale"}
+                    raise
+
+            task = asyncio.create_task(load())
+            self.inflight[key] = task
+            task.add_done_callback(lambda done: self._finish(key, done))
+        return copy.deepcopy(await asyncio.shield(self.inflight[key]))
+
+    async def _akshare_bars(self, query: ResearchQuery) -> list[dict]:
+        params = {
+            **query.model_dump(mode="json"),
+            "end_date": china_history_end(query).strftime("%Y%m%d"),
+        }
+        if re.fullmatch(r"[A-Z]{1,3}\d{3}(?:-?[CP]-?\d+(?:\.\d+)?)?", query.symbol):
+            metadata = await self._akshare_resource("metadata", {}, 21600)
+            today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+            matches = [
+                row
+                for row in metadata["result"]["contracts"]
+                if contract_key(row["symbol"] if query.asset == "option" else row["underlying"])
+                == contract_key(query.symbol)
+                and row["expiry"] >= today
+            ]
+            if metadata["cache_state"] == "stale" or not matches:
+                raise ResearchError(
+                    "三位月份代码无法核对年份; 请用两位年份的新浪代码, 如 SR2701 / SR2701C4700。",
+                    422,
+                )
+            params["contract_year"] = int(matches[0]["month"][:4])
+        return await self._akshare_call("bars", params)
+
+    async def akshare_months(self, symbol: str) -> dict:
+        if symbol not in {item["symbol"] for item in AK_UNDERLYINGS}:
+            raise ResearchError("尚未支持该期权标的, 请从标的列表选择。", 422)
+        metadata = await self._akshare_resource("metadata", {}, 21600)
+        if metadata["cache_state"] == "stale":
+            raise ResearchError("合约元数据更新失败, 请稍后重试, 暂不据旧目录加载期权链。")
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        contracts = [
+            row
+            for row in metadata["result"]["contracts"]
+            if (
+                row["underlying"] == symbol
+                or re.fullmatch(re.escape(symbol) + r"\d{3,4}", row["underlying"])
+            )
+            and row["expiry"] >= today
+        ]
+        months = {}
+        for row in contracts:
+            months[row["month"]] = {
+                "month": row["month"],
+                "expiry": row["expiry"],
+                "label": f"{row['month'][:4]}-{row['month'][4:]} · 到期 {row['expiry']}",
+            }
+        return {
+            "symbol": symbol,
+            "months": [months[key] for key in sorted(months)],
+            "fetched_at": metadata["fetched_at"],
+            "contracts": contracts,
+        }
+
+    async def akshare_option_chain(self, symbol: str, month: str) -> dict:
+        try:
+            datetime.strptime(month, "%Y%m")
+        except ValueError:
+            raise ResearchError("合约月份无效。", 422) from None
+        directory = await self.akshare_months(symbol)
+        contracts = [row for row in directory["contracts"] if row["month"] == month]
+        if not contracts:
+            raise ResearchError("该标的月份没有有效合约, 请重新读取合约月份。", 404)
+        page = await self._akshare_resource(
+            "chain", {"symbol": symbol, "month": month, "contracts": contracts}, 30
+        )
+        result = {
+            **page["result"],
+            "cache_state": page["cache_state"],
+            "fetched_at": page["fetched_at"],
+        }
+        if page["cache_state"] == "stale":
+            result["warnings"] = [
+                *result["warnings"],
+                "上游读取失败, 当前为旧缓存; 暂不能导入报价。",
+            ]
+        return result
+
+    async def contracts(self, asset: str, exchange: str, source: str = "tushare") -> list[dict]:
+        if source == "akshare":
+            if asset not in {"future", "option"} or exchange not in {
+                "SSE",
+                "SZSE",
+                "SHFE",
+                "DCE",
+                "CZCE",
+                "CFFEX",
+                "INE",
+                "GFEX",
+            }:
+                raise ResearchError("AKShare 目录支持指定交易所的期权及其期货标的。", 422)
+            page = await self._akshare_resource("metadata", {}, 21600)
+            if page["cache_state"] == "stale":
+                raise ResearchError("合约元数据读取失败, 请稍后重试。")
+            today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+            rows = [
+                row
+                for row in page["result"]["contracts"]
+                if row["exchange"] == exchange and row["expiry"] >= today
+            ]
+            directory = {}
+            for row in rows:
+                if asset == "future" and exchange in {"SSE", "SZSE", "CFFEX"}:
+                    continue  # CFFEX index-option identifiers are not futures contracts.
+                symbol = row["symbol"] if asset == "option" else row["underlying"]
+                directory[symbol] = {
+                    "source": "akshare",
+                    "asset": asset,
+                    "symbol": symbol,
+                    "name": row["name"] if asset == "option" else symbol,
+                    "currency": "CNY",
+                    "expiry": row["expiry"] if asset == "option" else None,
+                }
+            return list(directory.values())[:6000]
+        if source != "tushare":
+            raise ResearchError("目录来源无效。", 422)
         if not self.environment.get("TUSHARE_TOKEN"):
             raise ResearchError("请配置 TUSHARE_TOKEN 后同步合约目录。", 409)
         if asset not in {"equity", "future", "option"}:

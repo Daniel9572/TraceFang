@@ -7,12 +7,14 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from tracefang.akshare_worker import AK_UNDERLYINGS
 from tracefang.application.expert_ai import CodexExpertAnalysisService
 from tracefang.application.research import (
     ResearchDataService,
@@ -34,6 +36,7 @@ def technical_evidence(bars: list[dict]) -> dict:
     evidence["return_20_percent"] = (
         100 * (closes[-1] / closes[-21] - 1) if len(closes) >= 21 and closes[-21] > 0 else None
     )
+    evidence["open_interest_last"] = closed[-1].get("open_interest") if closed else None
     evidence["range_20"] = (
         {
             "low": min(row["low"] for row in closed[-20:]),
@@ -137,6 +140,7 @@ class ResearchAnalysisJobs:
                         key: row[key]
                         for key in ("open_time", "open", "high", "low", "close", "volume", "state")
                     }
+                    | {"open_interest": row.get("open_interest")}
                     for row in page["items"]
                 ],
             }
@@ -220,19 +224,44 @@ def research_router(
             raise HTTPException(error.status, str(error)) from None
 
     @router.get("/contracts")
-    async def contracts(asset: str = "future", exchange: str = "SHFE") -> list[dict]:
+    async def contracts(
+        asset: str = "future",
+        exchange: str = "SHFE",
+        source: Literal["tushare", "akshare"] = "tushare",
+    ) -> list[dict]:
         try:
-            return await data().contracts(asset, exchange)
+            return await data().contracts(asset, exchange, source)
         except ResearchError as error:
             raise HTTPException(error.status, str(error)) from None
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             raise HTTPException(502, "合约目录读取失败, 请重试或检查来源权限。") from None
 
+    @router.get("/option-underlyings")
+    async def option_underlyings() -> list[dict]:
+        return [{key: row[key] for key in ("symbol", "name", "category")} for row in AK_UNDERLYINGS]
+
+    @router.get("/option-months/{symbol}")
+    async def option_months(symbol: str) -> dict:
+        try:
+            result = await data().akshare_months(symbol.upper())
+            return {key: value for key, value in result.items() if key != "contracts"}
+        except ResearchError as error:
+            raise HTTPException(error.status, str(error)) from None
+
     @router.get("/options/{symbol}")
     async def options(
-        symbol: str, expiry: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+        symbol: str,
+        expiry: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        source: Literal["alpaca", "akshare"] = "alpaca",
+        month: str | None = Query(default=None, pattern=r"^\d{6}$"),
     ) -> dict:
         try:
+            if source == "akshare":
+                if month is None:
+                    raise ResearchError("请先选择合约月份。", 422)
+                if expiry is not None:
+                    raise ResearchError("AKShare 使用合约月份, 实际到期日由合约目录提供。", 422)
+                return await data().akshare_option_chain(symbol.upper(), month)
             return await data().option_chain(symbol.upper(), expiry)
         except ResearchError as error:
             raise HTTPException(error.status, str(error)) from None

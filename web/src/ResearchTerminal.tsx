@@ -54,6 +54,7 @@ import {
   type ResearchQuery,
   type ResearchSource,
   type ResearchSourceId,
+  sourcePeriods,
 } from "./researchApi";
 import "./research.css";
 
@@ -84,9 +85,10 @@ const EXAMPLES: Record<ResearchSourceId, string> = {
   sina: "AU0 / RB0 / AU2612",
   tushare: "600519.SH / AU2612.SHF",
   alpaca: "AAPL / SPY / OCC期权代码",
+  akshare: "AU0 / AU2612C900 / 10011425.SH / 600519.SH",
 };
 const initial: ResearchInstrument = {
-  source: "sina",
+  source: "akshare",
   symbol: "AU0",
   name: "沪金连续",
   asset: "future",
@@ -163,6 +165,7 @@ function DataCenter({
       sina: { symbol: "AU0", asset: "future" },
       tushare: { symbol: "600519.SH", asset: "equity" },
       alpaca: { symbol: "SPY", asset: "etf" },
+      akshare: { symbol: "AU0", asset: "future", period: "5m" },
     };
     try {
       const page = await researchApi.bars(
@@ -223,7 +226,14 @@ function DataCenter({
             <dl>
               <dt>原生周期</dt>
               <dd>
-                {source.periods.map((value) => PERIODS[value]).join(" / ")}
+                {source.asset_periods
+                  ? Object.entries(source.asset_periods)
+                      .map(
+                        ([kind, values]) =>
+                          `${ASSETS[kind as ResearchAsset]}：${values.map((value) => PERIODS[value]).join(" / ")}`,
+                      )
+                      .join("；")
+                  : source.periods.map((value) => PERIODS[value]).join(" / ")}
               </dd>
               <dt>代码示例</dt>
               <dd>{EXAMPLES[source.id]}</dd>
@@ -556,7 +566,11 @@ function MarketResearch({
     setCatalogBusy(true);
     setCatalogError(null);
     try {
-      const rows = await researchApi.contracts(customAsset, catalogExchange);
+      const rows = await researchApi.contracts(
+        customAsset,
+        catalogExchange,
+        customSource,
+      );
       setCatalog((current) => [
         ...new Map(
           [...current, ...rows].map((item) => [identity(item), item]),
@@ -629,7 +643,7 @@ function MarketResearch({
           ))}
           {!visible.length ? (
             <p className="muted">
-              没有匹配品种。可在下方按代码打开，或同步 Tushare 合约目录。
+              没有匹配品种。可在下方按代码打开，或同步合约目录。
             </p>
           ) : null}
         </div>
@@ -706,8 +720,10 @@ function MarketResearch({
             </label>
             <button type="submit">打开行情</button>
           </form>
-          {customSource === "tushare" &&
-          ["equity", "future", "option"].includes(customAsset) ? (
+          {(customSource === "tushare" &&
+            ["equity", "future", "option"].includes(customAsset)) ||
+          (customSource === "akshare" &&
+            ["future", "option"].includes(customAsset)) ? (
             <>
               <label>
                 交易所
@@ -725,6 +741,9 @@ function MarketResearch({
               </button>
               <small>
                 每次同步一个交易所，最多 6000 条；未列出的合约可按代码打开。
+                {customSource === "akshare"
+                  ? "期货目录仅列出具有上市期权的商品标的月份合约。"
+                  : ""}
               </small>
             </>
           ) : null}
@@ -747,7 +766,14 @@ function MarketResearch({
           </div>
           <div className="research-quote">
             <strong>
-              {format(last?.close, selected.asset === "etf" ? 3 : 2)}
+              {format(
+                last?.close,
+                selected.asset === "option"
+                  ? 4
+                  : selected.asset === "etf"
+                    ? 3
+                    : 2,
+              )}
             </strong>
             <small>{selected.currency} · 最近收盘/快照</small>
           </div>
@@ -769,7 +795,7 @@ function MarketResearch({
         </header>
         <div className="research-period-bar">
           <div>
-            {(source?.periods ?? ["1d"]).map((value) => (
+            {sourcePeriods(source, selected.asset).map((value) => (
               <button
                 key={value}
                 className={period === value ? "is-active" : ""}
@@ -779,8 +805,10 @@ function MarketResearch({
               </button>
             ))}
           </div>
-          {/^\d{6}\.(SH|SZ)$/.test(selected.symbol) &&
-          ["equity", "etf", "index"].includes(selected.asset) ? (
+          {(/^\d{6}\.(SH|SZ)$/.test(selected.symbol) &&
+            ["equity", "etf", "index"].includes(selected.asset)) ||
+          (selected.asset === "future" &&
+            /^[A-Z]{1,3}\d{1,4}$/.test(selected.symbol)) ? (
             <label>
               来源
               <select
@@ -794,8 +822,13 @@ function MarketResearch({
                 }
               >
                 {sources
-                  .filter((item) =>
-                    ["tencent", "eastmoney", "tushare"].includes(item.id),
+                  .filter(
+                    (item) =>
+                      item.assets.includes(selected.asset) &&
+                      (selected.asset === "future"
+                        ? ["sina", "akshare"]
+                        : ["tencent", "eastmoney", "tushare", "akshare"]
+                      ).includes(item.id),
                   )
                   .map((item) => (
                     <option key={item.id} value={item.id}>
@@ -810,8 +843,9 @@ function MarketResearch({
             <select
               value={adjustment}
               disabled={
-                !["eastmoney", "tencent"].includes(selected.source) ||
-                selected.asset === "index"
+                !["eastmoney", "tencent", "akshare"].includes(
+                  selected.source,
+                ) || !["equity", "etf"].includes(selected.asset)
               }
               onChange={(event) =>
                 setAdjustment(event.target.value as typeof adjustment)
@@ -863,7 +897,7 @@ function MarketResearch({
         />
         <div className="research-chart-readout">
           {hover
-            ? `${new Date(hover.time * 1000).toLocaleDateString()} · O ${format(hover.open)}  H ${format(hover.high)}  L ${format(hover.low)}  C ${format(hover.close)}`
+            ? `${new Date(hover.time * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })} · O ${format(hover.open, selected.asset === "option" ? 4 : 3)}  H ${format(hover.high, selected.asset === "option" ? 4 : 3)}  L ${format(hover.low, selected.asset === "option" ? 4 : 3)}  C ${format(hover.close, selected.asset === "option" ? 4 : 3)}`
             : "拖动查看历史 · 滚轮缩放 · 点击画线可编辑端点"}
         </div>
         <div className="research-chart-canvas">
@@ -884,7 +918,9 @@ function MarketResearch({
                 ? "America/New_York"
                 : "Asia/Shanghai"
             }
-            priceDigits={selected.asset === "etf" ? 3 : 2}
+            priceDigits={
+              selected.asset === "option" ? 4 : selected.asset === "etf" ? 3 : 2
+            }
             marketPhase="closed"
             marketSchedule={null}
             historyLoading={loading || olderLoading}
@@ -1013,6 +1049,12 @@ function MarketResearch({
                 <dd>{page?.volume_unit ?? "—"}</dd>
                 <dt>无效行</dt>
                 <dd>{page?.rejected_rows ?? "—"}</dd>
+                {selected.asset === "future" ? (
+                  <>
+                    <dt>最新持仓量</dt>
+                    <dd>{format(last?.open_interest, 0)}</dd>
+                  </>
+                ) : null}
                 <dt>已收盘样本</dt>
                 <dd>{closed.length}</dd>
               </dl>
@@ -1022,7 +1064,7 @@ function MarketResearch({
                 </p>
               ))}
               <p className="muted">
-                缺失时间不补零，不跨来源拼接。日期是来源标记的周期日期，读取时间另列。公开日线不承诺实时更新。
+                缺失时间不补零，不跨来源拼接。日期是来源标记的周期日期，读取时间另列。来源快照不承诺实时更新。
               </p>
               <button onClick={onDataCenter}>打开数据中心</button>
             </>
@@ -1172,7 +1214,7 @@ export default function ResearchTerminal() {
         </div>
         <small>研究 · 验证 · 决策</small>
       </nav>
-      {error ? (
+      {error && section !== "realtime" ? (
         <div className="research-service-error" role="alert">
           {error}
           <button onClick={reload}>重试连接</button>

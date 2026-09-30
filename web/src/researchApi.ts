@@ -6,6 +6,7 @@ export type ResearchSourceId =
   | "sina"
   | "tushare"
   | "alpaca"
+  | "akshare"
   | "tencent";
 export interface ResearchInstrument {
   source: ResearchSourceId;
@@ -20,6 +21,7 @@ export interface ResearchSource {
   name: string;
   assets: ResearchAsset[];
   periods: string[];
+  asset_periods?: Partial<Record<ResearchAsset, string[]>>;
   credentials: string[];
   configured: boolean;
   market: string;
@@ -80,6 +82,8 @@ export interface ChainContract {
   observed_at: string | null;
   iv: number | null;
   greeks: Record<string, number | null>;
+  multiplier?: number;
+  currency?: string;
 }
 export interface OptionChain {
   source: string;
@@ -89,6 +93,27 @@ export interface OptionChain {
   truncated: boolean;
   contracts: ChainContract[];
   note: string;
+  cache_state?: "fresh" | "cached" | "stale";
+  warnings?: string[];
+  pricing_model?: "black76" | "black-scholes";
+  reference_spot?: number | null;
+  reference_observed_at?: string | null;
+}
+export interface OptionUnderlying {
+  symbol: string;
+  name: string;
+  category: "etf" | "index" | "future";
+}
+export interface OptionMonths {
+  symbol: string;
+  months: Array<{ month: string; label: string; expiry: string }>;
+  fetched_at: string;
+}
+export function sourcePeriods(
+  source: ResearchSource | undefined,
+  asset: ResearchAsset,
+): string[] {
+  return source?.asset_periods?.[asset] ?? source?.periods ?? ["1d"];
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -119,13 +144,29 @@ export const researchApi = {
       body: JSON.stringify(query),
       signal,
     }),
-  contracts: (asset: ResearchAsset, exchange: string) =>
+  contracts: (
+    asset: ResearchAsset,
+    exchange: string,
+    source: ResearchSourceId = "tushare",
+  ) =>
     request<ResearchInstrument[]>(
-      `/contracts?asset=${asset}&exchange=${exchange}`,
+      `/contracts?asset=${asset}&exchange=${exchange}&source=${source}`,
     ),
-  chain: (symbol: string, expiry?: string, signal?: AbortSignal) =>
+  optionUnderlyings: (signal?: AbortSignal) =>
+    request<OptionUnderlying[]>("/option-underlyings", { signal }),
+  optionMonths: (symbol: string, signal?: AbortSignal) =>
+    request<OptionMonths>(`/option-months/${encodeURIComponent(symbol)}`, {
+      signal,
+    }),
+  chain: (
+    symbol: string,
+    expiry?: string,
+    signal?: AbortSignal,
+    source: "alpaca" | "akshare" = "alpaca",
+    month?: string,
+  ) =>
     request<OptionChain>(
-      `/options/${encodeURIComponent(symbol)}${expiry ? `?expiry=${expiry}` : ""}`,
+      `/options/${encodeURIComponent(symbol)}?source=${source}${expiry ? `&expiry=${expiry}` : ""}${month ? `&month=${month}` : ""}`,
       { signal },
     ),
   analyze: (
