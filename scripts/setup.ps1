@@ -3,8 +3,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $projectRoot
 try {
-    & (Join-Path $PSScriptRoot "initialize-local-database.ps1")
-    uv sync --python 3.13
+    uv sync --python 3.13 --frozen
     if ($LASTEXITCODE -ne 0) { throw 'Python dependency installation failed.' }
     $env:PYTHONPATH = Join-Path $projectRoot 'src'
     & (Join-Path $projectRoot '.venv\Scripts\python.exe') -m tracefang.service install --no-browser

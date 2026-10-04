@@ -54,6 +54,8 @@ class WindowsAdapterTests(unittest.TestCase):
                 patch.object(service, "SERVICE_REGISTRATION", root / "service.plist"),
                 patch.object(service, "LOG_DIRECTORY", root / "logs"),
                 patch.object(service, "virtualenv_python", return_value=root / "python.exe"),
+                patch.object(service, "backend_executable"),
+                patch.object(service, "verify_runtime_manifest", return_value={}),
                 patch.object(windows_service, "task_operation") as operation,
             ):
                 service.register_service(root)
@@ -63,7 +65,22 @@ class WindowsAdapterTests(unittest.TestCase):
     def test_windows_stop_uses_system_task_not_launchctl(self) -> None:
         with (
             patch.object(service, "IS_WINDOWS", True),
+            patch.object(service, "installed_runtime", return_value=Path("C:/TraceFang/runtime")),
             patch.object(windows_service, "task_operation") as operation,
         ):
             service.stop_backend()
-        operation.assert_called_once_with("stop")
+        operation.assert_called_once_with("stop", project_root=Path("C:/TraceFang/runtime"))
+
+    def test_windows_child_exit_status_is_propagated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(service, "IS_WINDOWS", True),
+                patch.object(service, "virtualenv_python", return_value=root / "python.exe"),
+                patch.object(windows_service, "attach_kill_on_exit_job") as attach,
+                patch.object(
+                    service.subprocess, "run", return_value=SimpleNamespace(returncode=17)
+                ),
+            ):
+                self.assertEqual(service.run_backend(root / "server.exe", project_root=root), 17)
+            attach.assert_called_once_with()

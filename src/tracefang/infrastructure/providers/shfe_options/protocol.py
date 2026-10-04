@@ -77,20 +77,20 @@ def _optional_delta(row: Mapping[str, Any]) -> Decimal | None:
     return None
 
 
-def _lots(row: Mapping[str, Any], field: str) -> int:
+def _lots(row: Mapping[str, Any], field: str) -> int | None:
     value = _optional_decimal(row, field)
     if value is None:
-        return 0
+        return None
     integral = value.to_integral_value()
     if value != integral or integral < 0:
         raise ProviderDataError(f"SHFE option field {field!r} must be non-negative lots")
     return int(integral)
 
 
-def _signed_lots(row: Mapping[str, Any], field: str) -> int:
+def _signed_lots(row: Mapping[str, Any], field: str) -> int | None:
     value = _optional_decimal(row, field)
     if value is None:
-        return 0
+        return None
     integral = value.to_integral_value()
     if value != integral:
         raise ProviderDataError(f"SHFE option field {field!r} must be integral lots")
@@ -224,14 +224,23 @@ def parse_shfe_gold_option_chain(
         raise ProviderDataError("SHFE option master and delayed quote set are inconsistent")
     if not observed_times:
         raise ProviderDataError("SHFE option feed has no observation timestamp")
+    # The exchange advances currentTradingday before publishing new quotes,
+    # especially over holidays. Day-session quotes on/before lastTradingday
+    # belong to their publication date, not the next contract-master date.
+    # Night-session quotes still belong to currentTradingday (including Friday
+    # night / Saturday morning quotes for Monday's trading session).
+    quote_time = max(item.observed_at for item in quotes).astimezone(_SHANGHAI)
+    quote_trading_day = current_trading_day
+    if quote_time.date() <= reference_date and 6 <= quote_time.hour < 18:
+        quote_trading_day = quote_time.date()
     return OptionChainSnapshot(
         provider_id="shfe_official_delayed",
         market_id="shfe_gold_options",
         market_label="上海期货交易所黄金期权",
         delivery_mode=OptionDeliveryMode.EXCHANGE_DELAYED,
-        trading_day=current_trading_day,
+        trading_day=quote_trading_day,
         reference_data_as_of=reference_date,
-        observed_at=max(observed_times),
+        observed_at=quote_time.astimezone(UTC),
         retrieved_at=retrieved_at,
         quote_currency="CNY",
         price_unit="CNY_PER_GRAM",

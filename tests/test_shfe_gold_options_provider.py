@@ -214,6 +214,51 @@ class ShfeGoldOptionsProviderTests(unittest.IsolatedAsyncioTestCase):
             elif not failed_http.is_closed:
                 await failed_http.aclose()
 
+    async def test_closed_day_quotes_do_not_inherit_next_contract_master_day(self) -> None:
+        original = _option_row
+
+        def closed_day_row(*args, **kwargs):
+            row = original(*args, **kwargs)
+            row["updatetime"] = "2026-08-07 15:25:21"
+            return row
+
+        with patch(f"{__name__}._option_row", side_effect=closed_day_row):
+            snapshot = await GoldOptionsService((self.provider,)).snapshot()
+
+        self.assertEqual(snapshot.trading_day.isoformat(), "2026-08-07")
+        self.assertEqual(snapshot.contracts[0].observed_at, datetime(2026, 8, 7, 7, 25, 21, tzinfo=UTC))
+        self.assertEqual(snapshot.observed_at, datetime(2026, 8, 7, 7, 25, 21, tzinfo=UTC))
+        self.assertEqual(snapshot.expiries[0].expected_move_percent, Decimal("6.00"))
+
+    async def test_blank_quantities_stay_missing_and_disable_partial_totals(self) -> None:
+        original = _option_row
+
+        def sparse_row(contract_id, **kwargs):
+            row = original(contract_id, **kwargs)
+            if contract_id == "au2609C920":
+                row.update(volume="", openinterest="", openinterestchg="")
+            elif contract_id == "au2609P920":
+                row["volume"] = "0"
+            return row
+
+        with patch(f"{__name__}._option_row", side_effect=sparse_row):
+            snapshot = await GoldOptionsService((self.provider,)).snapshot()
+
+        missing = next(item for item in snapshot.contracts if item.contract_id == "au2609C920")
+        zero = next(item for item in snapshot.contracts if item.contract_id == "au2609P920")
+        self.assertIsNone(missing.volume)
+        self.assertIsNone(missing.open_interest)
+        self.assertIsNone(missing.open_interest_change)
+        self.assertEqual(zero.volume, 0)
+        expiry = snapshot.expiries[0]
+        self.assertIsNone(expiry.call_volume)
+        self.assertEqual(expiry.put_volume, 5)
+        self.assertIsNone(expiry.put_call_volume_ratio)
+        self.assertIsNone(expiry.put_call_open_interest_ratio)
+        self.assertIsNone(expiry.call_wall_strike)
+        self.assertIsNone(expiry.max_pain_strike)
+        self.assertEqual(expiry.put_wall_strike, Decimal("920"))
+
     async def test_service_derives_positioning_without_fabricating_gex(self) -> None:
         service = GoldOptionsService((self.provider,))
 

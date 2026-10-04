@@ -1,3 +1,4 @@
+import {isResearchLabelOnly,mergeResearchDisplayRows,researchSourceText} from "./researchTemporal";
 import {
   lazy,
   Suspense,
@@ -17,6 +18,7 @@ import {
   Star,
 } from "lucide-react";
 import { MarketChart } from "./MarketChart";
+import { canRequestResearchHistory, resolveResearchHistoryStep } from "./historyLoading";
 import { chartPeriodById, type ChartPeriodId } from "./chartPeriods";
 import {
   activeDrawingLayer,
@@ -31,11 +33,9 @@ import {
   replaceDrawing,
   useDrawingHistory,
 } from "./DrawingControls";
-import {
-  buildExpertAnalysis,
-  buildExpertIndicatorSeriesAt,
-} from "./expertAnalysis";
-import { buildTechnicalOverlaySeries } from "./expertTechnical";
+import {projectQuantAnalysis,projectQuantSeries,projectQuantOverlays,projectQuantTrendLines} from "./quantProjection";
+import {useQuantSnapshot} from "./useQuantSnapshot";
+import {QuantSimulationPanel} from "./QuantSimulationPanel";
 import type {
   ExpertDrawingSnapMode,
   ExpertDrawingTool,
@@ -94,10 +94,7 @@ const initial: ResearchInstrument = {
   asset: "future",
   currency: "CNY",
 };
-const format = (value: unknown, digits = 2) =>
-  value !== null && value !== undefined && Number.isFinite(Number(value))
-    ? Number(value).toLocaleString("zh-CN", { maximumFractionDigits: digits })
-    : "—";
+const format = researchSourceText;
 const identity = (item: ResearchInstrument) =>
   `${item.source}:${item.asset}:${item.symbol}`;
 
@@ -330,7 +327,7 @@ function MarketResearch({
   const [olderLoading, setOlderLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
-  const [tab, setTab] = useState<"analysis" | "ai" | "data">("analysis");
+  const [tab, setTab] = useState<"analysis" | "ai" | "data" | "simulation">("analysis");
   const [strategies, setStrategies] = useState<ExpertStrategyId[]>([
     "ma-structure",
     "rsi",
@@ -365,8 +362,12 @@ function MarketResearch({
     [scope],
   );
   const history = useDrawingHistory(workspace, setWorkspace, scope);
+  const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [continuousDrawing, setContinuousDrawing] = useState(false);
   const [tool, setTool] = useState<ExpertDrawingTool | null>(null);
   const [snap, setSnap] = useState<ExpertDrawingSnapMode>("weak");
+  useEffect(() => { setTool(null); setSelectedDrawingId(null); }, [scope]);
+  useEffect(() => { if (selectedDrawingId && !workspace.layers.some((layer) => layer.kind === "drawing" && layer.drawings.some((drawing) => drawing.id === selectedDrawingId))) setSelectedDrawingId(null); }, [workspace, selectedDrawingId]);
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [stream] = useState(() => new RealtimeBarStream());
   const controller = useRef<AbortController | null>(null);
@@ -453,7 +454,7 @@ function MarketResearch({
     const current = latestPage.current;
     if (pendingOlder.current)
       return { state: "busy" as const, added: 0, advancedMinutes: 0 };
-    if (!current?.next_before || current.items.length >= 10000)
+    if (!current?.next_before || !canRequestResearchHistory(current, false))
       return { state: "exhausted" as const, added: 0, advancedMinutes: 0 };
     pendingOlder.current = true;
     setOlderLoading(true);
@@ -468,18 +469,27 @@ function MarketResearch({
       );
       if (request !== generation.current)
         return { state: "busy" as const, added: 0, advancedMinutes: 0 };
+      const labelOnly=isResearchLabelOnly(current)&&isResearchLabelOnly(result);
+      if(!labelOnly&&(!current.authority_snapshot_id||!result.authority_snapshot_id))throw new Error("研究页面缺少可核验的输入版本，无法合并历史");
+      const merged=labelOnly?null:await researchApi.mergeAuthority(current.authority_snapshot_id!,result.authority_snapshot_id!,abort.signal);
+      if(request!==generation.current)return {state:"busy" as const,added:0,advancedMinutes:0};
+      const displayRows=labelOnly?mergeResearchDisplayRows(current.items,result.items):null;
       const rows = new Map(current.items.map((row) => [row.open_time, row]));
       result.items.forEach((row) => {
         if (!rows.has(row.open_time)) rows.set(row.open_time, row);
       });
       const added = rows.size - current.items.length;
+      const step = resolveResearchHistoryStep(current.next_before, result.next_before, added);
       const updated = {
         ...current,
-        items: [...rows.values()].sort((a, b) =>
+        authority_snapshot_id:merged?.authority_snapshot_id??null,
+        authority_manifest:merged?.authority_manifest??null,
+        fetched_at:merged?.authority_manifest.fetched_at??result.fetched_at,
+        items: displayRows??[...rows.values()].sort((a, b) =>
           a.open_time.localeCompare(b.open_time),
         ),
-        next_before: added ? result.next_before : null,
-        warnings: [...new Set([...current.warnings, ...result.warnings])],
+        next_before: result.next_before,
+        warnings: [...new Set([...current.warnings, ...result.warnings,labelOnly?"已扩展原标签图表；区间未核验，没有生成可执行指标、AI或模拟版本。":"已发布包含加载历史的新研究版本，图表、指标、AI和模拟共享该输入；来源页面独立读取，不代表上游共同事务，完整预热范围仍未知。"])],
         cache_state:
           result.cache_state === "stale"
             ? ("stale" as const)
@@ -487,11 +497,7 @@ function MarketResearch({
       };
       latestPage.current = updated;
       setPage(updated);
-      return {
-        state: added ? ("loaded" as const) : ("exhausted" as const),
-        added,
-        advancedMinutes: 0,
-      };
+      return step;
     } catch (failure) {
       if (!abort.signal.aborted)
         setError(failure instanceof Error ? failure.message : String(failure));
@@ -504,18 +510,14 @@ function MarketResearch({
     }
   }, [query]);
   const candles = page?.items ?? [];
-  const closed = useMemo(
-    () => candles.filter((row) => row.state === "final"),
-    [candles],
-  );
-  const analysis = useMemo(
-    () => buildExpertAnalysis(closed, strategies, queryKey),
-    [closed, strategies, queryKey],
-  );
-  const indicatorSeries = useMemo(
-    () => buildExpertIndicatorSeriesAt(candles, candles.length - 1, queryKey),
-    [candles, queryKey],
-  );
+  const sourceRowsByTime = useMemo(() => new Map(candles.map(row => [Date.parse(row.open_time) / 1000, row])), [candles]);
+  const hoverSource = hover ? sourceRowsByTime.get(hover.time) : null;
+  const researchReference=page?.authority_snapshot_id?{research_snapshot_id:page.authority_snapshot_id,research_adjustment:adjustment,research_asset:selected.asset}:undefined;
+  const quant=useQuantSnapshot(selected.symbol,selected.source,period,`${page?.authority_snapshot_id??''}:${strategies.join(',')}`,!!researchReference,researchReference,strategies);
+  const analysis=useMemo(()=>projectQuantAnalysis(quant.snapshot),[quant.snapshot]);
+  const indicatorSeries=useMemo(()=>projectQuantSeries(quant.snapshot),[quant.snapshot]);
+  const authorityOverlays=useMemo(()=>projectQuantOverlays(quant.snapshot),[quant.snapshot]);
+  const authorityTrends=useMemo(()=>projectQuantTrendLines(quant.snapshot),[quant.snapshot]);
   const layers = useMemo(
     () =>
       buildChartLayers(
@@ -533,13 +535,13 @@ function MarketResearch({
           eventMarkers: [],
           priceLevels: analysis.levels,
           valueZones: analysis.valueZones,
-          trendLines: [],
+          trendLines: authorityTrends,
           pricePatterns: analysis.pricePatterns.slice(-4),
           marketStructureEvents: analysis.marketStructureEvents,
-          overlaySeries: buildTechnicalOverlaySeries(closed, strategies),
+          overlaySeries: authorityOverlays,
         },
       ),
-    [workspace, indicatorSeries, analysis, closed, strategies],
+    [workspace, indicatorSeries, analysis, strategies,authorityOverlays,authorityTrends],
   );
   const last = candles.at(-1);
   const pick = (item: ResearchInstrument) => {
@@ -775,7 +777,7 @@ function MarketResearch({
                     : 2,
               )}
             </strong>
-            <small>{selected.currency} · 最近收盘/快照</small>
+            <small>{selected.currency} · {isResearchLabelOnly(page) ? "来源价格 / 原始标签" : "最近收盘/快照"}</small>
           </div>
           <button
             title={favorite ? "移出自选" : "加入自选"}
@@ -866,7 +868,7 @@ function MarketResearch({
               downloadText(
                 `${selected.symbol}-${period}.csv`,
                 [
-                  "time,open,high,low,close,volume,source,adjustment",
+                  "display_time,open,high,low,close,volume,source,adjustment,source_label,clock_policy_verified,span_start_unknown",
                   ...candles.map((row) =>
                     [
                       row.open_time,
@@ -877,6 +879,9 @@ function MarketResearch({
                       row.volume ?? "",
                       selected.source,
                       adjustment,
+                      (row.source.raw_payload as Record<string,unknown>|undefined)?.source_label??"",
+                      (row.source.raw_payload as Record<string,unknown>|undefined)?.clock_policy_verified??"",
+                      (row.source.raw_payload as Record<string,unknown>|undefined)?.span_start_unknown??"",
                     ].join(","),
                   ),
                 ].join("\n"),
@@ -894,10 +899,12 @@ function MarketResearch({
           snap={snap}
           onSnap={setSnap}
           history={history}
+          selectedId={selectedDrawingId} onSelect={setSelectedDrawingId}
+          continuous={continuousDrawing} onContinuous={setContinuousDrawing}
         />
         <div className="research-chart-readout">
           {hover
-            ? `${new Date(hover.time * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })} · O ${format(hover.open, selected.asset === "option" ? 4 : 3)}  H ${format(hover.high, selected.asset === "option" ? 4 : 3)}  L ${format(hover.low, selected.asset === "option" ? 4 : 3)}  C ${format(hover.close, selected.asset === "option" ? 4 : 3)}`
+            ? `${new Date(hover.time * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}${isResearchLabelOnly(page) ? "（来源标签）" : ""} · O ${format(hoverSource?.open)}  H ${format(hoverSource?.high)}  L ${format(hoverSource?.low)}  C ${format(hoverSource?.close)}`
             : "拖动查看历史 · 滚轮缩放 · 点击画线可编辑端点"}
         </div>
         <div className="research-chart-canvas">
@@ -931,11 +938,13 @@ function MarketResearch({
             layers={layers}
             drawingTool={tool}
             drawingSnapMode={snap}
+            selectedDrawingId={selectedDrawingId} onDrawingSelect={setSelectedDrawingId}
             onDrawingCommit={(drawing) => {
               history.change((current) =>
                 appendDrawingToActiveLayer(current, drawing),
               );
-              setTool(null);
+              setSelectedDrawingId(drawing.id);
+              if (!continuousDrawing) setTool(null);
             }}
             onDrawingUpdate={(drawing) =>
               history.change((current) =>
@@ -979,7 +988,7 @@ function MarketResearch({
                     : "未连接"}
           </span>
           <span>
-            {candles.length} 根 · {page?.feed ?? selected.source}
+            图表 {candles.length} 根 · 完整权威输入 {page?.authority_manifest?.row_count ?? "—"} 行 · 指标确认 {quant.snapshot?.evidence.confirmed_count ?? (page?.authority_unavailable_reason?"不可用":"计算中")} 根 · {page?.feed ?? selected.source}
           </span>
           <span>
             截止{" "}
@@ -994,7 +1003,7 @@ function MarketResearch({
           </span>
           <button
             disabled={
-              !page?.next_before || olderLoading || candles.length >= 10000
+              !canRequestResearchHistory(page, olderLoading)
             }
             onClick={() => void older()}
           >
@@ -1009,7 +1018,7 @@ function MarketResearch({
       </section>
       <aside className="research-inspector">
         <div className="research-tabs" role="tablist" aria-label="研究面板">
-          {(["analysis", "ai", "data"] as const).map((value) => (
+          {(["analysis", "ai", "data", "simulation"] as const).map((value) => (
             <button
               key={value}
               role="tab"
@@ -1017,13 +1026,16 @@ function MarketResearch({
               className={tab === value ? "is-active" : ""}
               onClick={() => setTab(value)}
             >
-              {{ analysis: "技术研究", ai: "AI 解读", data: "数据质量" }[value]}
+              {{ analysis: "技术研究", ai: "AI 解读", data: "数据质量", simulation:"模拟回测" }[value]}
             </button>
           ))}
         </div>
         <div className="research-inspector-body">
+          {page?.authority_unavailable_reason?<p className="research-notice" role="status">{page.authority_unavailable_reason}</p>:null}
           {tab === "ai" ? (
-            <ResearchAiPanel key={queryKey} query={query} page={page} />
+            <ResearchAiPanel key={queryKey} query={query} page={page} snapshot={quant.snapshot} />
+          ) : tab === "simulation" ? (
+            researchReference?<QuantSimulationPanel code={selected.symbol} sourceId={selected.source} period={period} strategies={strategies} unit={page?.currency??"品种计价单位"} research={researchReference} onClose={()=>setTab("analysis")}/>:<p role="status">{page?.authority_unavailable_reason??"服务端研究输入尚未发布，请刷新来源。"}</p>
           ) : tab === "data" ? (
             <>
               <h2>数据证据</h2>
@@ -1055,8 +1067,12 @@ function MarketResearch({
                     <dd>{format(last?.open_interest, 0)}</dd>
                   </>
                 ) : null}
-                <dt>已收盘样本</dt>
-                <dd>{closed.length}</dd>
+                <dt>图表已收盘样本</dt>
+                <dd>{candles.filter(row=>row.state==='final').length}</dd>
+                <dt>权威研究输入总行数</dt>
+                <dd>{page?.authority_manifest?.row_count ?? "—"}</dd>
+                <dt>指标 / AI 确认输入</dt>
+                <dd>{quant.snapshot?.evidence.confirmed_count ?? (page?.authority_unavailable_reason?"不可用":"计算中")}</dd>
               </dl>
               {page?.warnings.map((warning) => (
                 <p className="research-notice" key={warning}>
@@ -1066,13 +1082,14 @@ function MarketResearch({
               <p className="muted">
                 缺失时间不补零，不跨来源拼接。日期是来源标记的周期日期，读取时间另列。来源快照不承诺实时更新。
               </p>
+              {page?.authority_manifest && page.authority_manifest.row_count !== candles.length ? <p className="research-notice">图表当前显示 {candles.length} 根；权威输入保留来源返回的 {page.authority_manifest.row_count} 行（包含分页边界样本）。指标、AI 和模拟使用完整权威输入，分页只控制图表展示。</p> : null}
               <button onClick={onDataCenter}>打开数据中心</button>
             </>
           ) : (
             <>
               <h2>研究工具</h2>
               <p className="muted">
-                确认信号只使用已收盘 K 线；勾选工具可显示图层。
+                指标来自同一服务端输入版本；勾选工具控制显示。
               </p>
               <div className="research-strategy-groups">
                 {[
@@ -1114,6 +1131,7 @@ function MarketResearch({
                   </section>
                 ))}
               </div>
+              <p className="muted" role="status">{quant.error?`指标不可用：${quant.error}`:quant.progress?.state==='building'?`服务端计算 · ${quant.progress.processed_bars} 根`:quant.snapshot?`服务端同版本指标 · ${quant.snapshot.evidence.input_hash.slice(0,16)} · 预热${quant.snapshot.evidence.warmup_complete?'完整':'范围未知'}`:(page?.authority_unavailable_reason??'服务端研究输入尚未发布，请刷新来源。')}</p>
               <h2>
                 已确认信号 <span>{analysis.signals.length}</span>
               </h2>
@@ -1129,7 +1147,7 @@ function MarketResearch({
               ))}
               {!analysis.signals.length ? (
                 <p className="muted">
-                  当前没有已确认信号；可加载更多历史，或调整研究工具。
+                  服务端同版本指标就绪后显示已确认信号。
                 </p>
               ) : null}
               <h2>关键价位</h2>
@@ -1231,7 +1249,7 @@ export default function ResearchTerminal() {
           />
         ) : section === "realtime" ? (
           <Suspense fallback={<p>加载实时终端…</p>}>
-            <RealtimeApp />
+            <RealtimeApp onOpenOptions={()=>setSection("options")} />
           </Suspense>
         ) : section === "options" ? (
           <Suspense fallback={<p>加载期权工作台…</p>}>

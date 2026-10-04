@@ -540,7 +540,26 @@ button:focus-visible, select:focus-visible { outline: 2px solid rgba(78, 125, 23
 .chart-freshness .status-dot { flex: 0 0 6px; width: 6px; height: 6px; box-shadow: 0 0 0 3px rgba(53, 170, 117, .11); }
 .chart-freshness > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .market-chart, .chart-renderer { position: absolute; inset: 0; }
-.market-chart { overflow: hidden; }
+.market-chart { display: flex; flex-direction: column; overflow: hidden; }
+.chart-viewport { position: relative; flex: 1; min-height: 0; }
+.chart-status-row { position: relative; z-index: 12; display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; min-height: 24px; padding: 3px 10px; border-top: 1px solid #edf0f4; background: #fff; }
+.chart-status-row:has(.source-period-reference[open]) { z-index: 40; }
+.chart-data-basis { max-width: 100%; color: #758194; font-size: 9px; line-height: 1.4; cursor: help; }
+.chart-data-basis:focus-visible { outline: 1px solid var(--blue); outline-offset: 2px; }
+.source-period-reference { max-width: 100%; color: #536074; font-size: 10px; pointer-events: none; }
+.source-period-reference > summary { width: max-content; max-width: 100%; padding: 4px 6px; border: 1px solid #dce4ee; border-radius: 4px; background: rgba(255,255,255,.96); cursor: pointer; pointer-events: auto; }
+.source-period-reference-panel { position: fixed; z-index: 20; top: 96px; left: max(12px,calc((100vw - 640px) / 2)); width: min(640px,calc(100vw - 24px)); max-height: min(320px,calc(100dvh - 108px)); overflow: auto; padding: 10px; border: 1px solid #dce4ee; border-radius: 6px; background: #fff; box-shadow: 0 6px 24px rgba(37,52,73,.14); pointer-events: auto; }
+.source-period-reference-panel header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.source-period-reference-panel header > strong { flex: 1; min-width: 0; }
+.source-period-reference-panel button { padding: 5px 7px; border: 1px solid #dce4ee; border-radius: 4px; color: #3f5f9c; background: #f8fafe; font-size: 10px; }
+.source-period-reference-panel p { margin: 8px 0; line-height: 1.5; overflow-wrap: anywhere; }
+.source-period-reference-error { color: #b94d5e; }
+.source-period-reference-table { max-height: 220px; overflow: auto; }
+.source-period-reference-table table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.source-period-reference-table th,.source-period-reference-table td { padding: 5px 7px; border-bottom: 1px solid #edf0f4; white-space: nowrap; text-align: left; }
+.source-period-reference-table th { position: sticky; top: 0; background: #f8fafe; }
+.source-period-reference-table small { display: block; color: #8f98a6; }
+.source-period-reference-evidence pre { overflow: auto; max-height: 140px; font-size: 9px; }
 .timeline-trading-days { position: absolute; z-index: 2; inset: 0 82px 0 0; overflow: hidden; pointer-events: none; }
 .expert-chart-overlays { position: absolute; z-index: 2; inset: 0; overflow: hidden; pointer-events: none; }
 .timeline-trading-day-separator { position: absolute; top: 0; bottom: 28px; left: 0; width: 1px; background: #e1e6ee; }

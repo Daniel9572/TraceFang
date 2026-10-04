@@ -39,7 +39,20 @@ try {
         'stop' {
             if ($null -ne $task) {
                 $task.Enabled = $false
-                if ($task.State -in @(2, 4)) { $task.Stop(0) }
+                $rust = $request.root -and (Test-Path -LiteralPath (Join-Path $request.root 'bin\tracefang-server.exe'))
+                if ($rust -and $task.State -in @(2, 4)) {
+                    $control = Join-Path $request.root '.runtime'
+                    $null = New-Item -ItemType Directory -Force -Path $control
+                    [IO.File]::WriteAllText((Join-Path $control 'shutdown'), 'stop')
+                    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                    while (($folder.GetTask($name)).State -in @(2, 4)) {
+                        if ([DateTime]::UtcNow -gt $deadline) {
+                            $task.Stop(0)
+                            throw 'Rust backend did not finish graceful shutdown; task was terminated.'
+                        }
+                        Start-Sleep -Milliseconds 100
+                    }
+                } elseif ($task.State -in @(2, 4)) { $task.Stop(0) }
                 $deadline = [DateTime]::UtcNow.AddSeconds(30)
                 while (($folder.GetTask($name)).State -in @(2, 4)) {
                     if ([DateTime]::UtcNow -gt $deadline) { throw 'Backend did not stop in time.' }

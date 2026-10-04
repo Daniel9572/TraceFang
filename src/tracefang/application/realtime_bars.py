@@ -179,10 +179,13 @@ class RealtimeBarContract:
         timedelta(minutes=1),
     )
     finality_policy: BarFinalityPolicy = BarFinalityPolicy.NEXT_AUTHORITATIVE_BAR
+    quote_max_age_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if not self.source_id.strip():
             raise ValueError("source_id cannot be empty")
+        if self.quote_max_age_seconds <= 0:
+            raise ValueError("quote maximum age must be positive")
         if not self.authoritative_bar_channel_id.strip():
             raise ValueError("authoritative_bar_channel_id cannot be empty")
         if not self.quote_channel_ids:
@@ -574,6 +577,10 @@ class RealtimeBarService:
 
     def _apply_quote(self, event: QuoteEvent) -> list[RealtimeBar]:
         contract = self._contract(event.source_id)
+        if not event.quote.source.is_fresh(
+            event.quote.source.received_at, contract.quote_max_age_seconds
+        ):
+            return []
         if (
             event.channel_id not in contract.quote_channel_ids
             and event.channel_id != event.source_id
@@ -1693,6 +1700,10 @@ class RealtimeBarService:
                 "derivation": derivation,
                 "evidence_channel_id": evidence_channel_id,
                 "last_event_channel_id": last_event_channel_id or evidence_channel_id,
+                "quote_time_basis": "source",
+                "timestamp_precision_seconds": (metadata.raw_payload or {}).get(
+                    "timestamp_precision_seconds", 0
+                ),
             },
         )
 

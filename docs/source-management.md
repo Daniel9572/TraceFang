@@ -35,11 +35,14 @@
 
 ## 本地 API
 
+- 启动注册只表示能力已配置，没有实际采集证据时健康状态为 `unknown`。推送源根据连接及来源时间判断新鲜度；轮询源汇总各订阅品种的实际成功、失败和过期结果，部分失败保持 `degraded` 并给出品种及错误原因。
+- 轮询按来源统一错开发起，各品种的请求及退避独立，单品种失败不能结束采集任务。`quote_poll_interval_seconds` 是品种数影响后的目标轮询周期；`quote_timestamp_precision_seconds` 是上游时间精度，两者不能混为一谈。金十连接支持系统 SOCKS 代理并具备 Ping/Pong 超时检测。
 - `GET /api/sources?refresh=true|false`：只返回完整、可选实时数据源的能力、连接策略和健康状态；`history_backfill_configured` 表示恢复合约是否已绑定历史通道，不代表会话此刻健康，也不暴露内部通道；
 - `POST /api/sources/{source_id}/test?code={code}`：用兼容品种主动测试一个实时数据源的报价与 K 线输出；
 - `GET /api/instruments/{code}/source`：读取该合约唯一实时数据源；
 - `PUT /api/instruments/{code}/source`：原子替换该合约的唯一实时数据源；
 - `GET /api/quotes/{code}`：按合约绑定只读本地聚合最新帧，不接受 `source` 参数；返回 `quote / quality / unavailable_fields / stale_fields`；
+- `GET /api/quotes/{code}/last`：允许读取来源最后报价并明确标记过期字段；WebSocket 首帧和断流检测同样保留价格与真实行情时间，不用到达时间刷新旧快照。
 - `GET /api/candles/{code}`：按合约绑定读取该实时数据源的专属分钟 K 线缓存，不接受 `source` 参数，也不调用上游；
 - `POST /api/candles/{code}/backfill`：显式补取一个缺失时间范围；来源仍由合约绑定决定，不接受客户端来源参数。成功后原子保存原始 K 线、统一 Bar、完成覆盖和序列权威状态。返回 `cached / joined / fetched / advanced / exhausted / deferred` 之一，并提供确认覆盖、排他权威时刻、明确历史下界与可选重试时刻；
 - `WS /api/stream/quotes/{code}`：按合约绑定持续发送聚合报价与状态事件，不接受来源参数。

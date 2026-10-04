@@ -836,7 +836,7 @@ class ResearchDataService:
 
     async def _akshare_resource(self, operation: str, params: dict, ttl: int) -> dict:
         key = hashlib.sha256(
-            ("ak-v2:" + operation + json.dumps(params, sort_keys=True)).encode()
+            ("ak-source-decimal-v4:" + operation + json.dumps(params, sort_keys=True)).encode()
         ).hexdigest()
         try:
             cached = await asyncio.to_thread(self._cache, key)
@@ -891,7 +891,10 @@ class ResearchDataService:
                     422,
                 )
             params["contract_year"] = int(matches[0]["month"][:4])
-        return await self._akshare_call("bars", params)
+        packet = await self._akshare_call("bars", params)
+        if not isinstance(packet, dict) or packet.get("precision_policy") != "source-decimal-lexeme-v1" or not isinstance(packet.get("bars"), list):
+            raise ResearchError("来源没有返回精确历史价格，未使用浮点备用数据。")
+        return packet["bars"]
 
     async def akshare_months(self, symbol: str) -> dict:
         if symbol not in {item["symbol"] for item in AK_UNDERLYINGS}:
@@ -921,9 +924,10 @@ class ResearchDataService:
             "months": [months[key] for key in sorted(months)],
             "fetched_at": metadata["fetched_at"],
             "contracts": contracts,
+            "metadata_evidence": metadata["result"].get("source_evidence"),
         }
 
-    async def akshare_option_chain(self, symbol: str, month: str) -> dict:
+    async def akshare_option_chain(self, symbol: str, month: str, report_date: str | None = None) -> dict:
         try:
             datetime.strptime(month, "%Y%m")
         except ValueError:
@@ -932,13 +936,28 @@ class ResearchDataService:
         contracts = [row for row in directory["contracts"] if row["month"] == month]
         if not contracts:
             raise ResearchError("该标的月份没有有效合约, 请重新读取合约月份。", 404)
-        page = await self._akshare_resource(
-            "chain", {"symbol": symbol, "month": month, "contracts": contracts}, 30
-        )
+        spec = next(item for item in AK_UNDERLYINGS if item["symbol"] == symbol)
+        params = {"symbol": symbol, "month": month, "contracts": contracts}
+        if directory.get("metadata_evidence") is not None:
+            params["metadata_evidence"] = directory["metadata_evidence"]
+        if spec.get("quote_source") in ("czce-option-daily", "gfex-option-daily"):
+            from tracefang.official_option_daily import DEFAULT_REPORT_DATE, report_date as validate_date
+            try:
+                day = validate_date(report_date or DEFAULT_REPORT_DATE)
+            except ValueError as error:
+                raise ResearchError(str(error), 422) from None
+            source = await self._akshare_resource("daily_source", {"source_family": spec["quote_source"], "report_date": day}, 300)
+            if source["cache_state"] == "stale" or source["result"]["source_date"] != day:
+                raise ResearchError("所选日期的官方报告不可用；未使用其他日期。")
+            params.update(report_date=day, daily_source_packet=source["result"])
+        elif report_date is not None:
+            raise ResearchError("该来源不是官方日行情，不能应用报告日期。", 422)
+        page = await self._akshare_resource("chain", params, 30)
         result = {
             **page["result"],
             "cache_state": page["cache_state"],
-            "fetched_at": page["fetched_at"],
+            "fetched_at": page["result"].get("fetched_at", page["fetched_at"]),
+            "read_at": page["fetched_at"],
         }
         if page["cache_state"] == "stale":
             result["warnings"] = [

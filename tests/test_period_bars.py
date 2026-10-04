@@ -892,3 +892,284 @@ class PeriodBarPagingTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompletePeriodReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cold_calendar_reads_include_the_previous_night_and_exclude_next_period(self):
+        spot_schedule = {
+            "time_zone": "America/New_York",
+            "trading_day_rule": "session_end",
+            "sessions": [
+                {"weekday": day, "open": "18:00", "close": "17:00", "close_day_offset": 1}
+                for day in range(5)
+            ],
+        }
+        for period, times in (
+            (
+                "1d",
+                (
+                    "2026-09-28T18:00:00-04:00",
+                    "2026-09-29T16:59:00-04:00",
+                    "2026-09-29T18:00:00-04:00",
+                ),
+            ),
+            (
+                "1w",
+                (
+                    "2026-09-27T18:00:00-04:00",
+                    "2026-10-02T16:59:00-04:00",
+                    "2026-10-04T18:00:00-04:00",
+                ),
+            ),
+            (
+                "1mo",
+                (
+                    "2026-08-31T18:00:00-04:00",
+                    "2026-09-30T16:59:00-04:00",
+                    "2026-09-30T18:00:00-04:00",
+                ),
+            ),
+        ):
+            with self.subTest(period=period):
+                rows = tuple(
+                    bar(at, price) for at, price in zip(times, ("100", "105", "200"), strict=True)
+                )
+                reader = _TrackedMinuteReader(rows)
+                store = _AggregateMaterializedPeriodStore(reader)
+                service = PeriodBarService(reader, store=store)
+                expected = project_period_bars(rows, period_id=period, schedule=spot_schedule)
+                latest = await service.get_page(
+                    INSTRUMENT,
+                    source_id="tonghuashun_futures",
+                    period_id=period,
+                    schedule=spot_schedule,
+                    page_size=1,
+                )
+                older = await service.get_page(
+                    INSTRUMENT,
+                    source_id="tonghuashun_futures",
+                    period_id=period,
+                    schedule=spot_schedule,
+                    before=latest.next_before,
+                    page_size=1,
+                )
+                self.assertEqual((*older.items, *latest.items), expected)
+                self.assertEqual(
+                    (older.items[0].open, older.items[0].high), (Decimal("100"), Decimal("105"))
+                )
+                self.assertTrue(all(count == 1 for _, count in reader.calls))
+                self.assertFalse(store.states)
+                self.assertFalse(store.values)
+
+    async def test_live_subscription_restores_missing_open_and_hot_corrections(self):
+        rows = tuple(
+            bar(f"2026-08-10T09:0{i}:00+08:00", str(price))
+            for i, price in enumerate((100, 95, 105, 102, 103))
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _AggregateMaterializedPeriodStore(reader)
+        service = PeriodBarService(reader, store=store)
+        service.seed_live(rows[-2:], schedule=SHFE_SCHEDULE)
+        await service.prepare_live_period(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="5m",
+            schedule=SHFE_SCHEDULE,
+        )
+        corrected = replace(rows[-1], close=Decimal("104"), high=Decimal("104"), revision=2)
+        live = dict(service.accept_live(corrected, schedule=SHFE_SCHEDULE, period_ids=("5m",)))[
+            "5m"
+        ]
+        expected = project_period_bars(
+            (*rows[:-1], corrected), period_id="5m", schedule=SHFE_SCHEDULE
+        )[0]
+        self.assertEqual(live, expected)
+        correction = replace(
+            rows[2],
+            high=Decimal("101"),
+            open=Decimal("101"),
+            low=Decimal("101"),
+            close=Decimal("101"),
+            revision=2,
+        )
+        live = dict(service.accept_live(correction, schedule=SHFE_SCHEDULE, period_ids=("5m",)))[
+            "5m"
+        ]
+        self.assertEqual(live.high, Decimal("104"))
+
+    async def test_long_live_period_uses_a_bounded_complete_prefix(self):
+        rows = (
+            bar("2026-08-10T21:00:00+08:00", "90"),
+            bar("2026-08-11T09:00:00+08:00", "110"),
+            bar("2026-08-11T09:01:00+08:00", "100"),
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _AggregateMaterializedPeriodStore(reader)
+        service = PeriodBarService(reader, store=store)
+        # Simulate a bounded minute cache with only the newest minute available.
+        original_read = reader.get_bars_before
+
+        async def bounded_read(*args, **kwargs):
+            return (await original_read(*args, **kwargs))[-1:]
+
+        reader.get_bars_before = bounded_read
+        await service.prepare_live_period(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="1mo",
+            schedule=SHFE_SCHEDULE,
+        )
+        updated = replace(rows[-1], close=Decimal("101"), high=Decimal("101"), revision=2)
+        live = dict(service.accept_live(updated, schedule=SHFE_SCHEDULE, period_ids=("1mo",)))[
+            "1mo"
+        ]
+        expected = project_period_bars(
+            (*rows[:-1], updated),
+            period_id="1mo",
+            schedule=SHFE_SCHEDULE,
+            now=updated.source.received_at,
+        )[0]
+        self.assertEqual(live, expected)
+
+
+class BatchedPeriodReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batched_pages_preserve_sessions_gaps_and_exclusive_cursor(self):
+        class BatchStore(_AggregateMaterializedPeriodStore):
+            batch_calls = 0
+
+            async def aggregate_realtime_bar_buckets(self, instrument, *, source_id, bounds):
+                self.batch_calls += 1
+                return tuple(
+                    [
+                        await self.aggregate_realtime_bar_bucket(
+                            instrument,
+                            source_id=source_id,
+                            start=start,
+                            end=end,
+                        )
+                        for start, end in bounds
+                    ]
+                )
+
+        rows = tuple(
+            bar(at, str(100 + index))
+            for index, at in enumerate(
+                (
+                    "2026-07-31T14:59:00+08:00",
+                    "2026-07-31T21:00:00+08:00",
+                    "2026-08-03T09:00:00+08:00",
+                    "2026-08-03T10:14:00+08:00",
+                    "2026-08-03T10:30:00+08:00",
+                    "2026-08-03T14:59:00+08:00",
+                    "2026-08-03T21:00:00+08:00",
+                    "2026-08-04T09:00:00+08:00",
+                    "2026-09-29T21:00:00+08:00",
+                    "2026-09-30T09:00:00+08:00",
+                )
+            )
+        )
+        for schedule in (None, SHFE_SCHEDULE):
+            for period in ("5m", "4h", "1d", "1w", "1mo", "1q", "1y"):
+                with self.subTest(schedule=bool(schedule), period=period):
+                    reader = _TrackedMinuteReader(rows)
+                    store = BatchStore(reader)
+                    service = PeriodBarService(reader, store=store)
+                    expected = project_period_bars(rows, period_id=period, schedule=schedule)
+                    received = []
+                    before = None
+                    while True:
+                        page = await service.get_page(
+                            INSTRUMENT,
+                            source_id="tonghuashun_futures",
+                            period_id=period,
+                            schedule=schedule,
+                            before=before,
+                            page_size=2,
+                        )
+                        received[0:0] = page.items
+                        if not page.has_more:
+                            break
+                        before = page.next_before
+                    self.assertEqual(tuple(received), expected)
+                    self.assertGreater(store.batch_calls, 0)
+                    self.assertFalse(store.states)
+                    self.assertFalse(store.values)
+
+
+class LiveSnapshotConsistencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_latest_snapshot_overlays_unpersisted_minute_replacements(self):
+        rows = tuple(
+            bar(f"2026-08-11T09:0{index}:00+08:00", str(100 + index)) for index in range(5)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = _AggregateMaterializedPeriodStore(reader)
+        service = PeriodBarService(reader, store=store)
+        service.seed_live(rows[-2:], schedule=SHFE_SCHEDULE)
+        hot = replace(
+            rows[-1],
+            close=Decimal("107"),
+            high=Decimal("107"),
+            revision=2,
+            state=BarState.PROVISIONAL_AUTHORITATIVE,
+            finalized_at=None,
+        )
+        service.accept_live(hot, schedule=SHFE_SCHEDULE, period_ids=())
+        page = await service.get_page(
+            INSTRUMENT,
+            source_id="tonghuashun_futures",
+            period_id="5m",
+            schedule=SHFE_SCHEDULE,
+            page_size=1,
+        )
+        live = dict(service.accept_live(hot, schedule=SHFE_SCHEDULE, period_ids=("5m",)))["5m"]
+        expected = project_period_bars((*rows[:-1], hot), period_id="5m", schedule=SHFE_SCHEDULE)[0]
+        self.assertEqual(page.items, (expected,))
+        self.assertEqual(live, expected)
+        self.assertFalse(store.states)
+        self.assertFalse(store.values)
+
+
+class BatchedMaterializationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fast_command_supports_older_pages_and_read_only_revision_overlay(self):
+        class BatchStore(_AggregateMaterializedPeriodStore):
+            async def aggregate_realtime_bar_buckets(self, instrument, *, source_id, bounds):
+                return tuple(
+                    [
+                        await self.aggregate_realtime_bar_bucket(
+                            instrument,
+                            source_id=source_id,
+                            start=start,
+                            end=end,
+                        )
+                        for start, end in bounds
+                    ]
+                )
+
+        start = datetime.fromisoformat("2026-08-11T09:00:00+08:00")
+        rows = tuple(
+            bar((start + timedelta(minutes=index)).isoformat(), str(100 + index))
+            for index in range(13)
+        )
+        reader = _TrackedMinuteReader(rows)
+        store = BatchStore(reader)
+        service = PeriodBarService(reader, store=store)
+        args = dict(source_id="tonghuashun_futures", period_id="5m", schedule=SHFE_SCHEDULE)
+        latest = await service.materialize_page(INSTRUMENT, **args, page_size=2)
+        self.assertTrue(latest.has_more)
+        self.assertEqual(len(store.values), 2)
+        corrected = replace(rows[-1], close=Decimal("200"), high=Decimal("200"), revision=2)
+        reader.rows = (*rows[:-1], corrected)
+        store.record_change(corrected.open_time)
+        persisted = dict(store.values)
+        revised = await service.get_page(INSTRUMENT, **args, page_size=2)
+        self.assertEqual(revised.items[-1].close, Decimal("200"))
+        self.assertEqual(store.values, persisted)
+        older = await service.materialize_page(
+            INSTRUMENT, **args, before=latest.next_before, page_size=2
+        )
+        self.assertFalse(older.has_more)
+        complete = await service.get_page(INSTRUMENT, **args, page_size=5)
+        self.assertEqual(
+            complete.items, project_period_bars(reader.rows, period_id="5m", schedule=SHFE_SCHEDULE)
+        )
+        self.assertFalse(complete.has_more)

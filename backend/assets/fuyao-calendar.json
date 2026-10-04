@@ -1,0 +1,3536 @@
+{
+  "fuyao:129:IF2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "IF2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "f83d4c9ef43fa98921714031d0a728d4a6696f4b77c979efa70bc49a580110fd",
+        "received_at_ns": "1791065322993272000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:42.993272+00:00",
+          "raw_file": "129-IF2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:129:IM2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "IM2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "e4718a8cb52f1ceb3a71896ba9111117163542b6492acd138e2cd2649794ce7d",
+        "received_at_ns": "1791065323002216000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.002216+00:00",
+          "raw_file": "129-IM2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:129:IH2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "IH2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "bcfb6b9fc4a8c2f602c5b093b1657634ddea54f493de64a59c880913fef11819",
+        "received_at_ns": "1791065323006072000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.006072+00:00",
+          "raw_file": "129-IH2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:129:IC2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "IC2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "11bb07dc59898c39f7e43ff1ecb6606097c1b6e01b162a101a1f60bf2823cf5c",
+        "received_at_ns": "1791065323007459000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.007459+00:00",
+          "raw_file": "129-IC2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:129:TS2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "TS2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:15:00Z"
+          }
+        ],
+        "raw_body_sha256": "8242f6685e0670ead579da08074506dd891a2f684a1a5c729ef6e8767e25d56c",
+        "received_at_ns": "1791065323112543000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.112543+00:00",
+          "raw_file": "129-TS2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:129:TF2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "TF2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:15:00Z"
+          }
+        ],
+        "raw_body_sha256": "78eb3ec37ae12361676ca20d90a3d48706cfeeabbe89f383d2daeca9d8480c85",
+        "received_at_ns": "1791065323114304000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.114304+00:00",
+          "raw_file": "129-TF2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:129:T2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "T2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:15:00Z"
+          }
+        ],
+        "raw_body_sha256": "fd8786061f5b36dfccfdd649f89de9cda18e43f792b0722777d64134cdfc7e5d",
+        "received_at_ns": "1791065323114757000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.114757+00:00",
+          "raw_file": "129-T2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:129:TL2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "129",
+        "code": "TL2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:00:00Z",
+            "end": "2026-09-30T07:15:00Z"
+          }
+        ],
+        "raw_body_sha256": "48929cb043baf6e8731a4abd400b7dc315f17c61785f92fe9a2814df6f7cd3b1",
+        "received_at_ns": "1791065323115183000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.115183+00:00",
+          "raw_file": "129-TL2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:CF2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "CF2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "3204b4a7c42043ebac00d9f6376b0e7313a9dd7c21441edee51d7f9254cbb3ec",
+        "received_at_ns": "1791065323185261000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.185261+00:00",
+          "raw_file": "67-CF2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:CJ2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "CJ2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "7f0c665260aa896dc9fd66026add7bb00cd1fa75b6caf9a979113caf346d934f",
+        "received_at_ns": "1791065323187938000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.187938+00:00",
+          "raw_file": "67-CJ2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:CY2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "CY2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "9903bd163b3a1413415660ddf48ac01cb3ed0bc0d0bb9e3c0587958dd1dba6c9",
+        "received_at_ns": "1791065323190183000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.190183+00:00",
+          "raw_file": "67-CY2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:AP2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "AP2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "dd747b03c77486c94f76eceb23c14e49b7a7f8c96b2179c1cd396452c579f1ce",
+        "received_at_ns": "1791065323190869000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.190869+00:00",
+          "raw_file": "67-AP2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:FG2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "FG2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "f77b76498903ddd495fbe18e9103ad113409a032bdb4a0f7d0a4c988c7631651",
+        "received_at_ns": "1791065323248121000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.248121+00:00",
+          "raw_file": "67-FG2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:JR2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "JR2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "63d67be1c3826fb0a9b756506511f4bece49b51eda5c589bbc8be65d5fe85d09",
+        "received_at_ns": "1791065323259031000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.259031+00:00",
+          "raw_file": "67-JR2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:OI2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "OI2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "9ee2430a3840ced348ec737ed41a30e0f8d58cf0783767b5070399e21f996696",
+        "received_at_ns": "1791065323261298000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.261298+00:00",
+          "raw_file": "67-OI2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:MA2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "MA2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "fc94bae4be046ade3c73fc569417009e9e79399e0b993a5fc0dd9a72c89ec062",
+        "received_at_ns": "1791065323263579000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.263579+00:00",
+          "raw_file": "67-MA2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:PF2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "PF2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "1e2bcbba1023a8504c6551fc9591815765f72a7056c93100e690c24980ca38a8",
+        "received_at_ns": "1791065323319650000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.319650+00:00",
+          "raw_file": "67-PF2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:PX2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "PX2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "1488e80ae7ea391bf9bc9a12fd673302b501609e96202501a0827b00f8b5ad66",
+        "received_at_ns": "1791065323337844000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.337844+00:00",
+          "raw_file": "67-PX2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:PK2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "PK2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "cb2638232461bde88ad86ee927efe7d9e8ca11f8d5f182b17ab8e5f0a01dc9bf",
+        "received_at_ns": "1791065323341223000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.341223+00:00",
+          "raw_file": "67-PK2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:PM2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "PM2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "e9f6e616a03d5e5bdc5cf5144286734c9c360e7775227572e1c18da9301440c3",
+        "received_at_ns": "1791065323342167000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.342167+00:00",
+          "raw_file": "67-PM2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:RI2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "RI2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "64194f5e1973fdfea7f6fe523c8204c268b8b3df3427795910411ab041a69e0e",
+        "received_at_ns": "1791065323392997000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.392997+00:00",
+          "raw_file": "67-RI2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:RM2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "RM2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "28dbd05bfaace13983bb3957592b515cdb2ef1b9e421b6d6a8e2f09a8a5adc8f",
+        "received_at_ns": "1791065323419295000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.419295+00:00",
+          "raw_file": "67-RM2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:SA2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "SA2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "25ef995d7050e8d4f9493955e02727414ec397df68a6ee690836f6c08dc139fa",
+        "received_at_ns": "1791065323420997000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.420997+00:00",
+          "raw_file": "67-SA2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:RS2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "RS2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "85b0d75695605d7db88b03e90b81052232faf52eb1693c12231e4779d9784113",
+        "received_at_ns": "1791065323424392000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.424392+00:00",
+          "raw_file": "67-RS2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:SF2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "SF2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "f50ca05b875657ec4fbbe371e16f50b25eca6d869b910c3ca06e100d06b28319",
+        "received_at_ns": "1791065323472802000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.472802+00:00",
+          "raw_file": "67-SF2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:SH2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "SH2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "c79c21889958f315fd81141bc233ee84cba629c08cc56f666c347a652d2fa417",
+        "received_at_ns": "1791065323486005000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.486005+00:00",
+          "raw_file": "67-SH2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:SR2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "SR2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "c4225a18c194bf923697966117b6131fba7b376eac0dc9d039ea637fcdf356b7",
+        "received_at_ns": "1791065323490318000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.490318+00:00",
+          "raw_file": "67-SR2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:SM2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "SM2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "aea1e5efe697823abb28c23f6215540f44235304af259714b85a188b7e22b6a5",
+        "received_at_ns": "1791065323494592000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.494592+00:00",
+          "raw_file": "67-SM2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:TA2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "TA2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "9641f70e7dfdd523cbf527e676fbc8f29627aa01e2325b0fc91a74a0cfbe414b",
+        "received_at_ns": "1791065323534798000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.534798+00:00",
+          "raw_file": "67-TA2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:WH2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "WH2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "f18fbdcc60cc48e699a3a625d820e923b69a7ec942de380e4b4fe79c8a5eaf99",
+        "received_at_ns": "1791065323557756000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.557756+00:00",
+          "raw_file": "67-WH2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:UR2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "UR2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "58a0bb62f3a167c884ab9b4e0837b4902990be77b1cb519e950f211b8451a2b4",
+        "received_at_ns": "1791065323561112000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.561112+00:00",
+          "raw_file": "67-UR2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:ZC2610": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "ZC2610",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "037aa40985f48d4eafdc49433932fd9d246d30adc603f9e0ae608f06e1cb1ae9",
+        "received_at_ns": "1791065323562575000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.562575+00:00",
+          "raw_file": "67-ZC2610.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:a2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "a2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "61dccb39ccd82289fa7e395a8b74d59f3b9f25480bb4fc8aa67517be2d8ff59b",
+        "received_at_ns": "1791065323631183000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.631183+00:00",
+          "raw_file": "66-a2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:bb2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "bb2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "36592c5e7890acbd7dcf848efe3aa71218ad3ac5d54af24929d32b0e184ddf55",
+        "received_at_ns": "1791065323645586000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.645586+00:00",
+          "raw_file": "66-bb2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:c2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "c2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "7f84eab4b8b315c666a30c2848c7371785261f46a178d044c2f9c8b313e6da5a",
+        "received_at_ns": "1791065323647741000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.647741+00:00",
+          "raw_file": "66-c2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:b2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "b2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "d55129e0e68edc72c920df4963d8c37ce276c17f646949209e28d77c84a860a7",
+        "received_at_ns": "1791065323648739000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.648739+00:00",
+          "raw_file": "66-b2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:cs2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "cs2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "b9ed950bf9c0f4a27af8e0d22ba3c7b7508c7a46aff89f4a795a17dbf808d76c",
+        "received_at_ns": "1791065323700140000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.700140+00:00",
+          "raw_file": "66-cs2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:fb2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "fb2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "9f90b438abbf8690488d3310836be18887a73a4176dee61a8c21fd4e5b1a9804",
+        "received_at_ns": "1791065323747733000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.747733+00:00",
+          "raw_file": "66-fb2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:eb2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "eb2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "12b8df3b6a2ed892c8894eeedb0a1cf07a3d882ab18cc67093e2facf09a6b37e",
+        "received_at_ns": "1791065323749139000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.749139+00:00",
+          "raw_file": "66-eb2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:eg2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "eg2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "96d33bf92628c66c7991042b56b08e4f5d2a60b88faeb3cde493c99ed14bd273",
+        "received_at_ns": "1791065323754569000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.754569+00:00",
+          "raw_file": "66-eg2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:i2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "i2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "638a276f4e7fd09a8e2b0864a71ecb9b161d350f0da13f5c1d7d4ca5e7859fba",
+        "received_at_ns": "1791065323769739000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.769739+00:00",
+          "raw_file": "66-i2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:jd2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "jd2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "dc1cd239dfdd896f8f349767116ee6b04ff932f580f75c06f0741416510cab72",
+        "received_at_ns": "1791065323822397000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.822397+00:00",
+          "raw_file": "66-jd2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:j2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "j2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "4ad30c20ac87b32dbbff6e5b88cb6e432c796d0acdd361433d15b792aea843ac",
+        "received_at_ns": "1791065323824170000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.824170+00:00",
+          "raw_file": "66-j2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:jm2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "jm2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "c3790c50e3f2509f93dbfc9501ea6a5ab2457fd67a6204333883a38991826c61",
+        "received_at_ns": "1791065323824718000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.824718+00:00",
+          "raw_file": "66-jm2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:l2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "l2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "c1fdb862f3cc437157b7756677e674ea4508f4c41137a9ce1b3b87f2892a4f6b",
+        "received_at_ns": "1791065323847813000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.847813+00:00",
+          "raw_file": "66-l2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:lh2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "lh2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "b26a42bef8ab4ad532c21e54e842bb75d446b1733bce57ee66d854ba914621b1",
+        "received_at_ns": "1791065323884161000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.884161+00:00",
+          "raw_file": "66-lh2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:p2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "p2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "7a1314f15e4f6dbc9aa91f6e4f76f3e600a494fa3a371999ff9f2485f9bcf1d1",
+        "received_at_ns": "1791065323886961000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.886961+00:00",
+          "raw_file": "66-p2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:m2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "m2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "3a059cf9d831742081809f870672cc5fa264d236b381fa7456cc9534720a4494",
+        "received_at_ns": "1791065323890611000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.890611+00:00",
+          "raw_file": "66-m2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:pg2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "pg2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "76d57d0b7133d4be2870fca45946c4b2cff2d170c7bfed33ef68e50263c211f6",
+        "received_at_ns": "1791065323923962000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.923962+00:00",
+          "raw_file": "66-pg2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:y2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "y2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "af5c62755043603db0cb2b9972a8e37b07a13c84d2613f652a60d0290543605c",
+        "received_at_ns": "1791065323979197000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.979197+00:00",
+          "raw_file": "66-y2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:rr2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "rr2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "8cebcfb154fa305be1bf3c596f4330541e8569794332e4cdca481d52a2dad265",
+        "received_at_ns": "1791065323983156000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.983156+00:00",
+          "raw_file": "66-rr2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:pp2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "pp2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "3b69c958edbdd9f494bb985af8a218e13a2883f3dbc89af13857adbcaab3d049",
+        "received_at_ns": "1791065323984034000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.984034+00:00",
+          "raw_file": "66-pp2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:v2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "v2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "df4b73092b171121a582f8ecdfd170bbfed05d3f8a6efac8ed3bdcfb36737ad3",
+        "received_at_ns": "1791065323986254000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:43.986254+00:00",
+          "raw_file": "66-v2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:ag2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "ag2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T18:30:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "6fb859533c7bdcbf50c4314b1c4626b2d8a757e09751baa5507006732cbddd15",
+        "received_at_ns": "1791065324035869000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.035869+00:00",
+          "raw_file": "65-ag2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:au2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "au2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T18:30:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "b29d940d053192bf5dcc4edab2598131b46b76b38b4528512e8febd5e901c6a4",
+        "received_at_ns": "1791065324044022000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.044022+00:00",
+          "raw_file": "65-au2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:al2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "al2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "8c00ab3ae8e71c6fa952838e4de9d8b0a36868107ab03ad39cba083a54364ad1",
+        "received_at_ns": "1791065324049231000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.049231+00:00",
+          "raw_file": "65-al2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:ao2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "ao2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "29835e02a6f263aa6d7250626757979fa37690e1b8136d69f766a9562ede079b",
+        "received_at_ns": "1791065324051652000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.051652+00:00",
+          "raw_file": "65-ao2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:br2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "br2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "a2b2ef2424984f4294c66adf936cf2b4510df066bea0ac278da02d5211462e16",
+        "received_at_ns": "1791065324119269000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.119269+00:00",
+          "raw_file": "65-br2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:bc2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "bc2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "df4d2788cf2797e27ae84c5b662da8eb023e74b6b4eb03f4aad2f4a37554c160",
+        "received_at_ns": "1791065324122870000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.122870+00:00",
+          "raw_file": "65-bc2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:bu2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "bu2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "c98cc1cfc79b70305542a86656dae0f34644bed25e103a268519b1a383107e2d",
+        "received_at_ns": "1791065324149498000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.149498+00:00",
+          "raw_file": "65-bu2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:cu2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "cu2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "ed7f3d817ec142c549df427f21d9b75a1ba96cc3b537f418c549004a2986f85f",
+        "received_at_ns": "1791065324159685000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.159685+00:00",
+          "raw_file": "65-cu2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:ec2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "ec2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "450d81ed7617f0464e09e6b0ca9f9e2b8de6309db80ad4aec47455b542c2813d",
+        "received_at_ns": "1791065324214705000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.214705+00:00",
+          "raw_file": "65-ec2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:fu2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "fu2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "4ed9c3e43293651848e9d6cf198e9edc7a013f2b1e05663d40b4867aa3906b3a",
+        "received_at_ns": "1791065324216912000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.216912+00:00",
+          "raw_file": "65-fu2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:hc2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "hc2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "c5d7563c759d71b59451350d80283146dfc0128db47eb0e6416d7415c2513846",
+        "received_at_ns": "1791065324247964000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.247964+00:00",
+          "raw_file": "65-hc2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:lu2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "lu2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "dd1425930030744051cd6efbd6f7587e2e36317867f672e57f04f105e7d36240",
+        "received_at_ns": "1791065324253938000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.253938+00:00",
+          "raw_file": "65-lu2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:ni2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "ni2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "e2fbb5d4f1102840ba78c702bc2919eafdcf8e2e49121b3d52959055b0b43c89",
+        "received_at_ns": "1791065324300867000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.300867+00:00",
+          "raw_file": "65-ni2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:nr2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "nr2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "3e5e4cf7001afc42d1834b9367a6f3473141bb41957536d4c21e755423863fa1",
+        "received_at_ns": "1791065324305272000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.305272+00:00",
+          "raw_file": "65-nr2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:pb2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "pb2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "a69e68c6b22db652dafef77f6567e0acaf03787a2f002123f9b9d9cc3cbe5940",
+        "received_at_ns": "1791065324325864000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.325864+00:00",
+          "raw_file": "65-pb2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:rb2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "rb2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "5dd6dc0f4a297bee8d051089c81da877fe6b0b5d101ce1b23a659e687728322a",
+        "received_at_ns": "1791065324344014000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.344014+00:00",
+          "raw_file": "65-rb2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:sn2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "sn2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "13bba9de25ca96456377d26f5fe098231f77b40ea52f0af600b2d6f089101421",
+        "received_at_ns": "1791065324393186000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.393186+00:00",
+          "raw_file": "65-sn2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:ru2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "ru2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "ba4c0e2887bdc003a7b8fadcfb7af99599eed23d9c67f40708abcee231861e6c",
+        "received_at_ns": "1791065324396269000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.396269+00:00",
+          "raw_file": "65-ru2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:sc2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "sc2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T18:30:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "1f0402f8378244701ab382135de94e6f692e0dc17ec975fc00f14b9de13caf0a",
+        "received_at_ns": "1791065324399737000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.399737+00:00",
+          "raw_file": "65-sc2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:sp2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "sp2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "cba179ad95ec027dd5ec128cd5ca1be2cce62666894c500f4480ba1ff728271a",
+        "received_at_ns": "1791065324416398000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.416398+00:00",
+          "raw_file": "65-sp2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:wr2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "wr2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "1c94f484b087db6fa7645bcd317f99aa4e0dc9b41a7a7cadb775cd881e168e1b",
+        "received_at_ns": "1791065324482421000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.482421+00:00",
+          "raw_file": "65-wr2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UGFF:lc2701": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UGFF",
+        "code": "lc2701",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "020f4f830a061d543e5594a96f748f704cc3ae888ba3c80deff8d8dd5cde345b",
+        "received_at_ns": "1791065324485907000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.485907+00:00",
+          "raw_file": "UGFF-lc2701.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:zn2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "zn2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "04754b80515b9ac7ac7a67f407ebf522df7edda68f276385d38cbdbacf71de43",
+        "received_at_ns": "1791065324490081000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.490081+00:00",
+          "raw_file": "65-zn2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:ss2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "ss2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "efda12e53f5c420ea5ae1db9a99f081e8967d8c14819e97b25e06b2567ee4e17",
+        "received_at_ns": "1791065324491510000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.491510+00:00",
+          "raw_file": "65-ss2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UGFF:ps2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UGFF",
+        "code": "ps2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "58219cb37e592e796973ca7a7a3038bde8c1062f1b0a1ae00ad14cd39e85ca55",
+        "received_at_ns": "1791065324626893000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.626893+00:00",
+          "raw_file": "UGFF-ps2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UGFF:si2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UGFF",
+        "code": "si2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "bda4f033788b9338f2fe497ec7b57272d7c55546f1c52df6945dbe09f0221826",
+        "received_at_ns": "1791065324632101000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.632101+00:00",
+          "raw_file": "UGFF-si2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:PR2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "PR2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "49ae7b5d51149c0b8fa71910393b38931709749818d8b604f68119c7dd822e43",
+        "received_at_ns": "1791065324636383000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.636383+00:00",
+          "raw_file": "67-PR2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:lg2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "lg2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "a1cfd8b92de24d5e7521af5a17fab2b267078420b4a0c99eef584d05eac0c100",
+        "received_at_ns": "1791065324640751000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.640751+00:00",
+          "raw_file": "66-lg2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:ad2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "ad2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T17:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "0b1bb8081245865f6e0003df7824ff5c5e94fa9c531a5c74b14b4a153c77c0c8",
+        "received_at_ns": "1791065324701782000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.701782+00:00",
+          "raw_file": "65-ad2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:67:PL2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "67",
+        "code": "PL2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "8ddfe9b587b53e8135b0b811cdab018abe2d5d08e19add0a8d0599768a0a7345",
+        "received_at_ns": "1791065324706750000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.706750+00:00",
+          "raw_file": "67-PL2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:66:bz2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "66",
+        "code": "bz2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "ec443f946736006eb069183cf871b81cccdaa013071d168123920f017e8dc279",
+        "received_at_ns": "1791065324708294000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.708294+00:00",
+          "raw_file": "66-bz2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:65:op2611": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "65",
+        "code": "op2611",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "b3d3892c444c029837192d50b69a79d18c9ff83b5d1f76d0d48f5e43b00ff377",
+        "received_at_ns": "1791065324709805000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.709805+00:00",
+          "raw_file": "65-op2611.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UGFF:pt2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UGFF",
+        "code": "pt2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "bac1d0ab1661e271c6fcd2a2e09f9d357c26972b3f97251321435ebf2007200a",
+        "received_at_ns": "1791065324812400000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.812400+00:00",
+          "raw_file": "UGFF-pt2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UDEF:v2611F": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UDEF",
+        "code": "v2611F",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "bc8d7e6de266218dc07852bada1b54f848d8f60e011b2231ec6c0d0a87380412",
+        "received_at_ns": "1791065324814455000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.814455+00:00",
+          "raw_file": "UDEF-v2611F.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UDEF:pp2611F": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UDEF",
+        "code": "pp2611F",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "1a2c3869bb42235658fc45bab64d5c6eb1dd7300c8cfc41135170648118bd02e",
+        "received_at_ns": "1791065324815246000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.815246+00:00",
+          "raw_file": "UDEF-pp2611F.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UDEF:l2611F": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UDEF",
+        "code": "l2611F",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-29T13:00:00Z",
+            "end": "2026-09-29T15:00:00Z"
+          },
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "94d778c9fff734110bde8730f8d432b8abd0c68b6ca4b375f94fb937051b7662",
+        "received_at_ns": "1791065324815966000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.815966+00:00",
+          "raw_file": "UDEF-l2611F.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  },
+  "fuyao:UGFF:pd2612": {
+    "date_exceptions": null,
+    "absolute_days": [
+      {
+        "market": "UGFF",
+        "code": "pd2612",
+        "trade_date": "2026-09-30",
+        "continuous_sessions": [
+          {
+            "start": "2026-09-30T01:00:00Z",
+            "end": "2026-09-30T02:15:00Z"
+          },
+          {
+            "start": "2026-09-30T02:30:00Z",
+            "end": "2026-09-30T03:30:00Z"
+          },
+          {
+            "start": "2026-09-30T05:30:00Z",
+            "end": "2026-09-30T07:00:00Z"
+          }
+        ],
+        "raw_body_sha256": "3db3808cf339963d8b25ebd9923d47a7de94948268e25ad8e73be8bc09482ab1",
+        "received_at_ns": "1791065324884252000",
+        "accepted_at_ns": null,
+        "provenance": {
+          "kind": "source_provided_exact_trade_date",
+          "source_url": "https://quota-h.10jqka.com.cn/fuyao/common_hq_aggr/quote/v1/trade_time",
+          "retrieved_at": "2026-10-03T22:08:44.884252+00:00",
+          "raw_file": "UGFF-pd2612.json",
+          "source_time_unit": "unix_seconds",
+          "time_zone": "Asia/Shanghai",
+          "scope_rule": "exact market/code/trade_date only; no recurring weekly inference",
+          "source_published_at_unknown": true
+        }
+      }
+    ]
+  }
+}

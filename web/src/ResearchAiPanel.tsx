@@ -15,10 +15,11 @@ import {
 
 export function ResearchAiPanel({
   query,
-  page,
+  page,snapshot,
 }: {
   query: ResearchQuery;
   page: ResearchPage | null;
+  snapshot:import("./quantTypes").QuantSnapshot|null;
 }) {
   const [status, setStatus] = useState<ExpertAiStatus | null>(null);
   const [models, setModels] = useState<ExpertAiModel[]>([]);
@@ -102,6 +103,7 @@ export function ResearchAiPanel({
   const busy =
     sending || job?.state === "loading" || job?.state === "analyzing";
   const run = async () => {
+    if(!snapshot||!page?.authority_snapshot_id)return;
     setSending(true);
     setError(null);
     setJob(null);
@@ -115,7 +117,7 @@ export function ResearchAiPanel({
       } catch {
         /* In-memory preferences still work. */
       }
-      const next = await researchApi.analyze(query, question, model, effort);
+      const next = await researchApi.analyze(query, question, model, effort,{research_snapshot_id:page.authority_snapshot_id,expected_input_hash:snapshot.evidence.input_hash,parameters:snapshot.evidence.parameters});
       if (!alive.current) {
         void researchApi.cancel(next.id).catch(() => {});
         return;
@@ -193,14 +195,13 @@ export function ResearchAiPanel({
         </select>
       </label>
       <p className="research-notice">
-        发送 {query.symbol} · {query.period} 的最多 320 根同源 K
-        线、复权口径和服务端指标。使用本机 Codex 账户额度。
+        {page?.authority_unavailable_reason ?? `发送 ${query.symbol} · ${query.period} 的固定研究输入与同版本服务端指标。预热范围以来源证据为准。使用本机 Codex 账户额度。`}
       </p>
       <div className="research-inline-actions">
         <button
           className="primary"
           disabled={
-            busy ||
+            !snapshot || !page?.authority_snapshot_id || busy ||
             status?.state !== "ready" ||
             !model ||
             !page?.items.length ||
@@ -249,7 +250,7 @@ export function ResearchAiPanel({
             </button>
           </div>
           <small>
-            {job.data_as_of} · 快照 {job.snapshot_id}
+            {job.data_as_of} · 快照 {job.snapshot_id} {job.input_hash&&snapshot?.evidence.input_hash!==job.input_hash?" · 当前输入已更新，本次结论保留原版本":""}
           </small>
           <div className="ai-prose">{job.result.analysis}</div>
           <details>

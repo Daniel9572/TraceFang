@@ -515,13 +515,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                     detail=("高速行情连接已建立, 当前没有新的报价帧; 休市或行情静止时属于正常状态"),
                     checked_at=datetime.now(UTC),
                     health=SourceHealth.DEGRADED,
+                    connection_active=True,
                 )
             return ProviderProbe(
                 available=False,
-                state="unavailable",
-                detail="金十统一行情暂时没有可用的实时报价",
+                state=web_probe.state,
+                detail=web_probe.detail or "金十统一行情暂时没有可用的实时报价",
                 checked_at=datetime.now(UTC),
                 health=SourceHealth.UNAVAILABLE,
+                connection_active=False,
             )
         if not local_probe.available:
             setup_required = local_probe.state == "setup_required"
@@ -555,6 +557,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 ),
                 checked_at=datetime.now(UTC),
                 health=SourceHealth.DEGRADED,
+                connection_active=True,
             )
         return ProviderProbe(
             available=True,
@@ -562,7 +565,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             detail="实时报价、同源 K 线和历史回补均可用",
             checked_at=datetime.now(UTC),
             health=SourceHealth.HEALTHY,
+            connection_active=True,
+            last_success_at=datetime.now(UTC),
         )
+
+    async def probe_polled_source() -> ProviderProbe:
+        if runtime.acquisition is None:
+            return ProviderProbe(False, "connecting", health=SourceHealth.UNKNOWN)
+        return runtime.acquisition.poll_probe(TONGHUASHUN_FUTURES_SOURCE)
 
     client_composition = RealtimeSourceComposition(
         quote_channel_ids=(JIN10_WEB_CHANNEL, JIN10_LOCAL_CHANNEL),
@@ -607,6 +617,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             structured=True,
             quote_poll_interval_seconds=(tonghuashun_futures_settings.quote_poll_interval_seconds),
             quote_streaming=False,
+            quote_timestamp_precision_seconds=60,
             quote_service_tier=QuoteServiceTier.STANDARD,
             routing_role=SourceRoutingRole.REALTIME_SOURCE,
             access_model=SourceAccessModel.UNMETERED,
@@ -615,6 +626,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             ),
             quote_provider=tonghuashun_futures_provider,
             candle_provider=tonghuashun_futures_provider,
+            probe=probe_polled_source,
         ),
         SourceRegistration(
             source_id="jin10_local",
@@ -806,7 +818,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         quote_cache,
         stale_after=lambda source_id: stale_after_seconds.get(source_id, 60.0),
     )
-    runtime.quote_stream = QuoteStreamCoordinator(load_quote=runtime.quote_views.get)
+    runtime.quote_stream = QuoteStreamCoordinator(load_quote=runtime.quote_views.get_last)
 
     def publish_bar_transitions(transitions):
         stream = runtime.quote_stream
@@ -867,14 +879,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if stream is None:
             return
         with suppress(ProviderError):
-            stream.publish(quote_views.build_cached(value.instrument, value.source.provider))
+            stream.publish(quote_views.build_cached(
+                value.instrument, value.source.provider, allow_stale=True
+            ))
         acquisition = runtime.acquisition
         if (
             acquisition is not None
             and acquisition.route_for(value.instrument) == JIN10_CLIENT_SOURCE
         ):
             with suppress(ProviderError):
-                stream.publish(quote_views.build_cached(value.instrument, JIN10_CLIENT_SOURCE))
+                stream.publish(quote_views.build_cached(
+                    value.instrument, JIN10_CLIENT_SOURCE, allow_stale=True
+                ))
         if (
             "XAUCNHG" in runtime.watchlist_codes
             and value.source.provider == JIN10_WEB_CHANNEL
@@ -1245,7 +1261,12 @@ def _public_source(
         "delayed": value.delayed,
         "requires_running_app": value.requires_running_app,
         "structured": value.structured,
-        "quote_poll_interval_seconds": value.quote_poll_interval_seconds,
+        "quote_poll_interval_seconds": (
+            runtime.acquisition.poll_refresh_interval(value.source_id)
+            if runtime.acquisition is not None and not value.quote_streaming
+            else value.quote_poll_interval_seconds
+        ),
+        "quote_timestamp_precision_seconds": getattr(value, "quote_timestamp_precision_seconds", 1),
         "quote_streaming": value.quote_streaming,
         "quote_service_tier": value.quote_service_tier,
         "access_model": value.access_model,
@@ -2217,6 +2238,12 @@ async def quote_stream(websocket: WebSocket, code: str) -> None:
         return
     await websocket.accept()
     try:
+        await _period_bars().prepare_live_period(
+            instrument,
+            source_id=source_id,
+            period_id=period,
+            schedule=_MARKET_SCHEDULES[definition_for_instrument(instrument).market_schedule_id],
+        )
         async with _quote_stream().subscribe(
             instrument,
             source=source_id,

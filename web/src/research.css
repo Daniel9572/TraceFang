@@ -809,49 +809,13 @@
   padding: 3px 8px;
 }
 .section-realtime .expert-workspace {
-  top: 57px;
-}
-.section-realtime .expert-chart-stage {
-  display: flex;
-  flex-direction: column;
-}
-.section-realtime .expert-chart-stage::after {
-  display: none;
-}
-.section-realtime .expert-chart-stage > .market-chart {
   position: relative;
   inset: auto;
-  flex: 1;
-  min-height: 0;
-}
-.section-realtime .expert-chart-readout {
-  position: relative;
-  inset: auto;
-  flex: 0 0 32px;
-  height: 32px;
-}
-.section-realtime .expert-layer-manager {
-  top: 78px;
-}
-.section-realtime .expert-intelligence-tabs {
-  order: -1;
-  grid-template-columns: repeat(4, 1fr);
-}
-.section-realtime .expert-strategy-stack {
-  max-height: none;
-  flex: 1;
-}
-.section-realtime
-  .expert-strategy-stack
-  + .expert-intelligence-tabs
-  + .expert-intelligence-body {
-  display: none;
+  width: 100%;
+  height: 100%;
 }
 .section-realtime .expert-tool-rail {
   display: none;
-}
-.section-realtime .expert-workspace {
-  grid-template-columns: 0 minmax(0, 1fr) 330px;
 }
 .section-realtime .terminal-shell {
   height: 100%;
@@ -907,10 +871,6 @@
   }
   .terminal-wordmark span {
     display: none;
-  }
-  .section-realtime .expert-workspace {
-    overflow: auto;
-    min-width: 700px;
   }
 }
 @media (max-width: 640px) {
@@ -991,9 +951,8 @@
     display: none;
   }
   .section-realtime .expert-workspace {
-    position: relative;
-    top: 0;
-    min-height: 650px;
+    height: auto;
+    min-height: calc(100dvh - 81px);
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -1005,3 +964,16 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* Drawing tools keep a single scrollable row so narrow windows retain the main chart height. */
+.drawing-controls { min-width: 0; }
+.drawing-actions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; padding-bottom: 2px; }
+.drawing-actions > *, .drawing-object-actions > * { flex: 0 0 auto; }
+.drawing-actions button, .drawing-object-actions button, .drawing-snap { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.drawing-actions .drawing-snap { flex-direction: row; }
+.drawing-object-actions { display: flex; gap: 4px; align-items: center; overflow-x: auto; padding-top: 4px; }
+.drawing-object-actions input:not([type="color"]) { width: 140px; max-width: 40vw; font-size: 11px; padding: 3px 5px; }
+.drawing-object-actions input[type="color"] { width: 30px; height: 25px; padding: 2px; }
+.drawing-object-actions button { font-size: 11px; padding: 4px 7px; }
+.drawing-objects { touch-action: none; }
+.drawing-objects [role="button"]:focus-visible { outline: none; filter: drop-shadow(0 0 2px #245c8c); }

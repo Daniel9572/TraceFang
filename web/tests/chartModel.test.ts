@@ -4,6 +4,8 @@ import test from "node:test";
 import { mergeCandleRows } from "../src/api.ts";
 import {
   buildTimelineSeries,
+  candleAtChartTime,
+  candleIntervalEvidence,
   candleSeriesUpdateStart,
   classifyCandleSeriesMutation,
   formatBarCountdown,
@@ -35,6 +37,23 @@ function candle(time: string, open: number, high: number, low: number, close: nu
     finalized_at: time,
   };
 }
+
+test("source end label remains separate from the canonical minute interval",()=>{
+  const row=candle("2026-09-30T06:05:00Z",1,2,0,1);
+  row.source.raw_payload={source_label_semantics:"interval_end",source_label:"202609301406",source_interval_end:"2026-09-30T06:06:00Z",minute_clock_policy:"ths-v6-period61-shfe-interval-end-v2",publication_time_unknown:true};
+  const start=Date.parse(row.open_time)/1000;
+  assert.deepEqual(candleIntervalEvidence(row),{start,end:start+60,sourceLabel:"202609301406"});
+  assert.equal(row.source.raw_payload.publication_time_unknown,true);assert.equal(row.source.observed_at,row.open_time);
+  row.source.raw_payload.bucket_end="2026-09-30T06:08:00Z";
+  assert.equal(candleIntervalEvidence(row)?.end,start+180);
+  row.source.raw_payload.source_label_semantics="unknown";
+  assert.equal(candleIntervalEvidence(row),null);
+});
+
+test("hover selects exact loaded canonical candle while an absent time has no invented source label",()=>{
+  const rows=[candle("2026-09-30T06:05:00Z",1,2,0,1),candle("2026-09-30T06:06:00Z",2,3,1,2)];
+  assert.strictEqual(candleAtChartTime(rows,null),rows[1]);assert.strictEqual(candleAtChartTime(rows,Date.parse(rows[0].open_time)/1000),rows[0]);assert.equal(candleAtChartTime(rows,Date.parse(rows[0].open_time)/1000+30),null);assert.equal(candleIntervalEvidence(rows[0]),null);
+});
 
 test("formats a stable exchange-style countdown", () => {
   const atThirtySeconds = Date.parse("2026-08-06T01:47:30Z");
@@ -174,3 +193,10 @@ test("keeps the current candle array when a refresh contains no revision", () =>
 
   assert.equal(mergeCandleRows(current, unchangedRefresh), current);
 });
+
+ test("replaces a loaded intermediate correction without losing history or null volume",()=>{
+  const first=candle("2026-08-06T01:45:00Z",100,150,90,101),middle=candle("2026-08-06T01:46:00Z",101,160,91,102),tail=candle("2026-08-06T01:47:00Z",102,170,92,103);
+  const original=[first,middle,tail], corrected={...middle,high:"110",low:"98",volume:null,revision:"10"};
+  const result=upsertRealtimeBarBatch(original,[corrected]);assert.equal(result.length,3);assert.equal(result[0],first);assert.equal(result[2],tail);assert.equal(result[1],corrected);assert.equal(classifyCandleSeriesMutation(original,result),"reset");
+  assert.equal(upsertRealtimeBar(result,{...middle,revision:"9"}),result);
+ });

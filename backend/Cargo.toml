@@ -1,0 +1,60 @@
+[package]
+name = "tracefang-server"
+version = "0.1.0"
+edition = "2024"
+description = "TraceFang native market data and analysis backend"
+
+[lib]
+name = "tracefang_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tracefang-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+arrow-array = "=60.0.0"
+arrow-schema = "=60.0.0"
+async-nats = "0.46"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+bigdecimal = { version = "0.4", features = ["serde-json"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+csv = "1"
+dotenvy = "0.15"
+encoding_rs = "0.8"
+futures-util = "0.3"
+flate2 = "1"
+hex = "0.4"
+http = "1"
+libc = "0.2"
+num-bigint = "0.4"
+num-traits = "0.2"
+parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "snap"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "socks", "gzip", "brotli"] }
+redb = "=4.3.0"
+regex = "1"
+rust_decimal = { version = "1", features = ["serde-with-str", "serde-with-arbitrary-precision", "db-tokio-postgres"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "rust_decimal", "json"] }
+thiserror = "2"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-socks = "0.5"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

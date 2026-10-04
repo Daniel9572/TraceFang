@@ -111,9 +111,9 @@ class InstrumentDefinition:
 INSTRUMENT_CATALOG = (
     InstrumentDefinition(
         code="XAUUSD",
-        name="现货黄金",
+        name="国际现货黄金（伦敦金现）",  # noqa: RUF001 - Chinese display name.
         instrument=SPOT_GOLD,
-        price_unit="美元/盎司",
+        price_unit="美元/金衡盎司",
         price_digits=2,
         quote_kind="direct",
         history_backfill_supported=True,

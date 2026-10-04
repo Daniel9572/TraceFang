@@ -11,6 +11,11 @@ export interface OptionLeg {
   observedAt?: string | null;
   underlying?: string;
   currency?: string;
+  sourceQuote?: {
+    strike: string; premium: string; multiplier: string;
+    policy: "approximate-option-scenario-v1";
+    evidence?: Record<string, unknown>;
+  };
 }
 
 export const OPTION_TEMPLATES = [

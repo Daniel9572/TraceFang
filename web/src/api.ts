@@ -1,3 +1,5 @@
+import { compareSourceRevision } from "./quantFormat.ts";
+import { decodeReplayFrameBounds, decodeReplayFrameCursor } from "./replayContract.ts";
 import type {
   Candle,
   CandleBackfillResult,
@@ -11,6 +13,7 @@ import type {
   SourceConnectionTest,
   SourceDescriptor,
   SourceId,
+  SourcePeriodPriceReference,
 } from "./types";
 import type {
   ExpertAiAnalysis,
@@ -166,13 +169,13 @@ export function mergeCandleRows(...pages: Candle[][]): Candle[] {
         continue;
       }
       const stateRank = { provisional_quote: 0, provisional_authoritative: 1, final: 2 };
-      const incomingWins = candle.revision > current.revision
+      const incomingWins = compareSourceRevision(candle.revision, current.revision) > 0
         || (
-          candle.revision === current.revision
+          compareSourceRevision(candle.revision, current.revision) === 0
           && stateRank[candle.state] > stateRank[current.state]
         )
         || (
-          candle.revision === current.revision
+          compareSourceRevision(candle.revision, current.revision) === 0
           && candle.state === current.state
           && Date.parse(candle.source.received_at) > Date.parse(current.source.received_at)
         );
@@ -292,6 +295,8 @@ function revalidateCandleHistory(
 }
 
 export interface ExpertAiAnalysisRequest {
+  source_id?: string; decision_as_of?: string; application_cursor?: string;
+  parameters?: import("./quantTypes").QuantParameters; expected_input_hash?:string;
   code: string;
   period: string;
   enabled_strategies: string[];
@@ -301,6 +306,9 @@ export interface ExpertAiAnalysisRequest {
 }
 
 export const marketApi = {
+  sourcePeriodPrices: (code: string, signal: AbortSignal) => request<SourcePeriodPriceReference>(`/api/source-period-prices/${encodeURIComponent(code)}`, {
+    method: "POST", body: JSON.stringify({source_id:"tonghuashun_futures",period:"min_5",limit:100}), signal,
+  }),
   instruments: () => request<InstrumentEntry[]>("/api/instruments"),
   watchlist: () => request<InstrumentEntry[]>("/api/watchlist"),
   addToWatchlist: (code: string) =>
@@ -368,6 +376,10 @@ export const marketApi = {
       return page;
     });
   },
+  barRange:(code:string,sourceId:SourceId,periodId:string,start:string,end:string,signal?:AbortSignal)=>{
+    const params=new URLSearchParams({source_id:sourceId,period:periodId,start,end,max_rows:'10000'});
+    return request<{items:Candle[];complete:boolean;snapshot_version:{commit_id:string;store_epoch:string}}>(`/api/bars/${encodeURIComponent(code)}/range?${params}`,{signal}).then(result=>{if(!result.complete||result.items.some(row=>row.source.provider!==sourceId))throw new Error('修订范围未完整读取或行情来源已变化');return result;});
+  },
   olderCandleHistory: loadOlderCandleHistory,
   revalidateCandleHistory,
   openQuoteStream: (code: string, period: BarPeriodId = "1m") => {
@@ -376,11 +388,11 @@ export const marketApi = {
     const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}?${params}`;
     return new WebSocket(url);
   },
-  replayFrameBounds: () => request<ReplayFrameBounds>("/api/replay/frames"),
-  replayFrameCursor: (sequence: number, signal?: AbortSignal) => request<ReplayFrameCursor>(
+  replayFrameBounds: (signal?:AbortSignal) => request<unknown>("/api/replay/frames", {signal}).then(decodeReplayFrameBounds),
+  replayFrameCursor: (sequence: string | number, signal?: AbortSignal) => request<unknown>(
     `/api/replay/cursor?sequence=${encodeURIComponent(String(sequence))}`,
     { signal },
-  ),
+  ).then(decodeReplayFrameCursor),
   openReplayStream: (
     code: string,
     options: ReplayStreamOptions,

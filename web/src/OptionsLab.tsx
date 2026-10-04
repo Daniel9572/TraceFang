@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marketApi } from "./api";
+import { optionSourceText, optionScenarioNumber, positiveOptionSource, optionDayPriceText, optionDayClockText, type OptionDayDisplay } from "./optionQuote";
 import {
   OPTION_TEMPLATES,
   expirationPayoff,
@@ -22,21 +23,27 @@ const number = (value: number) =>
     : Number.isFinite(value)
       ? value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })
       : "无限";
-type Contract = {
+type Contract = OptionDayDisplay & {
   symbol: string;
   underlying: string;
   expiry: string;
   kind: "call" | "put";
-  strike: number;
-  bid: number | null;
-  ask: number | null;
-  last: number | null;
+  strike: string | number;
+  bid: string | number | null;
+  ask: string | number | null;
+  last: string | number | null;
   observed: string | null;
-  multiplier: number;
+  multiplier: string | number;
   currency: string;
-  referenceSpot?: number | null;
+  referenceSpot?: string | number | null;
+  volume?: string | null;
+  open_interest?: string | null;
+  source_quote?: Record<string, unknown>;
   futuresModel?: boolean;
   source?: string;
+  source_clock_label?: string;
+  source_clock_qualification?: string;
+  quantity_units?: {volume?: string | null; open_interest?: string | null};
 };
 const defaultExpiry = () =>
   new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
@@ -114,6 +121,9 @@ export function OptionsLab() {
   const [underlyings, setUnderlyings] = useState<OptionUnderlying[]>([]);
   const [months, setMonths] = useState<OptionMonths["months"]>([]);
   const [month, setMonth] = useState("");
+  const [reportDate, setReportDate] = useState("2026-09-30");
+  const selectedUnderlying = underlyings.find((item) => item.symbol === akSymbol);
+  const officialDaily = chainSource === "akshare" && ["czce-option-daily", "gfex-option-daily"].includes(selectedUnderlying?.quote_source ?? "");
   const [monthBusy, setMonthBusy] = useState(false);
   const [monthRefresh, setMonthRefresh] = useState(0);
   const [chainStale, setChainStale] = useState(false);
@@ -293,14 +303,14 @@ export function OptionsLab() {
           abort.signal,
           chainSource === "akshare" ? "akshare" : "alpaca",
           chainSource === "akshare" ? month : undefined,
+          officialDaily ? reportDate : undefined,
         );
         if (abort.signal.aborted) return;
         if (
           chainSource === "akshare" &&
           result.contracts.some(
             (item) =>
-              !item.multiplier ||
-              item.multiplier <= 0 ||
+              !positiveOptionSource(item.multiplier) ||
               item.currency !== "CNY",
           )
         ) {
@@ -319,7 +329,7 @@ export function OptionsLab() {
           })),
         );
         setChainMessage(
-          `${result.note}${result.truncated ? " 当前为部分目录，请缩小查询。" : ""} ${(result.warnings ?? []).join(" ")} · 读取 ${new Date(result.fetched_at).toLocaleString()}`,
+          `${result.note}${result.source_date ? ` 历史报告日期 ${result.source_date}。` : ""}${result.metadata_contract_count ? ` 目录 ${result.metadata_contract_count} 合约，来源行 ${result.quoted_contract_count ?? "未知"}${result.positive_close_count ? `，正日收盘 ${result.positive_close_count}` : ""}。` : ""}${result.truncated ? " 当前为部分目录，请缩小查询。" : ""} ${(result.warnings ?? []).join(" ")} · 来源报价保留精确文本，导入后的IV/Greeks/收益情景使用近似计算；原报价随组合保存。${result.reference_date ? ` 标的日线参考日期 ${result.reference_date}（日精度）。` : ""}${result.reference_clock_qualification ? ` 标的参考价的原时间标记 ${result.reference_source_label ?? "未提供"}（时区与含义未核实），获取 ${result.reference_received_at ?? "未知"}。` : ""} · 来源获取 ${new Date(result.fetched_at).toLocaleString()}`,
         );
       }
     } catch (failure) {
@@ -334,8 +344,11 @@ export function OptionsLab() {
       setError("当前为过期缓存，请重新读取成功后再导入报价。");
       return;
     }
-    const premium = (side === 1 ? contract.ask : contract.bid) ?? contract.last;
-    if (premium === null) {
+    const sourcePremium = (side === 1 ? contract.ask : contract.bid) ?? contract.last;
+    const premium = optionScenarioNumber(sourcePremium);
+    const strike = optionScenarioNumber(contract.strike);
+    const multiplier = optionScenarioNumber(contract.multiplier);
+    if (premium === null || strike === null || multiplier === null || strike <= 0 || multiplier <= 0) {
       setError("该合约没有可用价格，请选择有报价的合约。");
       return;
     }
@@ -343,13 +356,14 @@ export function OptionsLab() {
       id: crypto.randomUUID(),
       kind: contract.kind,
       quantity: side,
-      strike: contract.strike,
+      strike,
       premium,
       expiry: contract.expiry,
-      multiplier: contract.multiplier,
+      multiplier,
+      sourceQuote: {strike:optionSourceText(contract.strike),premium:optionSourceText(sourcePremium),multiplier:optionSourceText(contract.multiplier),policy:"approximate-option-scenario-v1",evidence:contract.source_quote},
       contract: contract.symbol,
       underlying: contract.underlying,
-      source: `${contract.source ?? chainSource} · ${(side === 1 ? contract.ask : contract.bid) !== null ? (side === 1 ? "卖价" : "买价") : "最后成交"}`,
+      source: `${contract.source ?? chainSource} · ${(side === 1 ? contract.ask : contract.bid) !== null ? (side === 1 ? "卖价" : "买价") : contract.price_semantics === "official_daily_close" ? `历史日收盘（${contract.source_date ?? "日期未知"}）` : "最后成交"}`,
       currency: contract.currency,
       observedAt: contract.observed,
     };
@@ -359,7 +373,7 @@ export function OptionsLab() {
         : [...current.slice(0, 11), newLeg],
     );
     if (legs.every((leg) => !leg.contract)) {
-      const price = contract.referenceSpot ?? 0;
+      const price = optionScenarioNumber(contract.referenceSpot) ?? 0;
       setSpot(price);
       setScenario(price);
       setChainMessage(
@@ -478,7 +492,7 @@ export function OptionsLab() {
                   {underlyings.length ? (
                     underlyings.map((item) => (
                       <option key={item.symbol} value={item.symbol}>
-                        {item.name} · {item.symbol}
+                        {item.name} · {item.symbol}{item.quote_source === "catalog-only" ? " · 仅目录" : item.quote_source ? " · 官方日行情" : ""}
                       </option>
                     ))
                   ) : (
@@ -486,6 +500,7 @@ export function OptionsLab() {
                   )}
                 </select>
               </label>
+              {officialDaily ? <label>历史报告日期<input aria-label="官方期权历史报告日期" type="date" value={reportDate} disabled={busy} onChange={(event)=>{setReportDate(event.target.value);setChain([]);setChainMessage("已更改历史报告日期，请重新加载；不会自动替换为其他日期。");}}/><small>默认2026-09-30为已核实历史报告；其他日期以实际响应为准。</small></label> : null}
               <label>
                 合约月份
                 <select
@@ -573,7 +588,7 @@ export function OptionsLab() {
               </label>
               <small>
                 已读取 {chain.length} 个合约，显示筛选后的前 150
-                条。买入取卖价、卖出取买价；无盘口时取最后成交。首次添加会替换模板。
+                条。{officialDaily ? "没有买卖盘口；以历史日收盘作为本次情景参考，零收盘不可导入。" : "买入取卖价、卖出取买价；无盘口时取最后成交。"}首次添加会替换模板。
               </small>
               <div className="chain-list">
                 {chain
@@ -585,26 +600,28 @@ export function OptionsLab() {
                     <article key={item.symbol}>
                       <strong>
                         {item.underlying} · {item.kind === "call" ? "购" : "沽"}{" "}
-                        {item.strike}
+                        {optionSourceText(item.strike)}
                       </strong>
                       <small>
-                        {item.expiry} · {item.bid ?? "—"} / {item.ask ?? "—"}
+                        {item.expiry} · 买 {optionSourceText(item.bid)} / 卖 {optionSourceText(item.ask)} / {optionDayPriceText(item)}
                       </small>
                       <small>
-                        乘数 {item.multiplier} · {item.currency} ·{" "}
-                        {item.observed
+                        乘数 {optionSourceText(item.multiplier)} · {item.currency} ·{" "}
+                        {optionDayClockText(item) ?? (item.observed
                           ? new Date(item.observed).toLocaleString()
-                          : "报价时间未提供"}
+                          : "报价时间未提供")}
                       </small>
+                      {item.source_clock_qualification === "unverified_timezone_and_role" ? <small>来源时间标记 {item.source_clock_label ?? "未提供"}（时区与含义未核实） · 获取 {item.source_received_at ?? "未知"}</small> : null}
+                      <small>成交量 {optionSourceText(item.volume)}{item.quantity_units?.volume ?? "（来源原值，单位未核实）"} · 持仓 {optionSourceText(item.open_interest)}{item.quantity_units?.open_interest ?? "（来源原值，单位未核实）"}</small>
                       <div>
                         <button
-                          disabled={legs.length >= 12 || chainStale}
+                          disabled={legs.length >= 12 || chainStale || !positiveOptionSource(item.ask ?? item.last)}
                           onClick={() => addContract(item, 1)}
                         >
                           买入
                         </button>
                         <button
-                          disabled={legs.length >= 12 || chainStale}
+                          disabled={legs.length >= 12 || chainStale || !positiveOptionSource(item.bid ?? item.last)}
                           onClick={() => addContract(item, -1)}
                         >
                           卖出

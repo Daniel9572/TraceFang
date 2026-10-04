@@ -106,7 +106,8 @@ ON CONFLICT (instrument_symbol, source_id) DO UPDATE SET
     change = EXCLUDED.change,
     change_percent = EXCLUDED.change_percent,
     raw_payload = EXCLUDED.raw_payload
-WHERE EXCLUDED.observed_at >= latest_quotes.observed_at
+WHERE (EXCLUDED.observed_at, EXCLUDED.received_at)
+    >= (latest_quotes.observed_at, latest_quotes.received_at)
 """
 
 _SELECT_LATEST_QUOTE = """
@@ -166,7 +167,7 @@ FROM (
             WHEN raw_payload ->> 'observation_kind' = 'snapshot' THEN 'snapshot'
             ELSE 'event'
         END AS observation_kind
-    FROM quote_events
+    FROM normalized_quote_events
     WHERE instrument_symbol = $1
       AND source_id = ANY($2::text[])
       AND ($3::bigint IS NULL OR id < $3)
@@ -252,7 +253,7 @@ WITH persisted AS (
         NULL::numeric AS volume,
         jsonb_build_object('derived_from', 'persisted_quote_events') AS raw_payload,
         1 AS record_rank
-    FROM quote_events
+    FROM normalized_quote_events
     WHERE instrument_symbol = $1
       AND $2 = 60
       AND source_id = ANY($4::text[])
@@ -449,7 +450,7 @@ FROM (
         (array_agg(last ORDER BY observed_at DESC, id DESC))[1] AS close,
         max(observed_at) AS observed_at,
         max(received_at) AS received_at
-    FROM quote_events
+    FROM normalized_quote_events
     WHERE instrument_symbol = $1 AND source_id = $2 AND observed_at >= $4
     GROUP BY date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0))
     ORDER BY open_time DESC
@@ -468,7 +469,7 @@ SELECT
     (array_agg(last ORDER BY observed_at DESC, id DESC))[1] AS close,
     max(observed_at) AS observed_at,
     max(received_at) AS received_at
-FROM quote_events
+FROM normalized_quote_events
 WHERE instrument_symbol = $1
   AND source_id = $2
   AND observed_at >= $4
@@ -490,7 +491,7 @@ FROM (
         (array_agg(last ORDER BY observed_at DESC, id DESC))[1] AS close,
         max(observed_at) AS observed_at,
         max(received_at) AS received_at
-    FROM quote_events
+    FROM normalized_quote_events
     WHERE instrument_symbol = $1 AND source_id = $2 AND observed_at < $4
     GROUP BY date_bin($3::int * INTERVAL '1 second', observed_at, to_timestamp(0))
     ORDER BY open_time DESC
@@ -716,6 +717,24 @@ ON CONFLICT (
     ),
     updated_at = now()
 """
+
+# Keep the same indexed aggregate while batching all requested trading buckets
+# into one database round trip. Empty buckets retain their ordinal position.
+_AGGREGATE_REALTIME_BAR_BUCKETS = (
+    """
+SELECT boundaries.bucket_index, aggregate.*
+FROM unnest($3::timestamptz[], $4::timestamptz[])
+    WITH ORDINALITY AS boundaries(start_time, end_time, bucket_index)
+LEFT JOIN LATERAL (
+"""
+    + _AGGREGATE_REALTIME_BAR_BUCKET.replace("$3", "boundaries.start_time").replace(
+        "$4", "boundaries.end_time"
+    )
+    + """
+) AS aggregate ON true
+ORDER BY boundaries.bucket_index
+"""
+)
 
 _SELECT_MATERIALIZED_PERIOD_BARS_BEFORE = """
 SELECT *
@@ -1185,6 +1204,26 @@ def _quote_from_row(row: Mapping[str, object], instrument: Instrument) -> QuoteS
     )
 
 
+def _period_bucket_aggregate_from_row(row: Mapping[str, object]) -> PeriodBarBucketAggregate:
+    return PeriodBarBucketAggregate(
+        first_open_time=row["first_open_time"],
+        open=Decimal(row["open"]),
+        high=Decimal(row["high"]),
+        low=Decimal(row["low"]),
+        close=Decimal(row["close"]),
+        volume=Decimal(row["volume"]) if row["volume"] is not None else None,
+        all_final=bool(row["all_final"]),
+        any_authoritative=bool(row["any_authoritative"]),
+        finalized_at=row["finalized_at"],
+        revision=int(row["revision"]),
+        component_count=int(row["component_count"]),
+        provider_symbol=str(row["provider_symbol"]),
+        evidence_channel_id=str(row["evidence_channel_id"]),
+        observed_at=row["observed_at"],
+        received_at=row["received_at"],
+    )
+
+
 class PostgresMarketDataStore:
     def __init__(self, settings: PostgresSettings) -> None:
         self._settings = settings
@@ -1205,7 +1244,9 @@ class PostgresMarketDataStore:
         )
         try:
             async with pool.acquire() as connection:
-                await connection.execute(SCHEMA_SQL)
+                await connection.execute(
+                    SCHEMA_SQL, timeout=max(60, self._settings.command_timeout_seconds)
+                )
         except BaseException:
             await pool.close()
             raise
@@ -1356,9 +1397,9 @@ class PostgresMarketDataStore:
         instruments = {candle.instrument.symbol: candle.instrument for candle in candles}
         sources = {candle.source.provider for candle in candles}
         async with pool.acquire() as connection, connection.transaction():
-            for instrument in instruments.values():
+            for instrument in sorted(instruments.values(), key=lambda item: item.symbol):
                 await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
-            for source_id in sources:
+            for source_id in sorted(sources):
                 await connection.execute(_UPSERT_SOURCE, source_id)
             await connection.executemany(_UPSERT_CANDLE, [_candle_values(row) for row in candles])
 
@@ -1385,9 +1426,9 @@ class PostgresMarketDataStore:
             if current is None or bar.open_time > current.open_time:
                 live_authority[key] = bar
         async with pool.acquire() as connection, connection.transaction():
-            for instrument in instruments.values():
+            for instrument in sorted(instruments.values(), key=lambda item: item.symbol):
                 await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
-            for source_id in sources:
+            for source_id in sorted(sources):
                 await connection.execute(_UPSERT_SOURCE, source_id)
             await connection.executemany(
                 _UPSERT_REALTIME_BAR,
@@ -1528,23 +1569,52 @@ class PostgresMarketDataStore:
             )
         if row is None:
             return None
-        return PeriodBarBucketAggregate(
-            first_open_time=row["first_open_time"],
-            open=Decimal(row["open"]),
-            high=Decimal(row["high"]),
-            low=Decimal(row["low"]),
-            close=Decimal(row["close"]),
-            volume=Decimal(row["volume"]) if row["volume"] is not None else None,
-            all_final=bool(row["all_final"]),
-            any_authoritative=bool(row["any_authoritative"]),
-            finalized_at=row["finalized_at"],
-            revision=int(row["revision"]),
-            component_count=int(row["component_count"]),
-            provider_symbol=str(row["provider_symbol"]),
-            evidence_channel_id=str(row["evidence_channel_id"]),
-            observed_at=row["observed_at"],
-            received_at=row["received_at"],
+        return _period_bucket_aggregate_from_row(row)
+
+    async def aggregate_realtime_bar_buckets(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        bounds: Sequence[tuple[datetime, datetime]],
+    ) -> tuple[PeriodBarBucketAggregate | None, ...]:
+        if not bounds:
+            return ()
+        for start, end in bounds:
+            if start.utcoffset() is None or end.utcoffset() is None or end <= start:
+                raise ValueError("bucket bounds must be aware and increasing")
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                _AGGREGATE_REALTIME_BAR_BUCKETS,
+                instrument.symbol,
+                source_id,
+                [start for start, _ in bounds],
+                [end for _, end in bounds],
+            )
+        return tuple(
+            _period_bucket_aggregate_from_row(row) if row["first_open_time"] is not None else None
+            for row in rows
         )
+
+    async def first_realtime_bar_open_time(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+    ) -> datetime | None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            return await connection.fetchval(
+                """
+                SELECT open_time FROM realtime_bars
+                WHERE instrument_symbol = $1 AND realtime_source_id = $2
+                  AND interval_seconds = 60
+                ORDER BY open_time LIMIT 1
+                """,
+                instrument.symbol,
+                source_id,
+            )
 
     async def load_materialized_period_bars_before(
         self,
@@ -1596,9 +1666,9 @@ class PostgresMarketDataStore:
             for bar in bars
         ]
         async with pool.acquire() as connection, connection.transaction():
-            for instrument in instruments.values():
+            for instrument in sorted(instruments.values(), key=lambda item: item.symbol):
                 await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
-            for candidate in sources:
+            for candidate in sorted(sources):
                 await connection.execute(_UPSERT_SOURCE, candidate)
             await connection.executemany(_UPSERT_MATERIALIZED_PERIOD_BAR, values)
 
@@ -1941,7 +2011,7 @@ class PostgresMarketDataStore:
                 *(bar.source.provider for bar in bars),
                 *(bar.evidence_channel_id for bar in bars),
             }
-            for source_id in source_ids:
+            for source_id in sorted(source_ids):
                 await connection.execute(_UPSERT_SOURCE, source_id)
 
             await connection.fetchval(
@@ -2090,8 +2160,8 @@ class PostgresMarketDataStore:
         pool = self._require_pool()
         async with pool.acquire() as connection, connection.transaction():
             await connection.execute(_UPSERT_INSTRUMENT, *_instrument_values(instrument))
-            await connection.execute(_UPSERT_SOURCE, realtime_source_id)
-            await connection.execute(_UPSERT_SOURCE, upstream_channel_id)
+            for source_id in sorted({realtime_source_id, upstream_channel_id}):
+                await connection.execute(_UPSERT_SOURCE, source_id)
             await connection.execute(
                 _UPSERT_CANDLE_CACHE_RANGE,
                 instrument.symbol,

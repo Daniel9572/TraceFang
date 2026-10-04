@@ -238,7 +238,7 @@ def research_router(
 
     @router.get("/option-underlyings")
     async def option_underlyings() -> list[dict]:
-        return [{key: row[key] for key in ("symbol", "name", "category")} for row in AK_UNDERLYINGS]
+        return [{key: row.get(key) for key in ("symbol", "name", "category", "quote_source", "daily_date", "availability")} for row in AK_UNDERLYINGS]
 
     @router.get("/option-months/{symbol}")
     async def option_months(symbol: str) -> dict:
@@ -254,6 +254,7 @@ def research_router(
         expiry: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
         source: Literal["alpaca", "akshare"] = "alpaca",
         month: str | None = Query(default=None, pattern=r"^\d{6}$"),
+        report_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ) -> dict:
         try:
             if source == "akshare":
@@ -261,7 +262,9 @@ def research_router(
                     raise ResearchError("请先选择合约月份。", 422)
                 if expiry is not None:
                     raise ResearchError("AKShare 使用合约月份, 实际到期日由合约目录提供。", 422)
-                return await data().akshare_option_chain(symbol.upper(), month)
+                return await data().akshare_option_chain(symbol.upper(), month, report_date) if report_date is not None else await data().akshare_option_chain(symbol.upper(), month)
+            if report_date is not None:
+                raise ResearchError("该来源不是官方日行情，不能应用报告日期。", 422)
             return await data().option_chain(symbol.upper(), expiry)
         except ResearchError as error:
             raise HTTPException(error.status, str(error)) from None

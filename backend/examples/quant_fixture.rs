@@ -1,0 +1,21 @@
+//! Explicit fixed-data integration fixture. Never targets the production directory.
+#[path="../src/capture.rs"]mod capture;
+#[path="../src/catalog.rs"]mod catalog;
+#[path="../src/providers/mod.rs"]mod providers;
+use anyhow::{Result,Context,ensure};
+use chrono::{DateTime,Utc};
+use serde_json::json;
+use tracefang_core::{native_store::Store,persistence_contract::*};
+use std::{path::Path,sync::Arc};
+
+fn bar(index:i64,symbol:&str,revision:u64)->ImportBarRow{
+ let begin:DateTime<Utc>="2026-09-28T00:00:00Z".parse().unwrap();let at=begin+chrono::Duration::minutes(index);let price=if symbol=="XAG/USD"{30}else{2000}+index%13;
+ let close=format!("{price}.1234567890123456789012345678");
+ ImportBarRow{instrument_symbol:symbol.into(),realtime_source_id:"jin10_client".into(),evidence_channel_id:"jin10_web".into(),interval_seconds:60,open_time_ns:at.timestamp_nanos_opt().unwrap(),close_time_ns:(at+chrono::Duration::minutes(1)).timestamp_nanos_opt().unwrap(),open:close.clone(),high:(price+2).to_string(),low:(price-2).to_string(),close,volume:if index%17==0{None}else{Some((index%1000).to_string())},revision,received_sequence:None,state:"final".into(),finalized_at_ns:Some((at+chrono::Duration::minutes(1)).timestamp_nanos_opt().unwrap()),source_observed_at_ns:at.timestamp_nanos_opt().unwrap(),received_at_ns:(at+chrono::Duration::minutes(1)).timestamp_nanos_opt().unwrap(),source_metadata:json!({"provider":"fixed_quant_integration","provider_symbol":symbol,"observed_at":at,"received_at":at+chrono::Duration::minutes(1),"raw_payload":{"fixture":true,"bucket_end":at+chrono::Duration::minutes(1)}}),evidence:json!({"fixture":"synthetic exact data for product integration; not production prices"})}
+}
+#[tokio::main]async fn main()->Result<()>{
+ let args:Vec<_>=std::env::args().collect();let mode=args.get(1).context("seed|append|correct DIRECTORY [COUNT]")?;let root=Path::new(args.get(2).context("isolated directory required")?);ensure!(root.to_string_lossy().contains("TraceFang-validation"),"fixture refuses directories without explicit validation namespace");std::fs::create_dir_all(root)?;let store=Store::open(root.join("facts.redb"))?;
+ if mode=="seed"{let count=args.get(3).map(|v|v.parse()).transpose()?.unwrap_or(2000_i64);let stage=store.staging("fixed-quant-fixture-v1").await?;for (offset,rows)in (0..count).flat_map(|index|[bar(index,"XAU/USD",1),bar(index,"XAG/USD",1)]).collect::<Vec<_>>().chunks(1000).enumerate(){stage.import_bars(ImportBatch{context:ImportContext{origin_id:"fixed_quant_fixture".into(),source_fingerprint:"explicit_test_fixture_v1".into(),schema_version:SCHEMA_VERSION.into(),range_label:"initial".into(),legacy_cursor:None,expected_sha256:None},row_offset:(offset*1000)as u64,rows:rows.to_vec()}).await?;}let manifest=stage.verify_staging().await?;store.activate_staging("fixed-quant-fixture-v1",manifest).await?;store.set_metadata("fixture","count",json!(count)).await?;}
+ else{ensure!(matches!(mode.as_str(),"append"|"correct"),"unknown fixture operation");let count=store.metadata("fixture","count").await?.context("fixture not seeded")?.as_i64().context("fixture count missing")?;let capture=capture::Capture::connect(root.join("capture.redb").to_str().unwrap()).await?;let current=store.version().await?;let seq=current.committed_capture.as_ref().map_or(1,|p|p.sequence+1);let frame=capture::ProviderFrame{version:1,channel:"fixed_quant_fixture".into(),connection_id:"validation".into(),sequence:seq,received_at:"2026-10-03T00:00:00Z".parse()?,encoding:"json".into(),body:serde_json::to_vec(&json!({"fixture":true,"operation":mode,"sequence":seq.to_string()}))?};let receipt=capture.append(&frame).await?;let index=if mode=="append"{count}else{count/2};let mut row=bar(index,"XAU/USD",if mode=="append"{1}else{2});if mode=="correct"{row.close="2004.9999999999999999999999999999".into();row.high="2020".into();row.low="1900".into();}let decoder=providers::Decoder::new(Arc::new(catalog::Catalog::embedded()?));store.commit_rows_with_decoder(receipt.position,vec![row],vec![],vec![],Some(decoder.snapshot()?)).await?;if mode=="append"{store.set_metadata("fixture","count",json!(count+1)).await?;}capture.close_and_drain().await?;}
+ println!("{}",serde_json::to_string(&json!({"fixture":true,"mode":mode,"directory":root,"version":store.version().await?}))?);store.close().await?;Ok(())
+}

@@ -6,6 +6,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import asyncpg
+
 from tracefang.application.persistence import MarketDataStore, PersistenceHealth
 from tracefang.domain.market_events import RealtimeBar
 from tracefang.domain.models import Candle, QuoteSnapshot
@@ -125,6 +127,13 @@ class BufferedMarketDataWriter:
                     await self._store.save_realtime_bars(pending.values)
             except asyncio.CancelledError:
                 raise
+            except (asyncpg.TransactionRollbackError, TimeoutError) as error:
+                # The transaction has rolled back, but pooled connections remain
+                # usable. Closing the shared read pool would also drop charts.
+                self._state = "unavailable"
+                self._detail = self._safe_error(error)
+                await asyncio.sleep(min(self._reconnect_seconds, 0.1))
+                continue
             except Exception as error:
                 self._state = "unavailable"
                 self._detail = self._safe_error(error)

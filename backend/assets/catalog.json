@@ -1,0 +1,257 @@
+[
+  {
+    "code": "XAUUSD",
+    "name": "国际现货黄金（伦敦金现）",
+    "instrument": {
+      "symbol": "XAU/USD",
+      "asset_class": "spot",
+      "base": "XAU",
+      "quote": "USD",
+      "venue": "OTC"
+    },
+    "price_unit": "美元/金衡盎司",
+    "price_digits": 2,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "jin10_client"
+    ],
+    "market_schedule_id": "spot_metals"
+  },
+  {
+    "code": "XAGUSD",
+    "name": "现货白银",
+    "instrument": {
+      "symbol": "XAG/USD",
+      "asset_class": "spot",
+      "base": "XAG",
+      "quote": "USD",
+      "venue": "OTC"
+    },
+    "price_unit": "美元/盎司",
+    "price_digits": 3,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "jin10_client"
+    ],
+    "market_schedule_id": "spot_metals"
+  },
+  {
+    "code": "USDCNH",
+    "name": "美元兑离岸人民币",
+    "instrument": {
+      "symbol": "USD/CNH",
+      "asset_class": "forex",
+      "base": "USD",
+      "quote": "CNH",
+      "venue": "OTC"
+    },
+    "price_unit": "人民币/美元",
+    "price_digits": 4,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "jin10_client"
+    ],
+    "market_schedule_id": "forex"
+  },
+  {
+    "code": "XAUCNHG",
+    "name": "国际金(人民币/克)",
+    "instrument": {
+      "symbol": "XAU/CNH-GRAM",
+      "asset_class": "spot",
+      "base": "XAU",
+      "quote": "CNH",
+      "venue": "DERIVED"
+    },
+    "price_unit": "人民币/克",
+    "price_digits": 2,
+    "quote_kind": "derived",
+    "history_backfill_supported": false,
+    "dependencies": [
+      {
+        "symbol": "XAU/USD",
+        "asset_class": "spot",
+        "base": "XAU",
+        "quote": "USD",
+        "venue": "OTC"
+      },
+      {
+        "symbol": "USD/CNH",
+        "asset_class": "forex",
+        "base": "USD",
+        "quote": "CNH",
+        "venue": "OTC"
+      }
+    ],
+    "source_ids": [
+      "jin10_client"
+    ],
+    "market_schedule_id": "spot_metals"
+  },
+  {
+    "code": "AU8888",
+    "name": "沪金加权",
+    "instrument": {
+      "symbol": "AU8888",
+      "asset_class": "index",
+      "base": "AU",
+      "quote": "CNY",
+      "venue": "SHFE"
+    },
+    "price_unit": "人民币/克",
+    "price_digits": 2,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "shfe_metals"
+  },
+  {
+    "code": "AG8888",
+    "name": "沪银加权",
+    "instrument": {
+      "symbol": "AG8888",
+      "asset_class": "index",
+      "base": "AG",
+      "quote": "CNY",
+      "venue": "SHFE"
+    },
+    "price_unit": "人民币/千克",
+    "price_digits": 0,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "shfe_metals"
+  },
+  {
+    "code": "AU2610",
+    "name": "沪金2610",
+    "instrument": {
+      "symbol": "AU2610",
+      "asset_class": "future",
+      "base": "AU",
+      "quote": "CNY",
+      "venue": "SHFE"
+    },
+    "price_unit": "人民币/克",
+    "price_digits": 2,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "shfe_metals"
+  },
+  {
+    "code": "AG2706",
+    "name": "沪银2706",
+    "instrument": {
+      "symbol": "AG2706",
+      "asset_class": "future",
+      "base": "AG",
+      "quote": "CNY",
+      "venue": "SHFE"
+    },
+    "price_unit": "人民币/千克",
+    "price_digits": 0,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "shfe_metals"
+  },
+  {
+    "code": "USDIND",
+    "name": "美元指数",
+    "instrument": {
+      "symbol": "USDIND",
+      "asset_class": "index",
+      "base": "USD",
+      "quote": "BASKET",
+      "venue": "ICE"
+    },
+    "price_unit": "点",
+    "price_digits": 4,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "usd_index"
+  },
+  {
+    "code": "BRN0Y",
+    "name": "布伦特原油连续",
+    "instrument": {
+      "symbol": "BRN0Y",
+      "asset_class": "future",
+      "base": "BRN",
+      "quote": "USD",
+      "venue": "ICE"
+    },
+    "price_unit": "美元/桶",
+    "price_digits": 2,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "ice_brent"
+  },
+  {
+    "code": "SHCOMP",
+    "name": "上证指数",
+    "instrument": {
+      "symbol": "000001.SH",
+      "asset_class": "index",
+      "base": "SSE",
+      "quote": "CNY",
+      "venue": "SSE"
+    },
+    "price_unit": "点",
+    "price_digits": 2,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "sse"
+  },
+  {
+    "code": "IXIC",
+    "name": "纳斯达克综合指数",
+    "instrument": {
+      "symbol": "IXIC",
+      "asset_class": "index",
+      "base": "NASDAQ",
+      "quote": "USD",
+      "venue": "NASDAQ"
+    },
+    "price_unit": "点",
+    "price_digits": 3,
+    "quote_kind": "direct",
+    "history_backfill_supported": true,
+    "dependencies": [],
+    "source_ids": [
+      "tonghuashun_futures"
+    ],
+    "market_schedule_id": "nasdaq"
+  }
+]

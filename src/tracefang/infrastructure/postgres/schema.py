@@ -1,4 +1,7 @@
-SCHEMA_SQL = """
+from tracefang.infrastructure.postgres.market_time import MARKET_TIME_SCHEMA_SQL
+
+SCHEMA_SQL = (
+    """
 CREATE TABLE IF NOT EXISTS instruments (
     symbol TEXT PRIMARY KEY,
     asset_class TEXT NOT NULL,
@@ -362,3 +365,5 @@ CREATE TABLE IF NOT EXISTS standard_candles (
 CREATE INDEX IF NOT EXISTS ix_standard_candles_instrument_time
     ON standard_candles (instrument_symbol, interval_seconds, open_time DESC);
 """
+    + MARKET_TIME_SCHEMA_SQL
+)

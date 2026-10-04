@@ -142,9 +142,9 @@ export interface ExpertGoldEventCatalogSnapshot {
 export interface ExpertVolatilityEodIndex {
   index_code: "VIX" | "GVZ";
   underlying: "SPX" | "GLD";
-  value: number;
+  value: number | string;
   as_of: string;
-  trailing_percentile_252: number | null;
+  trailing_percentile_252: number | string | null;
   history_sample_size: number;
   history_start: string | null;
   history_end: string | null;
@@ -172,10 +172,10 @@ export interface ExpertVolatilityContext {
 export interface ExpertShfePositioningContract {
   product_code: "AU" | "AG";
   contract_code: string;
-  volume: number;
-  open_interest: number;
-  open_interest_change: number | null;
-  last_price: number | null;
+  volume: number | string;
+  open_interest: number | string;
+  open_interest_change: number | string | null;
+  last_price: number | string | null;
   observed_at: string;
 }
 
@@ -189,9 +189,9 @@ export interface ExpertShfePositioningContext {
   declared_delay_seconds: number;
   product_code: "AU" | "AG";
   contract_count: number;
-  volume: number;
-  open_interest: number;
-  open_interest_change: number | null;
+  volume: number | string;
+  open_interest: number | string;
+  open_interest_change: number | string | null;
   open_interest_change_contracts: number;
   unit: "lots";
   counting_method: "single_side";
@@ -227,10 +227,10 @@ export interface ExpertMultiTimeframeItem {
   last_open_time: string | null;
   last_bucket_end: string | null;
   last_available_at: string | null;
-  last_close: number | null;
-  sma_fast: number | null;
-  sma_slow: number | null;
-  window_return_percent: number | null;
+  last_close: number | string | null;
+  sma_fast: number | string | null;
+  sma_slow: number | string | null;
+  window_return_percent: number | string | null;
   limitation: string | null;
 }
 
@@ -285,8 +285,8 @@ export interface ExpertEventAssessment {
   evidence: string[];
 }
 
-export type ExpertDrawingTool = "trend" | "horizontal" | "rectangle" | "fibonacci";
-export type ExpertDrawingSnapMode = "off" | "weak";
+export type ExpertDrawingTool = "trend" | "ray" | "horizontal" | "vertical" | "channel" | "rectangle" | "fibonacci" | "text" | "measure";
+export type ExpertDrawingSnapMode = "off" | "weak" | "strong";
 
 export interface ExpertDrawingPoint {
   time: number;
@@ -296,6 +296,9 @@ export interface ExpertDrawingPoint {
 export interface ExpertDrawing {
   id: string;
   type: ExpertDrawingTool;
+  locked?: boolean;
+  text?: string;
+  widthAnchor?: ExpertDrawingPoint;
   start: ExpertDrawingPoint;
   end: ExpertDrawingPoint;
   color: string;
@@ -596,11 +599,11 @@ export interface ExpertOptionExpiryAnalysis {
   expiry: string;
   underlying_price: number | null;
   option_count: number;
-  call_open_interest: number;
-  put_open_interest: number;
+  call_open_interest: number | null;
+  put_open_interest: number | null;
   put_call_open_interest_ratio: number | null;
-  call_volume: number;
-  put_volume: number;
+  call_volume: number | null;
+  put_volume: number | null;
   put_call_volume_ratio: number | null;
   atm_strike: number | null;
   call_wall_strike: number | null;
@@ -625,9 +628,9 @@ export interface ExpertOptionContract {
   ask: number | null;
   last: number | null;
   previous_settlement: number | null;
-  volume: number;
-  open_interest: number;
-  open_interest_change: number;
+  volume: number | null;
+  open_interest: number | null;
+  open_interest_change: number | null;
   turnover: number | null;
   observed_at: string;
   delta: number | null;
@@ -640,8 +643,8 @@ export interface ExpertOptionUnderlying {
   ask: number | null;
   last: number | null;
   previous_settlement: number | null;
-  volume: number;
-  open_interest: number;
+  volume: number | null;
+  open_interest: number | null;
   observed_at: string;
 }
 
@@ -666,6 +669,12 @@ export interface ExpertAiModel {
 
 export type ExpertAiDiagnosticCode =
   | "analysis_failed"
+  | "analysis_context_limit"
+  | "analysis_usage_limit"
+  | "analysis_model_unavailable"
+  | "analysis_network_failed"
+  | "analysis_cli_failed"
+  | "analysis_message_missing"
   | "analysis_timeout"
   | "cli_not_found"
   | "cli_path_invalid"
@@ -676,6 +685,8 @@ export type ExpertAiDiagnosticCode =
   | "status_unrecognized";
 
 export interface ExpertAiAnalysis {
+  code?:string;period?:string;snapshot_hash?:string;input_hash?:string;calculation_version?:string;
+  parameters?:import("./quantTypes").QuantParameters;snapshot_token?:Record<string,unknown>;model?:string;reasoning_effort?:string;
   state: "completed" | "unavailable" | "not_authenticated" | "timeout" | "failed" | "error";
   provider: string;
   analysis: string | null;
@@ -684,6 +695,8 @@ export interface ExpertAiAnalysis {
   auth_mode: string | null;
   source_id: string;
   data_as_of: string | null;
-  bar_count: number;
+  bar_count: string | number;
   diagnostic_code: ExpertAiDiagnosticCode | null;
+  request_evidence?: {payload_version:string;payload_bytes:number;estimated_input_tokens:number;recent_bar_count:number;omitted_chart_point_count:number};
+  cli_diagnostic?: {code:string;exit_code:number|null;event_types:string[]};
 }

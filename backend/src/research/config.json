@@ -1,0 +1,910 @@
+{
+  "sources": [
+    {
+      "id": "eastmoney",
+      "name": "东方财富",
+      "assets": [
+        "equity",
+        "etf",
+        "index"
+      ],
+      "periods": [
+        "1d",
+        "1w",
+        "1M"
+      ],
+      "credentials": [],
+      "market": "沪深股票 / ETF / 指数",
+      "note": "公开网页行情; 收盘研究用途, 无可用性保证。复权由来源计算。",
+      "url": "https://quote.eastmoney.com/",
+      "mode": "daily"
+    },
+    {
+      "id": "sina",
+      "name": "新浪期货",
+      "assets": [
+        "future"
+      ],
+      "periods": [
+        "1d"
+      ],
+      "credentials": [],
+      "market": "国内商品期货 / 连续合约",
+      "note": "公开日线; 以 0 结尾为连续观察序列, 不能视为可下单合约。",
+      "url": "https://finance.sina.com.cn/futures/",
+      "mode": "daily"
+    },
+    {
+      "id": "tencent",
+      "name": "腾讯证券",
+      "assets": [
+        "equity",
+        "etf",
+        "index"
+      ],
+      "periods": [
+        "1d",
+        "1w",
+        "1M"
+      ],
+      "credentials": [],
+      "market": "沪深股票 / ETF / 指数",
+      "note": "公开原生周期行情; 与东方财富分别读取和缓存, 可手动切换。不承诺实时性。",
+      "url": "https://gu.qq.com/",
+      "mode": "daily"
+    },
+    {
+      "id": "tushare",
+      "name": "Tushare Pro",
+      "assets": [
+        "equity",
+        "etf",
+        "index",
+        "future",
+        "option"
+      ],
+      "periods": [
+        "1d"
+      ],
+      "credentials": [
+        "TUSHARE_TOKEN"
+      ],
+      "market": "中国股票 / ETF / 指数 / 期货 / 期权",
+      "note": "官方授权接口; 日线及合约目录权限依账户积分而定。不复权。",
+      "url": "https://tushare.pro/document/1?doc_id=108",
+      "mode": "daily"
+    },
+    {
+      "id": "alpaca",
+      "name": "Alpaca",
+      "assets": [
+        "equity",
+        "etf",
+        "option"
+      ],
+      "periods": [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "1d",
+        "1w",
+        "1M"
+      ],
+      "credentials": [
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY"
+      ],
+      "market": "美股 / ETF / 美股期权",
+      "note": "股票使用 IEX(单交易所); 期权链使用 indicative(指示性延迟报价); 原生历史, 非推送。",
+      "url": "https://docs.alpaca.markets/us/docs/historical-stock-data-1",
+      "mode": "snapshot"
+    },
+    {
+      "id": "akshare",
+      "name": "AKShare · 国内市场",
+      "assets": [
+        "future",
+        "option",
+        "equity",
+        "etf"
+      ],
+      "periods": [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "1d",
+        "1w",
+        "1M"
+      ],
+      "asset_periods": {
+        "future": [
+          "1m",
+          "5m",
+          "15m",
+          "30m",
+          "1h",
+          "1d"
+        ],
+        "option": [
+          "1d"
+        ],
+        "equity": [
+          "1d",
+          "1w",
+          "1M"
+        ],
+        "etf": [
+          "1d",
+          "1w",
+          "1M"
+        ]
+      },
+      "credentials": [],
+      "market": "国内股票 / ETF / 期货分钟线 / ETF、股指与商品期权",
+      "note": "股票来自东方财富, 期货与期权报价来自新浪, 合约元数据来自 OpenCTP。分钟历史仅为来源可提供的近期窗口; 不承诺完整历史或实时推送。",
+      "url": "https://github.com/akfamily/akshare",
+      "mode": "snapshot"
+    }
+  ],
+  "catalog": [
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "600519.SH",
+      "name": "贵州茅台"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "601318.SH",
+      "name": "中国平安"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "600036.SH",
+      "name": "招商银行"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "000001.SZ",
+      "name": "平安银行"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "000858.SZ",
+      "name": "五粮液"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "300750.SZ",
+      "name": "宁德时代"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "002594.SZ",
+      "name": "比亚迪"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "600900.SH",
+      "name": "长江电力"
+    },
+    {
+      "source": "tencent",
+      "asset": "equity",
+      "currency": "CNY",
+      "symbol": "601398.SH",
+      "name": "工商银行"
+    },
+    {
+      "source": "tencent",
+      "asset": "etf",
+      "currency": "CNY",
+      "symbol": "510300.SH",
+      "name": "沪深300 ETF"
+    },
+    {
+      "source": "tencent",
+      "asset": "etf",
+      "currency": "CNY",
+      "symbol": "510050.SH",
+      "name": "上证50 ETF"
+    },
+    {
+      "source": "tencent",
+      "asset": "etf",
+      "currency": "CNY",
+      "symbol": "588000.SH",
+      "name": "科创50 ETF"
+    },
+    {
+      "source": "tencent",
+      "asset": "etf",
+      "currency": "CNY",
+      "symbol": "159915.SZ",
+      "name": "创业板 ETF"
+    },
+    {
+      "source": "tencent",
+      "asset": "etf",
+      "currency": "CNY",
+      "symbol": "518880.SH",
+      "name": "黄金 ETF"
+    },
+    {
+      "source": "tencent",
+      "asset": "index",
+      "currency": "CNY",
+      "symbol": "000001.SH",
+      "name": "上证指数"
+    },
+    {
+      "source": "tencent",
+      "asset": "index",
+      "currency": "CNY",
+      "symbol": "399001.SZ",
+      "name": "深证成指"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "AU0",
+      "name": "沪金连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "AG0",
+      "name": "沪银连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "CU0",
+      "name": "沪铜连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "AL0",
+      "name": "沪铝连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "RB0",
+      "name": "螺纹钢连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "HC0",
+      "name": "热卷连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "SC0",
+      "name": "原油连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "RU0",
+      "name": "橡胶连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "M0",
+      "name": "豆粕连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "I0",
+      "name": "铁矿石连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "Y0",
+      "name": "豆油连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "P0",
+      "name": "棕榈油连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "C0",
+      "name": "玉米连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "CF0",
+      "name": "棉花连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "SR0",
+      "name": "白糖连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "TA0",
+      "name": "PTA连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "MA0",
+      "name": "甲醇连续"
+    },
+    {
+      "source": "akshare",
+      "asset": "future",
+      "currency": "CNY",
+      "symbol": "LC0",
+      "name": "碳酸锂连续"
+    },
+    {
+      "source": "alpaca",
+      "asset": "equity",
+      "currency": "USD",
+      "symbol": "AAPL",
+      "name": "Apple"
+    },
+    {
+      "source": "alpaca",
+      "asset": "equity",
+      "currency": "USD",
+      "symbol": "MSFT",
+      "name": "Microsoft"
+    },
+    {
+      "source": "alpaca",
+      "asset": "equity",
+      "currency": "USD",
+      "symbol": "NVDA",
+      "name": "NVIDIA"
+    },
+    {
+      "source": "alpaca",
+      "asset": "equity",
+      "currency": "USD",
+      "symbol": "AMZN",
+      "name": "Amazon"
+    },
+    {
+      "source": "alpaca",
+      "asset": "equity",
+      "currency": "USD",
+      "symbol": "GOOGL",
+      "name": "Alphabet"
+    },
+    {
+      "source": "alpaca",
+      "asset": "equity",
+      "currency": "USD",
+      "symbol": "TSLA",
+      "name": "Tesla"
+    },
+    {
+      "source": "alpaca",
+      "asset": "equity",
+      "currency": "USD",
+      "symbol": "META",
+      "name": "Meta"
+    },
+    {
+      "source": "alpaca",
+      "asset": "etf",
+      "currency": "USD",
+      "symbol": "SPY",
+      "name": "S&P 500 ETF"
+    },
+    {
+      "source": "alpaca",
+      "asset": "etf",
+      "currency": "USD",
+      "symbol": "QQQ",
+      "name": "Nasdaq 100 ETF"
+    },
+    {
+      "source": "alpaca",
+      "asset": "etf",
+      "currency": "USD",
+      "symbol": "GLD",
+      "name": "Gold ETF"
+    },
+    {
+      "source": "alpaca",
+      "asset": "etf",
+      "currency": "USD",
+      "symbol": "TLT",
+      "name": "20+ Year Treasury ETF"
+    }
+  ],
+  "underlyings": [
+    {
+      "symbol": "510050.SH",
+      "name": "上证50 ETF",
+      "category": "etf",
+      "sina": "50ETF"
+    },
+    {
+      "symbol": "510300.SH",
+      "name": "沪深300 ETF",
+      "category": "etf",
+      "sina": "300ETF"
+    },
+    {
+      "symbol": "IO",
+      "name": "沪深300股指期权",
+      "category": "index",
+      "sina": "hs300"
+    },
+    {
+      "symbol": "HO",
+      "name": "上证50股指期权",
+      "category": "index",
+      "sina": "sz50"
+    },
+    {
+      "symbol": "MO",
+      "name": "中证1000股指期权",
+      "category": "index",
+      "sina": "zz1000"
+    },
+    {
+      "symbol": "AU",
+      "name": "黄金期权",
+      "category": "future",
+      "sina": "黄金期权"
+    },
+    {
+      "symbol": "CU",
+      "name": "沪铜期权",
+      "category": "future",
+      "sina": "沪铜期权"
+    },
+    {
+      "symbol": "RU",
+      "name": "橡胶期权",
+      "category": "future",
+      "sina": "橡胶期权"
+    },
+    {
+      "symbol": "M",
+      "name": "豆粕期权",
+      "category": "future",
+      "sina": "豆粕期权"
+    },
+    {
+      "symbol": "C",
+      "name": "玉米期权",
+      "category": "future",
+      "sina": "玉米期权"
+    },
+    {
+      "symbol": "I",
+      "name": "铁矿石期权",
+      "category": "future",
+      "sina": "铁矿石期权"
+    },
+    {
+      "symbol": "CF",
+      "name": "棉花期权",
+      "category": "future",
+      "sina": "棉花期权"
+    },
+    {
+      "symbol": "SR",
+      "name": "白糖期权",
+      "category": "future",
+      "sina": "白糖期权"
+    },
+    {
+      "symbol": "TA",
+      "name": "PTA期权",
+      "category": "future",
+      "sina": "PTA期权"
+    },
+    {
+      "symbol": "MA",
+      "name": "甲醇期权",
+      "category": "future",
+      "sina": "甲醇期权"
+    },
+    {
+      "symbol": "RM",
+      "name": "菜籽粕期权",
+      "category": "future",
+      "sina": "菜籽粕期权"
+    },
+    {
+      "symbol": "PG",
+      "name": "液化石油气期权",
+      "category": "future",
+      "sina": "液化石油气期权"
+    },
+    {
+      "symbol": "OI",
+      "name": "菜籽油期权",
+      "category": "future",
+      "sina": "菜籽油期权"
+    },
+    {
+      "symbol": "PK",
+      "name": "花生期权",
+      "category": "future",
+      "sina": "花生期权"
+    },
+    {
+      "symbol": "159901.SZ",
+      "name": "深100ETF",
+      "category": "etf",
+      "sina": "深100ETF"
+    },
+    {
+      "symbol": "159915.SZ",
+      "name": "创业板ETF",
+      "category": "etf",
+      "sina": "创业板"
+    },
+    {
+      "symbol": "159919.SZ",
+      "name": "深300ETF",
+      "category": "etf",
+      "sina": "沪深300"
+    },
+    {
+      "symbol": "159922.SZ",
+      "name": "深中证500ETF",
+      "category": "etf",
+      "sina": "500ETF"
+    },
+    {
+      "symbol": "510500.SH",
+      "name": "沪中证500ETF",
+      "category": "etf",
+      "sina": "中证500ETF南方"
+    },
+    {
+      "symbol": "588000.SH",
+      "name": "科创50ETF",
+      "category": "etf",
+      "sina": "科创50ETF华夏"
+    },
+    {
+      "symbol": "588080.SH",
+      "name": "科创50ETF易方达",
+      "category": "etf",
+      "sina": "科创50ETF易方达"
+    },
+    {
+      "symbol": "A",
+      "name": "豆一期权",
+      "category": "future",
+      "sina": "黄大豆1号期权"
+    },
+    {
+      "symbol": "B",
+      "name": "豆二期权",
+      "category": "future",
+      "sina": "黄大豆2号期权"
+    },
+    {
+      "symbol": "EB",
+      "name": "苯乙烯期权",
+      "category": "future",
+      "sina": "苯乙烯期权"
+    },
+    {
+      "symbol": "EG",
+      "name": "乙二醇期权",
+      "category": "future",
+      "sina": "乙二醇期权"
+    },
+    {
+      "symbol": "LC",
+      "name": "碳酸锂期权",
+      "category": "future",
+      "sina": "碳酸锂期权"
+    },
+    {
+      "symbol": "PX",
+      "name": "对二甲苯期权",
+      "category": "future",
+      "sina": "二甲苯期权"
+    },
+    {
+      "symbol": "SH",
+      "name": "烧碱期权",
+      "category": "future",
+      "sina": "烧碱期权"
+    },
+    {
+      "symbol": "SI",
+      "name": "工业硅期权",
+      "category": "future",
+      "sina": "工业硅期权"
+    },
+    {
+      "symbol": "Y",
+      "name": "豆油期权",
+      "category": "future",
+      "sina": "豆油期权"
+    },
+    {
+      "symbol": "ZC",
+      "name": "动力煤期权",
+      "category": "future",
+      "sina": "动力煤期权"
+    },
+    {
+      "symbol": "AP",
+      "name": "苹果期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "CJ",
+      "name": "红枣期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "FG",
+      "name": "玻璃期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "PF",
+      "name": "短纤期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "PL",
+      "name": "丙烯期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "PR",
+      "name": "瓶片期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "SA",
+      "name": "纯碱期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "SF",
+      "name": "硅铁期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "SM",
+      "name": "锰硅期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "UR",
+      "name": "尿素期权",
+      "category": "future",
+      "quote_source": "czce-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "PS",
+      "name": "多晶硅期权",
+      "category": "future",
+      "quote_source": "gfex-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "PD",
+      "name": "钯期权",
+      "category": "future",
+      "quote_source": "gfex-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "PT",
+      "name": "铂期权",
+      "category": "future",
+      "quote_source": "gfex-option-daily",
+      "quote_price_semantics": "official_daily_close",
+      "daily_date": "2026-09-30"
+    },
+    {
+      "symbol": "PP",
+      "name": "聚丙烯期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "public_known_daily_pp_route_http412",
+        "attempted_product_request": true,
+        "retained_probe": {
+          "url": "http://www.dce.com.cn/dcereport/publicweb/dailystat/dayQuotes",
+          "method": "POST",
+          "status": 412,
+          "requested_at": "2026-10-04T04:02:32.552189+00:00",
+          "received_at": "2026-10-04T04:02:33.000682+00:00",
+          "body_sha256": "9857383e43ccbebec518866a2f5ec9ff2f60ef027a48c17eb9b63855fe2f5c39"
+        }
+      }
+    },
+    {
+      "symbol": "V",
+      "name": "PVC期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "L",
+      "name": "塑料期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "P",
+      "name": "棕榈油期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "JD",
+      "name": "鸡蛋期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "CS",
+      "name": "玉米淀粉期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "LH",
+      "name": "生猪期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "LG",
+      "name": "原木期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "BZ",
+      "name": "纯苯期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "JM",
+      "name": "焦煤期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    },
+    {
+      "symbol": "J",
+      "name": "焦炭期权",
+      "category": "future",
+      "quote_source": "catalog-only",
+      "availability": {
+        "availability": "no_original_quote_body_retained_for_this_product",
+        "attempted_product_request": false
+      }
+    }
+  ]
+}

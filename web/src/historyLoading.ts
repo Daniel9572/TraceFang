@@ -328,3 +328,12 @@ export function shouldRequestOlderHistory(
 ): boolean {
   return !loading && demandActive && isNearOlderHistoryEdge(range, dataLength);
 }
+
+// Provider cursors, not the number of displayed rows, define research coverage.
+export function canRequestResearchHistory(page: { next_before: string | null; items?: readonly unknown[] } | null, pending: boolean): boolean {
+  return Boolean(page?.next_before) && !pending;
+}
+export function resolveResearchHistoryStep(requestedCursor: string, nextCursor: string | null, added: number): HistoryLoadOutcome {
+  if (nextCursor === requestedCursor) throw new Error("来源历史游标没有向前推进，请重试；这不代表历史已结束。");
+  return { state: added > 0 ? "loaded" : nextCursor ? "advanced" : "exhausted", added, advancedMinutes: 0 };
+}

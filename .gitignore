@@ -19,4 +19,12 @@ dist/
 data/
 logs/
 assets/
+!backend/assets/
+!backend/assets/**
+backend/target/
+.mypowers/work/rust-migration/recovery/
+/.mypowers/work/
+/.mypowers/evidence/
+/.evidence/
+/archive/rust-migration/
 .DS_Store

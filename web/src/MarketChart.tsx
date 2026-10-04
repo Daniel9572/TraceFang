@@ -7,6 +7,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { GripVertical } from "lucide-react";
 import {
   AreaSeries,
   CandlestickSeries,
@@ -19,11 +20,11 @@ import {
   createChart,
   createSeriesMarkers,
   type AreaData,
+  type AutoscaleInfo,
   type CandlestickData,
   type Coordinate,
   type HistogramData,
   type IChartApi,
-  type IPaneApi,
   type IPriceLine,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
@@ -59,10 +60,14 @@ import {
   type TimelineLayout,
   type TimelineSessionGap,
 } from "./chartTimeAxis";
+import { DrawingSurface } from "./DrawingSurface";
 import { DrawingOverlay, type DrawingProjection } from "./DrawingOverlay";
+import { VolumeProfileOverlay, type VolumeProfileHandle } from "./VolumeProfileOverlay";
+import { SourcePeriodReference } from "./SourcePeriodReference";
+import type { VolumeProfileSettings } from "./volumeProfile";
 import "./chart-overlays.css";
-import { weakDrawingSnap } from "./expertDrawing";
-import type { ChartIndicatorLayer, ChartLayer } from "./chartLayers";
+import { drawingSnap, effectiveDrawingSnap, nearestDrawingTimeIndex } from "./expertDrawing";
+import { indicatorOverlayLayout, type ChartIndicatorLayer, type ChartLayer } from "./chartLayers";
 import {
   enabledIndicatorWarmupBars,
   historyDemandFor,
@@ -88,7 +93,7 @@ import type {
   ExpertTrendLine,
 } from "./expertTypes";
 import type { ExpertMarketStructureEvent } from "./expertSmartMoney.ts";
-import type { Candle, HoverCandle, MarketPhase, MarketSchedule, TimelineSample } from "./types";
+import type { Candle, HoverCandle, MarketPhase, MarketSchedule, TimelineSample, SourcePeriodReferenceScope } from "./types";
 import type { RealtimeBarStream } from "./realtimeBarStream";
 
 interface MarketChartProps {
@@ -114,11 +119,15 @@ interface MarketChartProps {
   drawingSnapMode?: ExpertDrawingSnapMode;
   onDrawingCommit?: (drawing: ExpertDrawing) => void;
   onDrawingUpdate?: (drawing: ExpertDrawing) => void;
-  onIndicatorPaneResize?: (layerId: string, height: number) => void;
+  selectedDrawingId?: string | null;
+  onDrawingSelect?: (id: string | null) => void;
+  onIndicatorPositionChange?: (layerId: string, position: number | null) => void;
+  onVolumeProfileChange?: (settings: Partial<VolumeProfileSettings>) => void;
   priceStatusLabel?: string;
   replayMode?: boolean;
   replayIndex?: number | null;
   replayCutoff?: number | null;
+  sourcePeriodReference?: SourcePeriodReferenceScope;
 }
 
 const UP_COLOR = "#e94357";
@@ -165,23 +174,6 @@ function gapAwarePrefixLength(
   return pointCount + low;
 }
 
-interface DrawingDraft {
-  start: ExpertDrawingPoint;
-  startX: number;
-  startY: number;
-  startSnapped: boolean;
-  currentX: number;
-  currentY: number;
-  currentSnapped: boolean;
-}
-
-interface PointerDrawingLocation {
-  point: ExpertDrawingPoint;
-  x: number;
-  y: number;
-  snapped: boolean;
-}
-
 interface IndicatorRenderState {
   historyKey: string | null;
   revision: number;
@@ -193,8 +185,6 @@ interface IndicatorRenderState {
 
 interface KdjIndicatorRuntime {
   kind: "kdj";
-  pane: IPaneApi<Time>;
-  configuredHeight: number;
   k: ISeriesApi<"Line">;
   d: ISeriesApi<"Line">;
   j: ISeriesApi<"Line">;
@@ -203,16 +193,12 @@ interface KdjIndicatorRuntime {
 
 interface RsiIndicatorRuntime {
   kind: "rsi";
-  pane: IPaneApi<Time>;
-  configuredHeight: number;
   value: ISeriesApi<"Line">;
   state: IndicatorRenderState | null;
 }
 
 interface MacdIndicatorRuntime {
   kind: "macd";
-  pane: IPaneApi<Time>;
-  configuredHeight: number;
   value: ISeriesApi<"Line">;
   signal: ISeriesApi<"Line">;
   histogram: ISeriesApi<"Histogram">;
@@ -386,128 +372,102 @@ function createIndicatorRuntime(
   chart: IChartApi,
   layer: ChartIndicatorLayer,
 ): IndicatorRuntime {
-  const pane = chart.addPane(true);
-  const paneIndex = pane.paneIndex();
-  if (layer.indicatorId === "rsi") {
-    const value = chart.addSeries(LineSeries, {
-      title: "RSI 14",
-      color: "#b49af4",
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: true,
-      crosshairMarkerVisible: false,
-      priceFormat: { type: "price", precision: 1, minMove: 0.1 },
-    }, paneIndex);
-    for (const price of [30, 50, 70]) {
-      value.createPriceLine({
-        price,
-        color: price === 50 ? "rgba(213, 168, 75, .24)" : "rgba(130, 154, 168, .3)",
-        lineWidth: 1,
-        lineStyle: price === 50 ? LineStyle.Dashed : LineStyle.Dotted,
-        axisLabelVisible: false,
-        title: "",
-      });
-    }
-    pane.priceScale("right").applyOptions({
-      borderVisible: false,
-      scaleMargins: { top: 0.08, bottom: 0.08 },
-    });
-    pane.setHeight(layer.height);
-    return { kind: "rsi", pane, configuredHeight: layer.height, value, state: null };
-  }
-  if (layer.indicatorId === "kdj") {
-    const k = chart.addSeries(LineSeries, {
-      title: "K",
-      color: "#d5a84b",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: true,
-      crosshairMarkerVisible: false,
-      priceFormat: { type: "price", precision: 1, minMove: 0.1 },
-    }, paneIndex);
-    const d = chart.addSeries(LineSeries, {
-      title: "D",
-      color: "#3fa9b7",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: true,
-      crosshairMarkerVisible: false,
-      priceFormat: { type: "price", precision: 1, minMove: 0.1 },
-    }, paneIndex);
-    const j = chart.addSeries(LineSeries, {
-      title: "J",
-      color: "#d96c5f",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: true,
-      crosshairMarkerVisible: false,
-      priceFormat: { type: "price", precision: 1, minMove: 0.1 },
-    }, paneIndex);
-    for (const price of [20, 80]) {
-      k.createPriceLine({
-        price,
-        color: "rgba(130, 154, 168, .34)",
-        lineWidth: 1,
-        lineStyle: LineStyle.Dotted,
-        axisLabelVisible: false,
-        title: "",
-      });
-    }
-    pane.priceScale("right").applyOptions({
-      borderVisible: false,
-      scaleMargins: { top: 0.12, bottom: 0.12 },
-    });
-    pane.setHeight(layer.height);
-    return { kind: "kdj", pane, configuredHeight: layer.height, k, d, j, state: null };
-  }
-
-  const histogram = chart.addSeries(HistogramSeries, {
-    title: "柱",
-    base: 0,
+  const lineOptions = {
+    priceScaleId: layer.id,
+    lineWidth: 1 as const,
     priceLineVisible: false,
     lastValueVisible: false,
-    priceFormat: { type: "price", precision: 2, minMove: 0.01 },
-  }, paneIndex);
-  const value = chart.addSeries(LineSeries, {
-    title: "DIF",
-    color: "#d5a84b",
-    lineWidth: 1,
-    priceLineVisible: false,
-    lastValueVisible: true,
     crosshairMarkerVisible: false,
-    priceFormat: { type: "price", precision: 2, minMove: 0.01 },
-  }, paneIndex);
-  const signal = chart.addSeries(LineSeries, {
-    title: "DEA",
-    color: "#3fa9b7",
-    lineWidth: 1,
-    priceLineVisible: false,
-    lastValueVisible: true,
-    crosshairMarkerVisible: false,
-    priceFormat: { type: "price", precision: 2, minMove: 0.01 },
-  }, paneIndex);
-  value.createPriceLine({
-    price: 0,
-    color: "rgba(130, 154, 168, .34)",
-    lineWidth: 1,
+    priceFormat: { type: "price" as const, precision: 1, minMove: 0.1 },
+  };
+  const referenceLine = (price: number) => ({
+    price,
+    color: "rgba(130, 154, 168, .18)",
+    lineWidth: 1 as const,
     lineStyle: LineStyle.Dotted,
     axisLabelVisible: false,
     title: "",
   });
-  pane.priceScale("right").applyOptions({
-    borderVisible: false,
-    scaleMargins: { top: 0.14, bottom: 0.14 },
-  });
-  pane.setHeight(layer.height);
-  return {
-    kind: "macd",
-    pane,
-    configuredHeight: layer.height,
-    value,
-    signal,
-    histogram,
-    state: null,
+  // Use an overlay scale in the price pane. It must never change the price range.
+  if (layer.indicatorId === "rsi") {
+    const value = chart.addSeries(LineSeries, {
+      ...lineOptions,
+      title: "",
+      color: "rgba(143, 116, 196, .75)",
+      autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
+    });
+    for (const price of [30, 50, 70]) value.createPriceLine(referenceLine(price));
+    return { kind: "rsi", value, state: null };
+  }
+  if (layer.indicatorId === "kdj") {
+    const k = chart.addSeries(LineSeries, {
+      ...lineOptions,
+      title: "",
+      color: "rgba(184, 139, 49, .75)",
+      autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
+        const info = original();
+        if (!info?.priceRange) return null;
+        return { ...info, priceRange: {
+          minValue: Math.min(0, info.priceRange.minValue),
+          maxValue: Math.max(100, info.priceRange.maxValue),
+        } };
+      },
+    });
+    const d = chart.addSeries(LineSeries, {
+      ...lineOptions, title: "", color: "rgba(63, 169, 183, .75)",
+    });
+    const j = chart.addSeries(LineSeries, {
+      ...lineOptions, title: "", color: "rgba(217, 108, 95, .65)",
+    });
+    for (const price of [20, 80]) k.createPriceLine(referenceLine(price));
+    return { kind: "kdj", k, d, j, state: null };
+  }
+  const macdOptions = {
+    ...lineOptions,
+    priceFormat: { type: "price" as const, precision: 2, minMove: 0.01 },
   };
+  const histogram = chart.addSeries(HistogramSeries, {
+    ...macdOptions, title: "", base: 0,
+  });
+  const value = chart.addSeries(LineSeries, {
+    ...macdOptions, title: "", color: "rgba(184, 139, 49, .75)",
+  });
+  const signal = chart.addSeries(LineSeries, {
+    ...macdOptions, title: "", color: "rgba(63, 169, 183, .75)",
+  });
+  value.createPriceLine(referenceLine(0));
+  return { kind: "macd", value, signal, histogram, state: null };
+}
+
+function indicatorReadout(layer: Extract<ChartLayer, { kind: "indicator" }>, hoverTime: number | null) {
+  const view = layer.series;
+  let index = view.visibleLength > 0 ? view.offset + view.visibleLength - 1 : -1;
+  if (hoverTime !== null) {
+    let low = view.offset;
+    let high = view.offset + view.visibleLength;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (view.bars[middle].time < hoverTime) low = middle + 1;
+      else high = middle;
+    }
+    index = low < view.offset + view.visibleLength && view.bars[low].time === hoverTime ? low : -1;
+  }
+  if (layer.definition.indicatorId === "rsi") {
+    return [{ label: "14", value: view.rsi.value[index], color: "#8f74c4" }];
+  }
+  if (layer.definition.indicatorId === "kdj") {
+    return [
+      { label: "K", value: view.kdj.k[index], color: "#b88b31" },
+      { label: "D", value: view.kdj.d[index], color: "#3fa9b7" },
+      { label: "J", value: view.kdj.j[index], color: "#d96c5f" },
+    ];
+  }
+  const histogram = view.macd.histogram[index];
+  return [
+    { label: "DIF", value: view.macd.value[index], color: "#b88b31" },
+    { label: "DEA", value: view.macd.signal[index], color: "#3fa9b7" },
+    { label: "柱", value: histogram, color: histogram >= 0 ? UP_COLOR : DOWN_COLOR },
+  ];
 }
 
 function removeIndicatorRuntime(chart: IChartApi, runtime: IndicatorRuntime): void {
@@ -522,8 +482,6 @@ function removeIndicatorRuntime(chart: IChartApi, runtime: IndicatorRuntime): vo
     chart.removeSeries(runtime.value);
     chart.removeSeries(runtime.signal);
   }
-  const paneIndex = runtime.pane.paneIndex();
-  if (paneIndex > 0 && chart.panes()[paneIndex] === runtime.pane) chart.removePane(paneIndex);
 }
 
 export function MarketChart({
@@ -549,11 +507,15 @@ export function MarketChart({
   drawingSnapMode = "off",
   onDrawingCommit,
   onDrawingUpdate,
-  onIndicatorPaneResize,
+  selectedDrawingId = null,
+  onDrawingSelect,
+  onIndicatorPositionChange,
+  onVolumeProfileChange,
   priceStatusLabel,
   replayMode = false,
   replayIndex = null,
   replayCutoff = null,
+  sourcePeriodReference,
 }: MarketChartProps) {
   const drawingLayers = useMemo(
     () => layers.filter((layer): layer is Extract<ChartLayer, { kind: "drawing" }> => layer.kind === "drawing"),
@@ -572,6 +534,10 @@ export function MarketChart({
       drawing.end.price,
       drawing.color,
       drawing.label,
+      drawing.locked,
+      drawing.text,
+      drawing.widthAnchor?.time,
+      drawing.widthAnchor?.price,
     ].join(":")),
   ].join("|")).join("||");
   const indicatorLayers = useMemo(
@@ -583,7 +549,7 @@ export function MarketChart({
     visibleIndicatorLayers.map((layer) => layer.definition.indicatorId),
   );
   const indicatorLayerSignature = visibleIndicatorLayers
-    .map((layer) => `${layer.definition.id}:${layer.definition.indicatorId}:${layer.definition.order}:${layer.definition.height}`)
+    .map((layer) => `${layer.definition.id}:${layer.definition.indicatorId}:${layer.definition.order}:${layer.definition.height}:${layer.definition.verticalPosition ?? "auto"}`)
     .join("|");
   const annotationLayers = useMemo(
     () => layers.filter((layer): layer is Extract<ChartLayer, { kind: "annotation" }> => layer.kind === "annotation"),
@@ -593,6 +559,8 @@ export function MarketChart({
     layer.definition.annotationId === "gaps"
     && layer.definition.visible
   ));
+  const volumeProfileLayer = annotationLayers.find((layer) => layer.definition.annotationId === "volume-profile" && layer.definition.visible);
+  const volumeProfileRef = useRef<VolumeProfileHandle | null>(null);
   const sessionBands = useMemo(
     () => annotationLayers.filter((layer) => layer.definition.visible).flatMap((layer) => layer.sessionBands),
     [annotationLayers],
@@ -710,7 +678,6 @@ export function MarketChart({
   const hoverFrameRef = useRef<number | null>(null);
   const expertDecorationFrameRef = useRef<number | null>(null);
   const paneMeasureFrameRef = useRef<number | null>(null);
-  const paneResizeReportRef = useRef(false);
   const latestPriceRef = useRef<number | null>(null);
   const dataLengthRef = useRef(0);
   const latestLogicalIndexRef = useRef(-1);
@@ -760,11 +727,7 @@ export function MarketChart({
   const pendingHoverRef = useRef<HoverCandle | null>(null);
   const lastHoverRef = useRef<HoverCandle | null>(null);
   const onHoverRef = useRef(onHover);
-  const drawingToolRef = useRef(drawingTool);
   const drawingSnapModeRef = useRef(drawingSnapMode);
-  const onDrawingCommitRef = useRef(onDrawingCommit);
-  const onIndicatorPaneResizeRef = useRef(onIndicatorPaneResize);
-  const drawingDraftRef = useRef<DrawingDraft | null>(null);
   historyLoadingRef.current = historyLoading;
   requestOlderHistoryRef.current = onRequestOlderHistory;
   requestHistoryGapRef.current = onRequestHistoryGap;
@@ -779,16 +742,45 @@ export function MarketChart({
   smartTrendLinesRef.current = smartTrendLines;
   pricePatternsRef.current = pricePatterns;
   marketStructureEventsRef.current = marketStructureEvents;
-  drawingToolRef.current = drawingTool;
   drawingSnapModeRef.current = drawingSnapMode;
-  onDrawingCommitRef.current = onDrawingCommit;
-  onIndicatorPaneResizeRef.current = onIndicatorPaneResize;
   onHoverRef.current = onHover;
   const [isFollowing, setIsFollowing] = useState(true);
-  const [drawingDraft, setDrawingDraft] = useState<DrawingDraft | null>(null);
   const [mainPaneHeight, setMainPaneHeight] = useState<number | null>(null);
+  const [indicatorHoverTime, setIndicatorHoverTime] = useState<number | null>(null);
+  const [indicatorPositionDraft, setIndicatorPositionDraft] = useState<{ id: string; position: number } | null>(null);
+  const indicatorDragRef = useRef<{
+    id: string;
+    pointerId: number;
+    startY: number;
+    top: number;
+    travel: number;
+  } | null>(null);
+  const indicatorLayout = useMemo(() => indicatorOverlayLayout(
+    visibleIndicatorLayers.map((layer) => indicatorPositionDraft?.id === layer.definition.id
+      ? { ...layer.definition, verticalPosition: indicatorPositionDraft.position }
+      : layer.definition),
+    mainPaneHeight ?? 0,
+  ), [indicatorLayerSignature, mainPaneHeight, indicatorPositionDraft]);
+  const indicatorDragPosition = (event: ReactPointerEvent) => {
+    const drag = indicatorDragRef.current;
+    return drag ? Math.min(1, Math.max(0, (drag.top + event.clientY - drag.startY) / drag.travel)) : 0;
+  };
+  const finishIndicatorDrag = (event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) => {
+    const drag = indicatorDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const position = indicatorDragPosition(event);
+    indicatorDragRef.current = null;
+    setIndicatorPositionDraft(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (commit) onIndicatorPositionChange?.(drag.id, position);
+  };
 
   const latestCandleIdentity = candles.at(-1);
+  const minuteDerivedPeriod = period.mode === "candlestick" && period.id !== "1m"
+    && latestCandleIdentity?.source.raw_payload?.derivation === "backend_period_projection"
+    && latestCandleIdentity.source.raw_payload.period_id === period.id;
   const timelineDatasetKey = [
     latestCandleIdentity?.instrument.symbol ?? "",
     latestCandleIdentity?.source.provider ?? "",
@@ -984,11 +976,11 @@ export function MarketChart({
     markerFrameRef.current = window.requestAnimationFrame(() => {
       markerFrameRef.current = null;
       refreshLiveMarker();
+      volumeProfileRef.current?.refresh();
     });
   }, [refreshLiveMarker]);
 
-  const schedulePaneMeasurement = useCallback((reportIndicatorHeights = false) => {
-    paneResizeReportRef.current = paneResizeReportRef.current || reportIndicatorHeights;
+  const schedulePaneMeasurement = useCallback(() => {
     if (paneMeasureFrameRef.current !== null) return;
     paneMeasureFrameRef.current = window.requestAnimationFrame(() => {
       paneMeasureFrameRef.current = null;
@@ -999,15 +991,6 @@ export function MarketChart({
         setMainPaneHeight((current) => current === height ? current : height);
         if (expertOverlayLayerRef.current) {
           expertOverlayLayerRef.current.style.height = `${height}px`;
-        }
-      }
-      const shouldReport = paneResizeReportRef.current;
-      paneResizeReportRef.current = false;
-      if (!shouldReport || !onIndicatorPaneResizeRef.current) return;
-      for (const [layerId, runtime] of indicatorRuntimeRef.current) {
-        const paneHeight = Math.round(runtime.pane.getHeight());
-        if (paneHeight > 0 && Math.abs(paneHeight - runtime.configuredHeight) > 1) {
-          onIndicatorPaneResizeRef.current(layerId, paneHeight);
         }
       }
     });
@@ -1021,6 +1004,7 @@ export function MarketChart({
       const next = pendingHoverRef.current;
       if (sameHoverCandle(lastHoverRef.current, next)) return;
       lastHoverRef.current = next;
+      setIndicatorHoverTime(next?.time ?? null);
       onHoverRef.current(next);
     });
   }, []);
@@ -1086,6 +1070,24 @@ export function MarketChart({
     return actualTimeForChinaAxis(chartTime);
   }, []);
 
+  const projectDrawingPoint = useCallback((point: ExpertDrawingPoint): { x: number; y: number } | null => {
+    const chart = chartRef.current, series = activeMainSeries();
+    if (!chart || !series) return null;
+    const values = periodRef.current.mode === "timeline" ? projectedTimesRef.current : candleTimesRef.current;
+    const length = periodRef.current.mode === "timeline" ? visibleProjectedLengthRef.current : visibleCandleLengthRef.current;
+    if (!length || point.time < values[0].actualTime || point.time > values[length - 1].actualTime) return null;
+    const nearest = nearestDrawingTimeIndex(values, length, point.time)!;
+    const leftIndex = values[nearest].actualTime > point.time ? Math.max(0, nearest - 1) : nearest;
+    const rightIndex = Math.min(length - 1, leftIndex + 1);
+    const left = values[leftIndex], right = values[rightIndex];
+    const x1 = chart.timeScale().timeToCoordinate(left.time as Time);
+    const x2 = chart.timeScale().timeToCoordinate(right.time as Time);
+    const y = series.priceToCoordinate(point.price);
+    if (x1 === null || x2 === null || y === null) return null;
+    const ratio = right.actualTime === left.actualTime ? 0 : (point.time - left.actualTime) / (right.actualTime - left.actualTime);
+    return { x: Number(x1) + (Number(x2) - Number(x1)) * ratio, y: Number(y) };
+  }, [activeMainSeries]);
+
   const refreshExpertDecorations = useCallback(() => {
     if (expertDecorationFrameRef.current !== null) return;
     expertDecorationFrameRef.current = window.requestAnimationFrame(() => {
@@ -1108,15 +1110,15 @@ export function MarketChart({
       for (const entry of drawingLayersRef.current) {
         if (!entry.definition.visible) continue;
         for (const drawing of entry.definition.drawings) {
-          const startTime = nearestChartTimeForActual(drawing.start.time);
-          const endTime = nearestChartTimeForActual(drawing.end.time);
-          const x1 = startTime === null ? null : chart.timeScale().timeToCoordinate(startTime as Time);
-          const x2 = endTime === null ? null : chart.timeScale().timeToCoordinate(endTime as Time);
+          const start = projectDrawingPoint(drawing.start);
+          const end = projectDrawingPoint(drawing.end);
+          const third = drawing.widthAnchor ? projectDrawingPoint(drawing.widthAnchor) : null;
           const y1 = series.priceToCoordinate(drawing.start.price);
           const y2 = series.priceToCoordinate(drawing.end.price);
           if (y1 === null || y2 === null) continue;
-          if (drawing.type !== "horizontal" && (x1 === null || x2 === null)) continue;
-          positions.push({ drawing, x1: x1 ?? plotWidth * .25, x2: x2 ?? plotWidth * .75, y1, y2 });
+          if (drawing.type !== "horizontal" && (!start || !end || (drawing.widthAnchor && !third))) continue;
+          positions.push({ drawing, x1: start?.x ?? plotWidth * .25, x2: end?.x ?? plotWidth * .75, y1, y2,
+            ...(third ? { x3: third.x, y3: third.y } : {}) });
         }
       }
       setDrawingPositions(positions);
@@ -1289,6 +1291,8 @@ export function MarketChart({
           trendLine.invalidationReason,
         ].filter(Boolean).join(" · ");
         label.setAttribute("role", "note");
+        label.setAttribute("aria-label", label.title);
+        label.tabIndex = 0;
         fragment.append(label);
       }
       const appendStructureStamp = (
@@ -1361,7 +1365,7 @@ export function MarketChart({
       }
       layer.replaceChildren(fragment);
     });
-  }, [actualTimeForChartCoordinate, nearestChartTimeForActual, priceDigits]);
+  }, [actualTimeForChartCoordinate, nearestChartTimeForActual, priceDigits, projectDrawingPoint]);
 
   const refreshTimelineDecorations = useCallback(() => {
     // Standard time-scale labels and explicit coverage metadata replace the
@@ -1393,7 +1397,7 @@ export function MarketChart({
           : '"Segoe UI", "Microsoft YaHei UI", sans-serif',
         fontSize: 12,
         panes: {
-          enableResize: true,
+          enableResize: false,
           separatorColor: expertAppearance ? "rgba(144, 174, 191, .18)" : "#e3e7ed",
           separatorHoverColor: expertAppearance ? "rgba(213, 168, 75, .28)" : "rgba(78, 125, 235, .18)",
         },
@@ -1652,7 +1656,7 @@ export function MarketChart({
       refreshExpertDecorations();
     };
     const handlePointerUp = () => {
-      schedulePaneMeasurement(true);
+      schedulePaneMeasurement();
       refreshExpertDecorations();
     };
     container.addEventListener("pointerdown", handlePointerDown, true);
@@ -1685,7 +1689,6 @@ export function MarketChart({
       hoverFrameRef.current = null;
       expertDecorationFrameRef.current = null;
       paneMeasureFrameRef.current = null;
-      paneResizeReportRef.current = false;
       resizeObserver.disconnect();
       container.removeEventListener("pointerdown", handlePointerDown, true);
       container.removeEventListener("pointermove", handlePointerMove, true);
@@ -1924,6 +1927,7 @@ export function MarketChart({
       MAX_INCREMENTAL_REPLAY_POINTS,
     );
     const realtimeTailOwnedByStream = !replayMode
+      && previousDataLength > 0
       && (candleMutation === "tail-update" || candleMutation === "tail-append");
     const canUpdateCandleIncrementally = period.mode !== "timeline"
       && replayMode
@@ -2150,8 +2154,8 @@ export function MarketChart({
       lineStyle: level.style === "solid"
         ? LineStyle.Solid
         : level.style === "dotted" ? LineStyle.Dotted : LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: level.label,
+      axisLabelVisible: false,
+      title: "",
     }));
     strategyPriceLineOwnerRef.current = series;
     scheduleLiveMarker();
@@ -2178,19 +2182,20 @@ export function MarketChart({
         runtime = createIndicatorRuntime(chart, definition);
         indicatorRuntimeRef.current.set(definition.id, runtime);
       }
-      runtime.configuredHeight = definition.height;
-      if (Math.abs(runtime.pane.getHeight() - definition.height) > 1) {
-        runtime.pane.setHeight(definition.height);
-      }
     }
-    visibleIndicatorLayers.forEach((layer, index) => {
-      indicatorRuntimeRef.current.get(layer.definition.id)?.pane.moveTo(index + 1);
-    });
     schedulePaneMeasurement();
     refreshExpertDecorations();
   // The signature owns structure changes; indicator values update in the next effect.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appearance, displayTimeZone, indicatorLayerSignature, period.mode, refreshExpertDecorations, schedulePaneMeasurement]);
+
+  useEffect(() => {
+    for (const layout of indicatorLayout) {
+      const runtime = indicatorRuntimeRef.current.get(layout.id);
+      const series = runtime?.kind === "kdj" ? runtime.k : runtime?.value;
+      series?.priceScale().applyOptions({ autoScale: true, scaleMargins: layout.scaleMargins });
+    }
+  }, [appearance, displayTimeZone, period.mode, indicatorLayout]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -2278,7 +2283,7 @@ export function MarketChart({
         histogram.push({
           time,
           value: histogramValue,
-          color: histogramValue >= 0 ? "rgba(233, 67, 87, .55)" : "rgba(53, 170, 117, .55)",
+          color: histogramValue >= 0 ? "rgba(233, 67, 87, .2)" : "rgba(53, 170, 117, .2)",
         });
       }
       runtime.value.setData(value);
@@ -2311,7 +2316,7 @@ export function MarketChart({
       runtime.histogram.update({
         time,
         value: histogramValue,
-        color: histogramValue >= 0 ? "rgba(233, 67, 87, .55)" : "rgba(53, 170, 117, .55)",
+        color: histogramValue >= 0 ? "rgba(233, 67, 87, .2)" : "rgba(53, 170, 117, .2)",
       });
     };
 
@@ -2391,12 +2396,12 @@ export function MarketChart({
       const values = projectPoints(overlay.points);
       if (values.length < 2) continue;
       const series = chart.addSeries(LineSeries, {
-        title: overlay.label,
+        title: "",
         color: overlay.color,
         lineWidth: overlay.lineWidth,
         lineStyle: chartLineStyle(overlay.lineStyle),
         priceLineVisible: false,
-        lastValueVisible: overlay.lastValueVisible,
+        lastValueVisible: false,
         crosshairMarkerVisible: false,
       });
       series.setData(values);
@@ -2411,7 +2416,7 @@ export function MarketChart({
       if (values.length < 2) continue;
       const appearance = trendLineAppearance(trendLine);
       const series = chart.addSeries(LineSeries, {
-        title: trendLine.direction === "support" ? "智能支撑" : "智能压力",
+        title: "",
         color: appearance.color,
         lineWidth: appearance.lineWidth,
         lineStyle: appearance.lineStyle,
@@ -2434,7 +2439,7 @@ export function MarketChart({
       if (values.length < 2) continue;
       const appearance = pricePatternAppearance(pattern);
       const series = chart.addSeries(LineSeries, {
-        title: pattern.label,
+        title: "",
         color: appearance.color,
         lineWidth: appearance.lineWidth,
         lineStyle: appearance.lineStyle,
@@ -2453,7 +2458,7 @@ export function MarketChart({
       if (values.length < 2) continue;
       const appearance = marketStructureAppearance(event);
       const series = chart.addSeries(LineSeries, {
-        title: event.label,
+        title: "",
         color: appearance.color,
         lineWidth: appearance.lineWidth,
         lineStyle: appearance.lineStyle,
@@ -2523,129 +2528,42 @@ export function MarketChart({
     return () => window.clearInterval(timer);
   }, [candles, marketPhase, period, priceDigits, replayMode, priceStatusLabel]);
 
-  const drawingLocation = useCallback((x: number, y: number): PointerDrawingLocation | null => {
-    const chart = chartRef.current;
-    const series = activeMainSeries();
+  const drawingLocation = useCallback((x: number, y: number, modifier = false, raw = false): ExpertDrawingPoint | null => {
+    const chart = chartRef.current, series = activeMainSeries();
     if (!chart || !series) return null;
-    const chartTime = chart.timeScale().coordinateToTime(x as Coordinate);
     const price = series.coordinateToPrice(y as Coordinate);
-    if (chartTime === null || price === null || !Number.isFinite(price)) return null;
-    const actualTime = actualTimeForChartCoordinate(Number(chartTime));
-    if (actualTime === null) return null;
-
-    if (drawingSnapModeRef.current === "weak") {
-      const timelineMode = periodRef.current.mode === "timeline";
-      const times = timelineMode ? projectedTimelineData : candleTimes;
-      const visibleLength = timelineMode ? visibleTimelineCount : visibleCandleCount;
-      const snapped = weakDrawingSnap({
-        times,
-        visibleLength,
-        targetTime: actualTime,
-        pointerX: x,
-        pointerY: y,
-        pricesAt: (index) => {
-          if (timelineMode) {
-            const value = projectedTimelineData[index]?.value;
-            return value === undefined ? [] : [value];
-          }
-          const bar = bars[index];
-          return bar ? [bar.open, bar.high, bar.low, bar.close] : [];
-        },
-        timeToCoordinate: (time) => {
-          const coordinate = chart.timeScale().timeToCoordinate(time as Time);
-          return coordinate === null ? null : Number(coordinate);
-        },
-        priceToCoordinate: (candidatePrice) => {
-          const coordinate = series.priceToCoordinate(candidatePrice);
-          return coordinate === null ? null : Number(coordinate);
-        },
-      });
-      if (snapped) {
-        return {
-          point: { time: snapped.time, price: snapped.price },
-          x: snapped.x,
-          y: snapped.y,
-          snapped: true,
-        };
-      }
+    if (price === null || !Number.isFinite(price)) return null;
+    const timelineMode = periodRef.current.mode === "timeline";
+    const times = timelineMode ? projectedTimelineData : candleTimes;
+    const visibleLength = timelineMode ? visibleTimelineCount : visibleCandleCount;
+    if (!visibleLength) return null;
+    const coordinate = (index: number) => chart.timeScale().timeToCoordinate(times[index].time as Time);
+    const firstX = coordinate(0), lastX = coordinate(visibleLength - 1);
+    if (firstX === null || lastX === null || x < firstX || x > lastX) return null;
+    let low = 0, high = visibleLength - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      const middleX = coordinate(middle);
+      if (middleX === null) return null;
+      if (middleX < x) low = middle + 1; else high = middle;
     }
-
-    return { point: { time: actualTime, price }, x, y, snapped: false };
-  }, [activeMainSeries, actualTimeForChartCoordinate, bars, candleTimes, projectedTimelineData, visibleCandleCount, visibleTimelineCount]);
-
-  const pointerDrawingLocation = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    return drawingLocation(event.clientX - bounds.left, event.clientY - bounds.top);
-  }, [drawingLocation]);
-
-  const beginDrawing = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!drawingToolRef.current) return;
-    if (drawingDraftRef.current) return;
-    const location = pointerDrawingLocation(event);
-    if (!location) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const draft = {
-      start: location.point,
-      startX: location.x,
-      startY: location.y,
-      startSnapped: location.snapped,
-      currentX: location.x,
-      currentY: location.y,
-      currentSnapped: location.snapped,
-    };
-    drawingDraftRef.current = draft;
-    setDrawingDraft(draft);
-  }, [pointerDrawingLocation]);
-
-  const updateDrawing = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const current = drawingDraftRef.current;
-    if (!current) return;
-    const location = pointerDrawingLocation(event);
-    if (!location) return;
-    const horizontal = drawingToolRef.current === "horizontal";
-    const next = {
-      ...current,
-      currentX: location.x,
-      currentY: horizontal
-        ? current.startY
-        : location.y,
-      currentSnapped: horizontal ? current.startSnapped : location.snapped,
-    };
-    drawingDraftRef.current = next;
-    setDrawingDraft(next);
-  }, [pointerDrawingLocation]);
-
-  const finishDrawing = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const current = drawingDraftRef.current;
-    const tool = drawingToolRef.current;
-    if (!current || !tool) return;
-    const endLocation = pointerDrawingLocation(event);
-    if (!endLocation || !onDrawingCommitRef.current) return;
-    if (
-      tool !== "horizontal"
-      && Math.hypot(endLocation.x - current.startX, endLocation.y - current.startY) < 4
-    ) return;
-    drawingDraftRef.current = null;
-    setDrawingDraft(null);
-    const end = tool === "horizontal"
-      ? { ...endLocation.point, price: current.start.price }
-      : endLocation.point;
-    onDrawingCommitRef.current({
-      id: `drawing:${Date.now()}:${Math.round(current.start.time)}`,
-      type: tool,
-      start: current.start,
-      end,
-      color: "#245c8c",
-      label: ({ horizontal: "水平线", trend: "趋势线", rectangle: "矩形区间", fibonacci: "斐波那契" })[tool],
-    });
-  }, [pointerDrawingLocation]);
-
-  const cancelDrawing = useCallback(() => {
-    drawingDraftRef.current = null;
-    setDrawingDraft(null);
-  }, []);
-
-  useEffect(() => { cancelDrawing(); }, [drawingTool, period.id, cancelDrawing]);
+    const rightIndex = low, leftIndex = Math.max(0, low - 1);
+    const leftX = coordinate(leftIndex), rightX = coordinate(rightIndex);
+    if (leftX === null || rightX === null) return null;
+    const ratio = rightX === leftX ? 0 : (x - leftX) / (rightX - leftX);
+    const actualTime = times[leftIndex].actualTime + (times[rightIndex].actualTime - times[leftIndex].actualTime) * ratio;
+    const snapped = raw ? null : drawingSnap({
+      times, visibleLength, targetTime: actualTime, pointerX: x, pointerY: y,
+      viewportWidth: drawingViewport.width, viewportHeight: drawingViewport.height,
+      pricesAt: (index) => {
+        if (timelineMode) { const value = projectedTimelineData[index]?.value; return value === undefined ? [] : [value]; }
+        const bar = bars[index]; return bar ? [bar.open, bar.high, bar.low, bar.close] : [];
+      },
+      timeToCoordinate: (time) => { const value = chart.timeScale().timeToCoordinate(time as Time); return value === null ? null : Number(value); },
+      priceToCoordinate: (value) => { const result = series.priceToCoordinate(value); return result === null ? null : Number(result); },
+    }, effectiveDrawingSnap(drawingSnapModeRef.current, modifier));
+    return snapped ? { time: snapped.time, price: snapped.price } : { time: actualTime, price };
+  }, [activeMainSeries, bars, candleTimes, projectedTimelineData, visibleCandleCount, visibleTimelineCount, drawingViewport]);
 
   const returnToRealtime = () => {
     const chart = chartRef.current;
@@ -2682,57 +2600,96 @@ export function MarketChart({
       data-drawings-visible={drawingsVisible ? "true" : "false"}
       data-drawing-snap-mode={drawingSnapMode}
       data-layer-count={layers.length}
-      data-indicator-pane-count={visibleIndicatorLayers.length}
+      data-indicator-pane-count={0}
+      data-indicator-overlay-count={visibleIndicatorLayers.length}
       data-timeline-available-days={period.mode === "timeline" ? timelineLayout.days.length : undefined}
       data-timeline-point-count={period.mode === "timeline" ? visibleTimelineCount : undefined}
     >
+      <div className="chart-viewport">
       <div className="chart-renderer" ref={rendererRef} />
+      {volumeProfileLayer ? <VolumeProfileOverlay ref={volumeProfileRef} chartRef={chartRef}
+        mainSeries={activeMainSeries} candles={candles} settings={volumeProfileLayer.definition.volumeProfile}
+        viewport={drawingViewport} priceDigits={priceDigits}
+        through={replayMode ? (period.mode === "timeline" ? replayCutoff : latestBar?.time ?? null) : undefined}
+        onChange={onVolumeProfileChange} /> : null}
+      <div className="chart-indicator-overlays" aria-label="悬浮指标图层">
+        {indicatorLayout.map((layout) => {
+          const layer = visibleIndicatorLayers.find((candidate) => candidate.definition.id === layout.id);
+          if (!layer) return null;
+          const precision = layer.definition.indicatorId === "macd" ? 2 : 1;
+          return (
+            <div className="chart-indicator-readout" key={layout.id}
+              data-indicator={layer.definition.indicatorId}
+              style={{ top: layout.top, height: layout.height }}>
+              <button type="button" className="chart-indicator-handle"
+                aria-label={`上下拖动 ${layer.definition.indicatorId.toUpperCase()} 图层`}
+                title="拖动上下移动 · ↑/↓微调 · Home复位 · Esc取消"
+                disabled={!onIndicatorPositionChange}
+                onPointerDown={(event) => {
+                  if (event.button !== 0 || !onIndicatorPositionChange) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.currentTarget.focus();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  indicatorDragRef.current = {
+                    id: layout.id, pointerId: event.pointerId, startY: event.clientY,
+                    top: layout.top, travel: Math.max(1, (mainPaneHeight ?? 0) - layout.height),
+                  };
+                  setIndicatorHoverTime(null);
+                  setIndicatorPositionDraft({ id: layout.id, position: layout.top / indicatorDragRef.current.travel });
+                }}
+                onPointerMove={(event) => {
+                  if (indicatorDragRef.current?.pointerId !== event.pointerId) return;
+                  event.stopPropagation();
+                  setIndicatorPositionDraft({ id: layout.id, position: indicatorDragPosition(event) });
+                }}
+                onPointerUp={(event) => finishIndicatorDrag(event, true)}
+                onPointerCancel={(event) => finishIndicatorDrag(event, false)}
+                onLostPointerCapture={() => {
+                  indicatorDragRef.current = null;
+                  setIndicatorPositionDraft(null);
+                }}
+                onKeyDown={(event) => {
+                  if (!["ArrowUp", "ArrowDown", "Home", "Escape"].includes(event.key)) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (event.key === "Escape") {
+                    const pointerId = indicatorDragRef.current?.pointerId;
+                    indicatorDragRef.current = null;
+                    setIndicatorPositionDraft(null);
+                    if (pointerId !== undefined && event.currentTarget.hasPointerCapture(pointerId)) {
+                      event.currentTarget.releasePointerCapture(pointerId);
+                    }
+                  } else if (event.key === "Home") {
+                    onIndicatorPositionChange?.(layout.id, null);
+                  } else {
+                    const step = (event.shiftKey ? 20 : 5) * (event.key === "ArrowUp" ? -1 : 1);
+                    const travel = Math.max(1, (mainPaneHeight ?? 0) - layout.height);
+                    onIndicatorPositionChange?.(layout.id, Math.min(1, Math.max(0, (layout.top + step) / travel)));
+                  }
+                }}>
+                <GripVertical size={12} aria-hidden="true" />
+                <strong>{layer.definition.indicatorId.toUpperCase()}</strong>
+                {indicatorReadout(layer, indicatorHoverTime).map((item) => (
+                  <span key={item.label} style={{ color: item.color }}>
+                    {item.label} <b>{item.value != null && Number.isFinite(item.value) ? item.value.toFixed(precision) : "—"}</b>
+                  </span>
+                ))}
+              </button>
+            </div>
+          );
+        })}
+      </div>
       <div
         ref={expertOverlayLayerRef}
         className="expert-chart-overlays"
         aria-label="专家分析图层"
       />
-      <DrawingOverlay items={drawingPositions} {...drawingViewport} enabled={!drawingTool}
-        onUpdate={onDrawingUpdate} locate={(x, y) => drawingLocation(x, y)?.point ?? null} />
-      {drawingsVisible && drawingTool ? (
-        <div
-          className="chart-drawing-surface"
-          data-tool={drawingTool}
-          style={mainPaneHeight === null ? undefined : { height: `${mainPaneHeight}px`, bottom: "auto" }}
-          role="application"
-          aria-label={drawingTool === "horizontal" ? "点击价格位置绘制水平线" : "点击起点和终点，或拖动绘制"}
-          onPointerDown={beginDrawing}
-          onPointerMove={updateDrawing}
-          onPointerUp={finishDrawing}
-          onPointerCancel={cancelDrawing}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") cancelDrawing();
-          }}
-          tabIndex={0}
-        >
-          {drawingDraft ? (
-            <svg className="chart-drawing-preview" aria-hidden="true">
-              {drawingTool === "rectangle" ? <rect
-                x={Math.min(drawingDraft.startX, drawingDraft.currentX)}
-                y={Math.min(drawingDraft.startY, drawingDraft.currentY)}
-                width={Math.abs(drawingDraft.currentX - drawingDraft.startX)}
-                height={Math.abs(drawingDraft.currentY - drawingDraft.startY)}
-                fill="rgba(36,92,140,.08)" stroke="#245c8c" /> : <line
-                x1={drawingDraft.startX}
-                y1={drawingDraft.startY}
-                x2={drawingDraft.currentX}
-                y2={drawingDraft.currentY}
-              />}
-              {drawingDraft.startSnapped ? (
-                <circle className="is-snapped" cx={drawingDraft.startX} cy={drawingDraft.startY} r="4" />
-              ) : null}
-              {drawingDraft.currentSnapped ? (
-                <circle className="is-snapped" cx={drawingDraft.currentX} cy={drawingDraft.currentY} r="4" />
-              ) : null}
-            </svg>
-          ) : null}
-        </div>
-      ) : null}
+      <DrawingOverlay items={drawingPositions} {...drawingViewport} enabled={!drawingTool && Boolean(onDrawingUpdate)}
+        onUpdate={onDrawingUpdate} locate={drawingLocation} project={projectDrawingPoint}
+        selectedId={selectedDrawingId} onSelect={onDrawingSelect ?? (() => {})} scope={`${realtimeBarStreamKey}:${period.id}`} />
+      {drawingsVisible && drawingTool && onDrawingCommit ? <DrawingSurface tool={drawingTool} {...drawingViewport}
+        locate={drawingLocation} project={projectDrawingPoint} onCommit={onDrawingCommit} scope={`${realtimeBarStreamKey}:${period.id}`} /> : null}
       {(period.mode === "timeline" ? visibleTimelineSeriesCount > 0 : latestBar) && livePrice !== null ? (
         <div
           ref={liveLayerRef}
@@ -2758,6 +2715,15 @@ export function MarketChart({
               <span />{replayMode || marketPhase === "closed" ? "回到最新" : "回到实时"}
         </button>
       ) : null}
+      </div>
+      {minuteDerivedPeriod || (period.id === "5m" && !replayMode && sourcePeriodReference) ? <div className="chart-status-row" aria-label="图表数据口径">
+        {minuteDerivedPeriod ? <span className="chart-data-basis" tabIndex={0}
+          data-chart-data-basis="minute-derived"
+          title={`当前${period.label}K线由1分钟行情合成；来源：${latestCandleIdentity.source.provider}；来源品种：${latestCandleIdentity.source.provider_symbol}。`}>
+          由1分钟行情合成
+        </span> : null}
+        {period.id === "5m" && !replayMode && sourcePeriodReference ? <SourcePeriodReference key={`${sourcePeriodReference.code}:${sourcePeriodReference.mapping.market}:${sourcePeriodReference.mapping.code}`} scope={sourcePeriodReference} /> : null}
+      </div> : null}
     </div>
   );
 }

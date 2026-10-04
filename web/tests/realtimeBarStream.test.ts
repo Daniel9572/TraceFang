@@ -94,3 +94,10 @@ test("releases a dataset revision watermark when its socket scope ends", () => {
   stream.reset(key);
   assert.equal(stream.publish(key, first), true);
 });
+
+ test("delivers an older known Bar correction and keeps the newer tail",()=>{
+  const stream=new RealtimeBarStream(),key="fixed-history", delivered:Candle[]=[];stream.subscribe(({bar})=>delivered.push(bar));
+  const old=bar(9,100,"2026-08-11T01:00:00Z");assert.equal(stream.publish(key,old),true);assert.equal(stream.publish(key,bar(1,101,"2026-08-11T01:00:01Z")),true);
+  const corrected={...old,revision:"10",high:"100",volume:null};assert.equal(stream.publish(key,corrected),true);assert.equal(stream.publish(key,old),false);assert.equal(delivered.at(-1),corrected);
+  const buffer=new RealtimeBarCommitBuffer();buffer.push(bar(1,101,"2026-08-11T01:00:01Z"));buffer.push(corrected);assert.deepEqual(buffer.drain().map(row=>row.open_time),[old.open_time,"2026-08-11T01:00:01Z"]);
+ });

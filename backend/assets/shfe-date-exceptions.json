@@ -1,0 +1,176 @@
+{
+  "verified_years": [
+    2025,
+    2026
+  ],
+  "closed_date_ranges": [
+    [
+      "2025-01-01",
+      "2025-01-01"
+    ],
+    [
+      "2025-01-28",
+      "2025-02-04"
+    ],
+    [
+      "2025-04-04",
+      "2025-04-06"
+    ],
+    [
+      "2025-05-01",
+      "2025-05-05"
+    ],
+    [
+      "2025-05-31",
+      "2025-06-02"
+    ],
+    [
+      "2025-10-01",
+      "2025-10-08"
+    ],
+    [
+      "2026-01-01",
+      "2026-01-03"
+    ],
+    [
+      "2026-02-15",
+      "2026-02-23"
+    ],
+    [
+      "2026-04-04",
+      "2026-04-06"
+    ],
+    [
+      "2026-05-01",
+      "2026-05-05"
+    ],
+    [
+      "2026-06-19",
+      "2026-06-21"
+    ],
+    [
+      "2026-09-25",
+      "2026-09-27"
+    ],
+    [
+      "2026-10-01",
+      "2026-10-07"
+    ]
+  ],
+  "no_evening_start_dates": [
+    "2024-12-31",
+    "2025-01-27",
+    "2025-04-03",
+    "2025-04-30",
+    "2025-05-30",
+    "2025-09-30",
+    "2025-12-31",
+    "2026-02-13",
+    "2026-04-03",
+    "2026-04-30",
+    "2026-06-18",
+    "2026-09-24",
+    "2026-09-30"
+  ],
+  "provenance": {
+    "kind": "official_shfe_annual_date_exceptions",
+    "scope": "SHFE AU/AG only; configured existing base hours",
+    "annual_sources": [
+      {
+        "verified_year": 2025,
+        "source_url": "https://www.shfe.com.cn/publicnotice/notice/202412/t20241223_824109.html",
+        "source_sha256": "5252b47d62f8ba14a7f1f6760e8087ab82f4cf2423075bdfdc00aad9882f04ce",
+        "boundary_note": "No automatic inference for other exchanges, years or source minute-label policy; calendar versions and applicable announcement overrides remain explicit."
+      },
+      {
+        "verified_year": 2026,
+        "source_url": "https://www.shfe.com.cn/services/calenderandholidays/holiday/",
+        "source_sha256": "cc78678ea7e1414b5c6623051e81f33ccf9707813464ed8674c25b8ade15c483",
+        "boundary_note": "No automatic inference for other exchanges, years or source minute-label policy; calendar versions and applicable announcement overrides remain explicit."
+      }
+    ],
+    "base_schedule_provenance": {
+      "day_continuous": [
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_groups": [
+        {
+          "names": [
+            "铜",
+            "国际铜",
+            "铝",
+            "氧化铝",
+            "锌",
+            "铅",
+            "镍",
+            "锡",
+            "不锈钢",
+            "铸造铝合金"
+          ],
+          "start": "21:00",
+          "end": "01:00",
+          "end_day_offset": 1
+        },
+        {
+          "names": [
+            "黄金",
+            "白银",
+            "原油"
+          ],
+          "start": "21:00",
+          "end": "02:30",
+          "end_day_offset": 1
+        },
+        {
+          "names": [
+            "螺纹钢",
+            "热轧卷板",
+            "燃料油",
+            "石油沥青",
+            "天然橡胶",
+            "合成胶",
+            "纸浆",
+            "胶版印刷纸",
+            "20号胶",
+            "低硫燃料油"
+          ],
+          "start": "21:00",
+          "end": "23:00",
+          "end_day_offset": 0
+        },
+        {
+          "names": [
+            "线材",
+            "集运指数（欧线）"
+          ],
+          "start": null,
+          "end": null,
+          "end_day_offset": null
+        }
+      ],
+      "auction_phases_separate_from_continuous": true,
+      "source_url": "https://www.shfe.cn/services/calenderandholidays/tradinghours/",
+      "source_sha256": "ebb4a872fc0ce4d9fa1f654c58a89dd00bc1100dd7b3de1e305bbc80ecc66058",
+      "effective_date_unknown_on_live_page": true,
+      "not_retroactively_applied_to_entire_history": true
+    },
+    "historical_base_hours_effective_date_unknown": true,
+    "holiday_year_verified": [
+      2025,
+      2026
+    ],
+    "not_other_exchanges_or_future_years": true,
+    "source_manifest_sha256": "62e648747dde0ff95f1c0b1b23fe29cdd9bec63b201fb82171cbcd6f99691315"
+  }
+}

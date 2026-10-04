@@ -1,3 +1,4 @@
+import { compareSourceRevision } from "./quantFormat.ts";
 import type { Candle, HoverCandle, TimelineSample } from "./types";
 
 function numberOf(value: number | string): number {
@@ -8,6 +9,25 @@ function epochSeconds(value: string | null): number | null {
   if (!value) return null;
   const milliseconds = new Date(value).getTime();
   return Number.isFinite(milliseconds) ? Math.floor(milliseconds / 1000) : null;
+}
+
+export function candleAtChartTime(candles:readonly Candle[],time:number|null):Candle|null {
+  if(time===null)return candles.at(-1)??null;
+  let low=0,high=candles.length-1;
+  while(low<=high){const middle=(low+high)>>>1;const at=epochSeconds(candles[middle].open_time);if(at===time)return candles[middle];if(at!==null&&at<time)low=middle+1;else high=middle-1;}
+  return null;
+}
+
+/** Source end labels describe an interval, never an earlier publication clock. */
+export function candleIntervalEvidence(candle:Candle|null):{start:number;end:number;sourceLabel:string|null}|null {
+  const raw=candle?.source.raw_payload;
+  if(!candle||raw?.source_label_semantics!=="interval_end")return null;
+  const start=epochSeconds(candle.open_time),explicitEnd=typeof raw.bucket_end==="string"?epochSeconds(raw.bucket_end):null;
+  const interval=Number(candle.interval);
+  const end=explicitEnd??(start!==null&&Number.isSafeInteger(interval)&&interval>0?start+interval:null);
+  if(start===null||end===null||end<=start)return null;
+  const sourceLabel=typeof raw.source_label==="string"&&raw.source_label.length<=128?raw.source_label:typeof raw.source_interval_end==="string"?raw.source_interval_end:null;
+  return {start,end,sourceLabel};
 }
 
 export function barsFromCandles(candles: Candle[]): HoverCandle[] {
@@ -35,7 +55,7 @@ const candleStateRank: Record<Candle["state"], number> = {
 export function sameCandleVersion(left: Candle, right: Candle): boolean {
   return left === right || (
     left.open_time === right.open_time
-    && left.revision === right.revision
+    && compareSourceRevision(left.revision, right.revision) === 0
     && left.state === right.state
     && left.open === right.open
     && left.high === right.high
@@ -51,48 +71,23 @@ export function sameCandleVersion(left: Candle, right: Candle): boolean {
 }
 
 function realtimeBarCanReplace(current: Candle, incoming: Candle): boolean {
-  if (incoming.revision !== current.revision) return incoming.revision > current.revision;
+  if (compareSourceRevision(incoming.revision, current.revision) !== 0) return compareSourceRevision(incoming.revision, current.revision) > 0;
   return candleStateRank[incoming.state] >= candleStateRank[current.state];
 }
 
-type RealtimeBarTailMutation = "append" | "replace" | null;
-
-function realtimeBarTailMutation(
-  current: Candle | undefined,
-  incoming: Candle,
-): RealtimeBarTailMutation {
-  const incomingTime = epochSeconds(incoming.open_time);
-  if (incomingTime === null) return null;
-  if (!current) return "append";
-  const currentTime = epochSeconds(current.open_time);
-  if (currentTime === null || incomingTime < currentTime) return null;
-  if (incomingTime > currentTime) return "append";
-  if (!realtimeBarCanReplace(current, incoming) || sameCandleVersion(current, incoming)) {
-    return null;
+/** Revisions replace the complete known Bar, including lowered high/low and null volume. */
+export function upsertRealtimeBar(candles:Candle[],incoming:Candle):Candle[]{return upsertRealtimeBarBatch(candles,[incoming]);}
+/** Preserve loaded history; old notifications only replace an existing timestamp. */
+export function upsertRealtimeBarBatch(candles:Candle[],incoming:readonly Candle[]):Candle[]{
+  let next:Candle[]|null=null;
+  for(const bar of incoming){const rows=next??candles;const time=epochSeconds(bar.open_time);if(time===null)continue;
+    const tailTime=rows.length?epochSeconds(rows[rows.length-1].open_time):null;
+    if(tailTime===null||time>tailTime){if(next===null)next=candles.slice();next.push(bar);continue;}
+    let low=0,high=rows.length-1,index=-1;while(low<=high){const mid=(low+high)>>>1,at=epochSeconds(rows[mid].open_time);if(at===time){index=mid;break;}if(at!==null&&at<time)low=mid+1;else high=mid-1;}
+    if(index<0||!realtimeBarCanReplace(rows[index],bar)||sameCandleVersion(rows[index],bar))continue;
+    if(next===null)next=candles.slice();next[index]=bar;
   }
-  return "replace";
-}
-
-export function upsertRealtimeBar(candles: Candle[], incoming: Candle): Candle[] {
-  const current = candles.at(-1);
-  const mutation = realtimeBarTailMutation(current, incoming);
-  if (mutation === "append") return [...candles, incoming];
-  if (mutation === "replace") return [...candles.slice(0, -1), incoming];
-  return candles;
-}
-
-/** Applies a small ordered realtime batch with at most one copy of chart history. */
-export function upsertRealtimeBarBatch(candles: Candle[], incoming: readonly Candle[]): Candle[] {
-  let next: Candle[] | null = null;
-  for (const bar of incoming) {
-    const rows = next ?? candles;
-    const mutation = realtimeBarTailMutation(rows.at(-1), bar);
-    if (mutation === null) continue;
-    if (next === null) next = candles.slice();
-    if (mutation === "append") next.push(bar);
-    else next[next.length - 1] = bar;
-  }
-  return next ?? candles;
+  return next??candles;
 }
 
 export type CandleSeriesMutation = "unchanged" | "tail-update" | "tail-append" | "reset";

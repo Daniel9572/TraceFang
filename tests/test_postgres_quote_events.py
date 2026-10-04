@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -31,9 +32,11 @@ from tracefang.infrastructure.postgres.store import (
     _SELECT_RECENT_REALTIME_BARS,
     _SELECT_RECENT_SOURCE_CANDLES,
     _SELECT_SOURCE_CANDLES_BEFORE,
+    _UPSERT_INSTRUMENT,
     _UPSERT_MATERIALIZED_PERIOD_BAR,
     _UPSERT_REALTIME_BAR,
     _UPSERT_REALTIME_BAR_SERIES_STATE,
+    _UPSERT_SOURCE,
     PostgresMarketDataStore,
 )
 
@@ -236,7 +239,7 @@ class QuoteEventPersistenceTests(unittest.TestCase):
     def test_kline_cache_queries_one_exact_raw_channel(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS standard_candles", SCHEMA_SQL)
         for query in (_SELECT_RECENT_QUOTE_CANDLES, _SELECT_RANGE_QUOTE_CANDLES):
-            self.assertIn("FROM quote_events", query)
+            self.assertIn("FROM normalized_quote_events", query)
             self.assertIn("source_id = $2", query)
             self.assertNotIn("source_id = ANY", query)
             self.assertNotIn("standard_candles", query)
@@ -405,8 +408,7 @@ class HistoricalBatchTransactionTests(unittest.IsolatedAsyncioTestCase):
         checkpoint = next(
             event
             for event in connection.events
-            if event[0] == "execute"
-            and event[1] == _ADVANCE_LIVE_REALTIME_BAR_SERIES_STATE
+            if event[0] == "execute" and event[1] == _ADVANCE_LIVE_REALTIME_BAR_SERIES_STATE
         )
         self.assertEqual(
             checkpoint[2][0:5],
@@ -418,3 +420,42 @@ class HistoricalBatchTransactionTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrentWriteOrderingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bar_and_period_writes_acquire_shared_metadata_in_the_same_order(self):
+        original = _history_bar(_history_candle(_START))
+        bars = tuple(
+            replace(
+                original,
+                instrument=replace(_INSTRUMENT, symbol=symbol),
+                source=replace(original.source, provider="z-realtime"),
+                evidence_channel_id="a-history",
+            )
+            for symbol in ("ZZ/USD", "AA/USD")
+        )
+        for kind in ("canonical", "derived"):
+            connection = _FakeConnection()
+            store = PostgresMarketDataStore(PostgresSettings("postgres://unused"))
+            store._pool = _FakePool(connection)
+            if kind == "canonical":
+                await store.save_realtime_bars(bars)
+            else:
+                await store.save_materialized_period_bars(
+                    bars,
+                    source_id="z-realtime",
+                    period_id="4h",
+                    materialization_version="test",
+                )
+            instruments = [
+                event[2][0]
+                for event in connection.events
+                if event[:2] == ("execute", _UPSERT_INSTRUMENT)
+            ]
+            sources = [
+                event[2][0]
+                for event in connection.events
+                if event[:2] == ("execute", _UPSERT_SOURCE)
+            ]
+            self.assertEqual(instruments, ["AA/USD", "ZZ/USD"])
+            self.assertEqual(sources, ["a-history", "z-realtime"])

@@ -187,7 +187,7 @@ class Jin10LocalProvider:
         fresh = [
             quote
             for quote in self._latest.values()
-            if (now - quote.source.received_at).total_seconds() <= self.settings.stale_after_seconds
+            if self._connected and quote.source.is_fresh(now, self.settings.stale_after_seconds)
         ]
         if fresh:
             newest = max(fresh, key=lambda quote: quote.source.received_at)
@@ -385,8 +385,11 @@ class Jin10LocalProvider:
         quote = self._latest.get(provider_code)
         if quote is None:
             return None
-        age = (datetime.now(UTC) - quote.source.received_at).total_seconds()
-        return quote if age <= self.settings.stale_after_seconds else None
+        return (
+            quote
+            if quote.source.is_fresh(datetime.now(UTC), self.settings.stale_after_seconds)
+            else None
+        )
 
     async def _run(self) -> None:
         delay = _RECONNECT_MIN_SECONDS
@@ -422,7 +425,8 @@ class Jin10LocalProvider:
             self.settings.endpoint,
             open_timeout=self.settings.connect_timeout_seconds,
             close_timeout=5,
-            ping_interval=None,
+            ping_interval=20,
+            ping_timeout=20,
             max_size=1024 * 1024,
         ) as socket:
             handshake = await asyncio.wait_for(socket.recv(), self.settings.connect_timeout_seconds)
@@ -893,10 +897,10 @@ class Jin10LocalProvider:
         )
         try:
             observed_at = datetime.fromtimestamp(wire.timestamp, tz=UTC)
-        except (OSError, OverflowError, ValueError):
-            observed_at = received_at
-        if abs((received_at - observed_at).total_seconds()) > 7 * 24 * 3600:
-            observed_at = received_at
+        except (OSError, OverflowError, ValueError) as error:
+            raise ProviderDataError("Jin10 quote timestamp is invalid") from error
+        if wire.timestamp <= 0:
+            raise ProviderDataError("Jin10 quote timestamp must be positive")
         return QuoteSnapshot(
             instrument=instrument,
             last=last,

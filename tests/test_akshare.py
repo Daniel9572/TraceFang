@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import hashlib
+import base64
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -11,8 +14,6 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pandas as pd
 from fastapi import FastAPI
-
-from tracefang.akshare_worker import build_chain, load_bars, normalize_metadata
 from tracefang.application.research import (
     ResearchDataService,
     ResearchError,
@@ -20,6 +21,13 @@ from tracefang.application.research import (
     normalize_bars,
 )
 from tracefang.research_api import research_router, technical_evidence
+
+from tracefang.akshare_worker import build_chain, load_bars, load_metadata, normalize_metadata
+
+
+def source_reply(text):
+    body=text.encode()
+    return text,{"url":"https://source.fixture/","received_at":"2030-09-30T08:00:00Z","body_base64":base64.b64encode(body).decode(),"body_sha256":hashlib.sha256(body).hexdigest(),"encoding":"utf-8","byte_count":len(body)}
 
 
 def metadata_row(code="au3011C900", underlying="au3011", **changes):
@@ -38,6 +46,40 @@ def metadata_row(code="au3011C900", underlying="au3011", **changes):
 
 
 class AkshareMappingTests(unittest.TestCase):
+    def test_metadata_fetch_has_timeout_and_preserves_exchange_contract_fields(self):
+        payload = {
+            "data": [
+                {
+                    "ExchangeID": "SHFE",
+                    "InstrumentID": "au3011C900",
+                    "InstrumentName": "黄金期权",
+                    "UnderlyingInstrID": "au3011",
+                    "ExpireDate": "20301025",
+                    "OptionsType": "1",
+                    "StrikePrice": 900,
+                    "VolumeMultiple": 1000,
+                    "DeliveryYear": 2030,
+                    "DeliveryMonth": 10,
+                }
+            ]
+        }
+        response = httpx.Response(200, json=payload, request=httpx.Request("GET", "http://test"))
+        with patch("tracefang.akshare_worker.fetch_raw", return_value=source_reply(json.dumps(payload))) as get:
+            result = load_metadata()
+        get.assert_called_once_with("http://dict.openctp.cn/instruments?types=option",max_bytes=32*1024*1024)
+        self.assertEqual(result["contracts"][0]["month"], "203011")
+        self.assertEqual(result["contracts"][0]["expiry"], "2030-10-25")
+        self.assertEqual(result["contracts"][0]["multiplier"], "1000")
+        for payload in ({"data": []}, {"data": [None]}, {"data": [{}]}):
+            response = httpx.Response(
+                200, json=payload, request=httpx.Request("GET", "http://test")
+            )
+            with (
+                patch("tracefang.akshare_worker.fetch_raw", return_value=source_reply(json.dumps(payload))),
+                self.assertRaises(ValueError),
+            ):
+                load_metadata()
+
     def test_metadata_uses_actual_expiry_and_multiplier_not_contract_month(self):
         result = normalize_metadata(
             [
@@ -58,45 +100,27 @@ class AkshareMappingTests(unittest.TestCase):
         )
         gold, etf = result["contracts"]
         self.assertEqual(
-            (gold["month"], gold["expiry"], gold["multiplier"]), ("203011", "2030-10-25", 1000)
+            (gold["month"], gold["expiry"], gold["multiplier"]), ("203011", "2030-10-25", "1000")
         )
         self.assertEqual(
             (etf["symbol"], etf["underlying"], etf["multiplier"], etf["currency"]),
-            ("10011425.SH", "510050.SH", 10000, "CNY"),
+            ("10011425.SH", "510050.SH", "10000", "CNY"),
         )
         self.assertEqual(result["rejected_rows"], 1)
 
-    def test_minutes_shift_end_label_and_preserve_open_interest_for_ai(self):
-        ak = SimpleNamespace(
-            futures_zh_minute_sina=Mock(
-                return_value=pd.DataFrame(
-                    [
-                        {
-                            "datetime": "2026-09-30 15:00:00",
-                            "open": 910,
-                            "high": 912,
-                            "low": 909,
-                            "close": 911,
-                            "volume": 12,
-                            "hold": 225591,
-                        },
-                    ]
-                )
-            )
-        )
+    def test_unverified_minutes_keep_original_label_and_exact_open_interest(self):
         query = ResearchQuery(source="akshare", asset="future", symbol="AU0", period="5m")
-        rows = load_bars(ak, query.model_dump())
-        ak.futures_zh_minute_sina.assert_called_once_with(symbol="AU0", period="5")
-        self.assertEqual(rows[0]["time"], "2026-09-30T14:55:00")
-        with patch("tracefang.application.research.datetime", wraps=datetime) as clock:
-            clock.now.return_value = datetime(2026, 9, 30, 7, 1, tzinfo=UTC)
-            bars, rejected = normalize_bars(rows, query)
-        self.assertEqual(rejected, 0)
-        self.assertEqual(bars[0]["open_time"], "2026-09-30T06:55:00+00:00")
-        self.assertEqual(bars[0]["state"], "final")
-        self.assertEqual(technical_evidence(bars)["open_interest_last"], 225591)
-        rows[0]["open_interest"] = -1
-        self.assertIsNone(normalize_bars(rows, query)[0][0]["open_interest"])
+        raw = 'var bars=([{"d":"2026-09-30 15:00:00","o":"910","h":"912","l":"909","c":"911","v":"12","p":"225591"}]);'
+        with patch("tracefang.research_bars_exact.fetch_raw", return_value=source_reply(raw)) as fetch:
+            packet = load_bars(None, query.model_dump())
+        rows = packet["bars"]
+        self.assertEqual(fetch.call_args.args[1], {"symbol":"AU0","type":"5"})
+        self.assertEqual(rows[0]["time"], "2026-09-30 15:00:00")
+        self.assertEqual(rows[0]["source_payload"]["source_label"], "2026-09-30 15:00:00")
+        self.assertFalse(rows[0]["source_payload"]["clock_policy_verified"])
+        self.assertFalse(packet["temporal_authority_eligible"])
+        self.assertTrue(rows[0]["source_payload"]["span_start_unknown"])
+        self.assertEqual(rows[0]["open_interest"], "225591")
 
     def test_etf_chain_excludes_wrong_strike_or_underlying_and_missing_prices(self):
         metadata = normalize_metadata(
@@ -114,71 +138,46 @@ class AkshareMappingTests(unittest.TestCase):
             ]
         )["contracts"]
 
-        def spot(symbol):
-            fields = {
-                "买价": 0,
-                "卖价": 0.141,
-                "最新价": 0.14,
-                "行权价": 3 if symbol == "10000001" else 2.8,
-                "标的股票": "510300" if symbol == "10000002" else "510050",
-                "行情时间": "20300930160000",
-            }
-            if symbol == "10000003":
-                fields.update(买价=0.2, 卖价=0.1)
-            return pd.DataFrame({"字段": list(fields), "值": list(fields.values())})
-
-        ak = SimpleNamespace(
-            option_sse_codes_sina=lambda **kwargs: pd.DataFrame(
-                {"期权代码": [str(10000000 + i) for i in range(4)]}
-            ),
-            option_sse_spot_price_sina=spot,
-            option_sse_underlying_spot_price_sina=lambda **kwargs: pd.DataFrame(
-                {
-                    "字段": ["最近成交价", "行情日期", "行情时间"],
-                    "值": [2.9, "2030-09-30", "16:00:00"],
-                }
-            ),
-        )
-        chain = build_chain(ak, {"symbol": "510050.SH", "month": "203011", "contracts": metadata})
-        self.assertEqual(len(chain["contracts"]), 2)
-        first, inverted = chain["contracts"]
+        def source(url, params=None):
+            name=url.split("list=")[1]
+            if "OP_UP_" in name or "OP_DOWN_" in name:
+                return source_reply(f'var hq_str_{name}="'+','.join("CON_OP_"+str(10000000+i) for i in range(4))+'";')
+            if name=="sh510050":
+                fields=["0"]*32;fields[3]="2.9000";fields[30]="2030-09-30";fields[31]="16:00:00"
+            else:
+                fields=["0"]*43;fields[1]="0";fields[2]="0.140";fields[3]="0.141";fields[7]="3" if name.endswith("10000001") else "2.8000";fields[32]="20300930160000";fields[36]="510300" if name.endswith("10000002") else "510050"
+                if name.endswith("10000003"):fields[1]="0.2";fields[3]="0.1"
+            return source_reply(f'var hq_str_{name}="'+','.join(fields)+'";')
+        with patch("tracefang.akshare_worker.fetch_raw",side_effect=source):
+            chain=build_chain(None,{"symbol":"510050.SH","month":"203011","contracts":metadata})
+        self.assertEqual(len(chain["contracts"]),4)
+        by_id={row["symbol"]:row for row in chain["contracts"]}
+        first,inverted=by_id["10000000.SH"],by_id["10000003.SH"]
         self.assertIsNone(first["bid"])
-        self.assertEqual(
-            (first["ask"], first["multiplier"], first["currency"]), (0.141, 10000, "CNY")
-        )
-        self.assertEqual(first["observed_at"], "2030-09-30T16:00:00+08:00")
-        self.assertIsNone(inverted["bid"])
-        self.assertIsNone(inverted["ask"])
-        self.assertEqual(chain["reference_spot"], 2.9)
-        self.assertTrue(any("2 条报价" in warning for warning in chain["warnings"]))
+        self.assertEqual((first["ask"],first["multiplier"],first["currency"]),("0.141","10000","CNY"))
+        self.assertIsNone(first["observed_at"])
+        self.assertEqual(first["source_clock_label"],"20300930160000")
+        self.assertEqual(first["source_clock_qualification"],"unverified_timezone_and_role")
+        self.assertIsNone(inverted["bid"]);self.assertIsNone(inverted["ask"])
+        self.assertEqual(chain["reference_spot"],"2.9000")
+        self.assertTrue(any("2 源报价" in warning for warning in chain["warnings"]))
+        self.assertIsNone(by_id["10000001.SH"]["last"])
 
     def test_commodity_chain_matches_hyphen_codes_without_inventing_quote_time(self):
         metadata = normalize_metadata(
             [metadata_row("m3011-C-900", "m3011", **{"交易所ID": "DCE", "合约乘数": "10"})]
         )["contracts"]
-        ak = SimpleNamespace(
-            option_commodity_contract_table_sina=Mock(
-                return_value=pd.DataFrame(
-                    [
-                        {
-                            "看涨合约-标识": "m3011-C-900",
-                            "行权价": 900,
-                            "看涨合约-买价": 30,
-                            "看涨合约-卖价": 31,
-                            "看涨合约-最新价": 30.5,
-                        },
-                    ]
-                )
-            ),
-            futures_zh_daily_sina=lambda **kwargs: pd.DataFrame(
-                {"date": ["2030-09-30"], "close": [950]}
-            ),
-        )
-        chain = build_chain(ak, {"symbol": "M", "month": "203011", "contracts": metadata})
-        self.assertEqual(chain["pricing_model"], "black76")
-        self.assertEqual(chain["contracts"][0]["multiplier"], 10)
+        def source(url, params=None):
+            if "optionsDP.php" in url:return source_reply('<a href="/futures/view/optionsDP.php/m_o/dce">豆粕期权</a>')
+            if "getDailyKLine" in url:return source_reply('var history=([{"date":"2030-09-30","close":"950"}]);')
+            return source_reply('{"result":{"data":{"up":[["1","30","30.5","31","1","0","-","900","m3011-C-900"]],"down":[["0","-","-","-","0","-","-","m3011-P-900"]]}}}')
+        with patch("tracefang.akshare_worker.fetch_raw",side_effect=source):
+            chain=build_chain(None,{"symbol":"M","month":"203011","contracts":metadata})
+        self.assertEqual(chain["pricing_model"],"black76")
+        self.assertEqual(chain["contracts"][0]["multiplier"],"10")
         self.assertIsNone(chain["contracts"][0]["observed_at"])
-        self.assertEqual(chain["reference_observed_at"], "2030-09-30T00:00:00+08:00")
+        self.assertIsNone(chain["reference_observed_at"])
+        self.assertEqual(chain["reference_date"],"2030-09-30")
 
     def test_czce_year_rollover_and_sina_four_digit_alias_preserve_exchange_identity(self):
         metadata = normalize_metadata(
@@ -198,28 +197,17 @@ class AkshareMappingTests(unittest.TestCase):
             ]
         )["contracts"]
         self.assertEqual(metadata[0]["month"], "203101")
-        ak = SimpleNamespace(
-            option_commodity_contract_table_sina=Mock(
-                return_value=pd.DataFrame(
-                    [
-                        {
-                            "看涨合约-看涨期权合约": "sr3101C4700",
-                            "行权价": 4700,
-                            "看涨合约-买价": 20,
-                            "看涨合约-卖价": 21,
-                            "看涨合约-最新价": 20.5,
-                        },
-                    ]
-                )
-            ),
-            futures_zh_daily_sina=Mock(return_value=pd.DataFrame()),
-        )
-        chain = build_chain(ak, {"symbol": "SR", "month": "203101", "contracts": metadata})
-        ak.option_commodity_contract_table_sina.assert_called_once_with(
-            symbol="白糖期权", contract="sr3101"
-        )
-        self.assertEqual(chain["contracts"][0]["symbol"], "SR101C4700")
-        self.assertEqual(chain["contracts"][0]["expiry"], "2030-12-11")
+        seen=[]
+        def source(url,params=None):
+            if "optionsDP.php" in url:return source_reply('<a href="/futures/view/optionsDP.php/sr/czce">白糖期权</a>')
+            if "getDailyKLine" in url:return source_reply('var history=([]);')
+            seen.append(params)
+            return source_reply('{"result":{"data":{"up":[["1","20","20.5","21","1","0","-","4700","sr3101C4700"]],"down":[["0","-","-","-","0","-","-","sr3101P4700"]]}}}')
+        with patch("tracefang.akshare_worker.fetch_raw",side_effect=source):
+            chain=build_chain(None,{"symbol":"SR","month":"203101","contracts":metadata})
+        self.assertEqual(seen[0]["pinzhong"],"sr3101")
+        self.assertEqual(chain["contracts"][0]["symbol"],"SR101C4700")
+        self.assertEqual(chain["contracts"][0]["expiry"],"2030-12-11")
 
 
 class AkshareServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -329,7 +317,7 @@ class AkshareServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        self.service._akshare_call = AsyncMock(side_effect=[directory, []])
+        self.service._akshare_call = AsyncMock(side_effect=[directory, {"bars": [], "precision_policy": "source-decimal-lexeme-v1"}])
         await self.service._akshare_bars(
             ResearchQuery(source="akshare", asset="option", symbol="SR101C4700")
         )

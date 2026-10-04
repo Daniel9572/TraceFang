@@ -15,6 +15,8 @@ from contextlib import suppress
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+DEVELOPMENT_SHUTDOWN = PROJECT_ROOT / ".runtime/development-shutdown"
 
 
 def command(name: str) -> str:
@@ -62,10 +64,15 @@ def start_infrastructure() -> None:
 
 
 def python_environment() -> dict[str, str]:
-    environment = os.environ.copy()
+    from tracefang.service import backend_environment
+
+    environment = backend_environment(PROJECT_ROOT)
     source_path = str(PROJECT_ROOT / "src")
     existing = environment.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = f"{source_path}{os.pathsep}{existing}" if existing else source_path
+    python = PROJECT_ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    environment["TRACEFANG_PYTHON"] = str(python)
+    environment["TRACEFANG_SHUTDOWN_FILE"] = str(DEVELOPMENT_SHUTDOWN)
     return environment
 
 
@@ -88,7 +95,12 @@ def kill_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def stop_services(services: list[tuple[str, subprocess.Popen[bytes]]]) -> None:
-    for _, process in services:
+    if os.name == "nt":
+        DEVELOPMENT_SHUTDOWN.parent.mkdir(parents=True, exist_ok=True)
+        DEVELOPMENT_SHUTDOWN.write_text("stop", encoding="utf-8")
+    for name, process in services:
+        if os.name == "nt" and name == "后端":
+            continue
         terminate_process(process)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and any(process.poll() is None for _, process in services):
@@ -101,23 +113,18 @@ def stop_services(services: list[tuple[str, subprocess.Popen[bytes]]]) -> None:
 
 
 def run_development() -> int:
+    from tracefang.service import build_backend
+
+    binary = build_backend(PROJECT_ROOT, release=False)
+    DEVELOPMENT_SHUTDOWN.unlink(missing_ok=True)
+    if os.name == "nt":
+        from tracefang.windows_service import attach_kill_on_exit_job
+
+        attach_kill_on_exit_job()
     definitions = (
         (
             "后端",
-            [
-                command("uv"),
-                "run",
-                "uvicorn",
-                "tracefang.api:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8000",
-                "--no-access-log",
-                "--reload",
-                "--reload-dir",
-                "src",
-            ],
+            [str(binary)],
             PROJECT_ROOT,
         ),
         (
@@ -157,6 +164,8 @@ def run_development() -> int:
 
 
 def run_production(*, build: bool) -> int:
+    from tracefang.service import build_backend, run_backend
+
     if build:
         subprocess.run(
             [command("corepack"), package_manager(), "build"],
@@ -164,16 +173,7 @@ def run_production(*, build: bool) -> int:
             check=True,
         )
     print("[TraceFang] 应用页面: http://127.0.0.1:8000")
-    python = PROJECT_ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not python.is_file():
-        raise RuntimeError("项目尚未安装, 请先完成 uv sync")
-    os.chdir(PROJECT_ROOT)
-    os.execve(
-        str(python),
-        [str(python), "-c", "from tracefang.api import run; run()"],
-        python_environment(),
-    )
-    return 1
+    return run_backend(build_backend(PROJECT_ROOT), project_root=PROJECT_ROOT)
 
 
 def parse_args() -> argparse.Namespace:
@@ -181,12 +181,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dev",
         action="store_true",
-        help="同时运行受统一生命周期管理的 Vite 与 FastAPI 开发服务",
+        help="构建 Rust 调试后端并同时运行受统一生命周期管理的 Vite 开发服务",
     )
     parser.add_argument(
         "--no-database",
         action="store_true",
-        help="不尝试启动项目 PostgreSQL 容器",
+        help="兼容旧入口; 原生运行不启动 PostgreSQL 或 NATS",
     )
     parser.add_argument(
         "--no-build",
@@ -199,8 +199,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        if not args.no_database:
-            start_infrastructure()
         return run_development() if args.dev else run_production(build=not args.no_build)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f"[TraceFang] 启动失败: {error}", file=sys.stderr)

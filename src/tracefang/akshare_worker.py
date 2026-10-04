@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import contextlib
 import json
-import math
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
+from decimal import Decimal
+
+from tracefang.sina_option_exact import (exact_decimal, fetch_raw, json_exact, assignment_fields, ProductLinks, table_quotes, etf_quote)
 from zoneinfo import ZoneInfo
+
 
 CHINA = ZoneInfo("Asia/Shanghai")
 AK_UNDERLYINGS = [
     {"symbol": "510050.SH", "name": "上证50 ETF", "category": "etf", "sina": "50ETF"},
     {"symbol": "510300.SH", "name": "沪深300 ETF", "category": "etf", "sina": "300ETF"},
+    {"symbol": "159901.SZ", "name": "深100ETF", "category": "etf", "sina": "深100ETF"},
+    {"symbol": "159915.SZ", "name": "创业板ETF", "category": "etf", "sina": "创业板"},
+    {"symbol": "159919.SZ", "name": "深300ETF", "category": "etf", "sina": "沪深300"},
+    {"symbol": "159922.SZ", "name": "深中证500ETF", "category": "etf", "sina": "500ETF"},
+    {"symbol": "510500.SH", "name": "沪中证500ETF", "category": "etf", "sina": "中证500ETF南方"},
+    {"symbol": "588000.SH", "name": "科创50ETF", "category": "etf", "sina": "科创50ETF华夏"},
+    {"symbol": "588080.SH", "name": "科创50ETF易方达", "category": "etf", "sina": "科创50ETF易方达"},
     {"symbol": "IO", "name": "沪深300股指期权", "category": "index", "sina": "hs300"},
     {"symbol": "HO", "name": "上证50股指期权", "category": "index", "sina": "sz50"},
     {"symbol": "MO", "name": "中证1000股指期权", "category": "index", "sina": "zz1000"},
@@ -38,6 +48,40 @@ AK_UNDERLYINGS = [
             ("PK", "花生期权"),
         ]
     ],
+    {"symbol": "A", "name": "豆一期权", "category": "future", "sina": "黄大豆1号期权"},
+    {"symbol": "B", "name": "豆二期权", "category": "future", "sina": "黄大豆2号期权"},
+    {"symbol": "EB", "name": "苯乙烯期权", "category": "future", "sina": "苯乙烯期权"},
+    {"symbol": "EG", "name": "乙二醇期权", "category": "future", "sina": "乙二醇期权"},
+    {"symbol": "LC", "name": "碳酸锂期权", "category": "future", "sina": "碳酸锂期权"},
+    {"symbol": "PX", "name": "对二甲苯期权", "category": "future", "sina": "二甲苯期权"},
+    {"symbol": "SH", "name": "烧碱期权", "category": "future", "sina": "烧碱期权"},
+    {"symbol": "SI", "name": "工业硅期权", "category": "future", "sina": "工业硅期权"},
+    {"symbol": "Y", "name": "豆油期权", "category": "future", "sina": "豆油期权"},
+    {"symbol": "ZC", "name": "动力煤期权", "category": "future", "sina": "动力煤期权"},
+    {'symbol': 'AP', 'name': '苹果期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'CJ', 'name': '红枣期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'FG', 'name': '玻璃期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'PF', 'name': '短纤期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'PL', 'name': '丙烯期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'PR', 'name': '瓶片期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'SA', 'name': '纯碱期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'SF', 'name': '硅铁期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'SM', 'name': '锰硅期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'UR', 'name': '尿素期权', 'category': 'future', 'quote_source': 'czce-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'PS', 'name': '多晶硅期权', 'category': 'future', 'quote_source': 'gfex-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'PD', 'name': '钯期权', 'category': 'future', 'quote_source': 'gfex-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'PT', 'name': '铂期权', 'category': 'future', 'quote_source': 'gfex-option-daily', 'quote_price_semantics': 'official_daily_close', 'daily_date': '2026-09-30'},
+    {'symbol': 'PP', 'name': '聚丙烯期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'public_known_daily_pp_route_http412', 'attempted_product_request': True, 'retained_probe': {'url': 'http://www.dce.com.cn/dcereport/publicweb/dailystat/dayQuotes', 'method': 'POST', 'status': 412, 'requested_at': '2026-10-04T04:02:32.552189+00:00', 'received_at': '2026-10-04T04:02:33.000682+00:00', 'body_sha256': '9857383e43ccbebec518866a2f5ec9ff2f60ef027a48c17eb9b63855fe2f5c39'}}},
+    {'symbol': 'V', 'name': 'PVC期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'L', 'name': '塑料期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'P', 'name': '棕榈油期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'JD', 'name': '鸡蛋期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'CS', 'name': '玉米淀粉期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'LH', 'name': '生猪期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'LG', 'name': '原木期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'BZ', 'name': '纯苯期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'JM', 'name': '焦煤期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
+    {'symbol': 'J', 'name': '焦炭期权', 'category': 'future', 'quote_source': 'catalog-only', 'availability': {'availability': 'no_original_quote_body_retained_for_this_product', 'attempted_product_request': False}},
 ]
 
 
@@ -60,18 +104,6 @@ def sina_contract(value: str, year: int | None = None) -> str:
     return code
 
 
-def number(value: Any, *, positive: bool = False) -> float | None:
-    try:
-        result = float(value)
-        return (
-            result
-            if math.isfinite(result) and result >= 0 and (not positive or result > 0)
-            else None
-        )
-    except (ValueError, TypeError):
-        return None
-
-
 def date_string(value: Any) -> str:
     text = str(value)
     return (
@@ -84,6 +116,8 @@ def date_string(value: Any) -> str:
 def quote_time(value: Any) -> str | None:
     try:
         text = str(value)
+        if not re.fullmatch(r"\d{14}", text) and not re.search(r"[T ]\d{2}:\d{2}:\d{2}", text):
+            return None
         stamp = (
             datetime.strptime(text, "%Y%m%d%H%M%S")
             if re.fullmatch(r"\d{14}", text)
@@ -96,9 +130,11 @@ def quote_time(value: Any) -> str | None:
         return None
 
 
-def records(frame: Any) -> list[dict]:
-    # pandas serializes NaN/NaT as null rather than leaking invalid JSON numbers.
-    return json.loads(frame.to_json(orient="records", date_format="iso"))
+def etf_underlying_symbol(symbol: str) -> str:
+    match = re.fullmatch(r"(\d{6})\.(SH|SZ)", symbol)
+    if match is None:
+        raise ValueError("ETF market suffix must be SH or SZ")
+    return match[2].lower() + match[1]
 
 
 def normalize_metadata(rows: list[dict]) -> dict:
@@ -114,8 +150,8 @@ def normalize_metadata(rows: list[dict]) -> dict:
             if expiry < today:
                 continue
             kind = {"1": "call", "2": "put"}[str(row["期权类型"])]
-            strike = number(row["行权价"], positive=True)
-            multiplier = number(row["合约乘数"], positive=True)
+            strike = exact_decimal(row["行权价"], positive=True)
+            multiplier = exact_decimal(row["合约乘数"], positive=True)
             if (
                 not underlying
                 or not strike
@@ -160,204 +196,190 @@ def normalize_metadata(rows: list[dict]) -> dict:
     return {"contracts": contracts, "rejected_rows": rejected, "metadata_source": "openctp"}
 
 
-def load_bars(ak: Any, query: dict) -> list[dict]:
-    symbol, asset, period = query["symbol"], query["asset"], query["period"]
-    year = query.get("contract_year")
-    if asset == "future":
-        frame = (
-            ak.futures_zh_daily_sina(symbol=sina_contract(symbol, year))
-            if period == "1d"
-            else ak.futures_zh_minute_sina(
-                symbol=sina_contract(symbol, year), period={"1h": "60"}.get(period, period[:-1])
-            )
-        )
-    elif asset == "option":
-        code = sina_contract(symbol, year)
-        if re.fullmatch(r"\d{8}", code):
-            frame = ak.option_sse_daily_sina(symbol=code)
-        else:
-            code = re.sub(r"^[A-Z]+", lambda match: match[0].lower(), code)
-            prefix = re.match(r"[a-z]+", code)[0]
-            cffex = {"io": "hs300", "ho": "sz50", "mo": "zz1000"}
-            frame = (
-                getattr(ak, f"option_cffex_{cffex[prefix]}_daily_sina")(symbol=code)
-                if prefix in cffex
-                else ak.option_commodity_hist_sina(symbol=code)
-            )
-    else:
-        args = {
-            "symbol": symbol.split(".")[0],
-            "period": {"1d": "daily", "1w": "weekly", "1M": "monthly"}[period],
-            "adjust": {"raw": "", "forward": "qfq", "backward": "hfq"}[query["adjustment"]],
-            "end_date": query["end_date"],
-        }
-        frame = (
-            ak.fund_etf_hist_em(**args)
-            if asset == "etf"
-            else ak.stock_zh_a_hist(**args, timeout=12)
-        )
-    result = []
-    minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
-    for row in records(frame):
-        stamp = row.get("datetime", row.get("date", row.get("日期")))
-        if asset == "future" and period in minutes:
-            # Sina minute labels are the interval end, while our API uses open_time.
-            stamp = (
-                datetime.fromisoformat(str(stamp)) - timedelta(minutes=minutes[period])
-            ).isoformat()
-        result.append(
-            {
-                "time": str(stamp),
-                "open": row.get("open", row.get("开盘")),
-                "high": row.get("high", row.get("最高")),
-                "low": row.get("low", row.get("最低")),
-                "close": row.get("close", row.get("收盘")),
-                "volume": row.get("volume", row.get("成交量")),
-                "open_interest": row.get("hold"),
-            }
-        )
+def load_metadata() -> dict:
+    # AKShare's equivalent request has no timeout and can consume the whole
+    # worker deadline. Read the same directory without importing pandas/AKShare.
+    raw, source_evidence = fetch_raw("http://dict.openctp.cn/instruments?types=option",max_bytes=32*1024*1024)
+    payload = json_exact(raw)
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("invalid OpenCTP contract directory")
+    fields = {
+        "ExchangeID": "交易所ID",
+        "InstrumentID": "合约ID",
+        "InstrumentName": "合约名称",
+        "VolumeMultiple": "合约乘数",
+        "DeliveryYear": "交割年份",
+        "DeliveryMonth": "交割月份",
+        "ExpireDate": "最后交易日",
+        "UnderlyingInstrID": "标的合约ID",
+        "OptionsType": "期权类型",
+        "StrikePrice": "行权价",
+    }
+    result = normalize_metadata(
+        [{dest: row.get(source) for source, dest in fields.items()} for row in rows]
+    )
+    if not result["contracts"]:
+        raise ValueError("OpenCTP directory has no valid unexpired contracts")
+    result["source_evidence"] = source_evidence
+    result["metadata_snapshot_id"] = source_evidence["body_sha256"]
+    result["precision_policy"] = "source-decimal-lexeme-v1"
     return result
 
 
+def load_bars(ak: Any, query: dict) -> dict:
+    # Retain the callable argument for callers; never consume SDK DataFrames.
+    del ak
+    from tracefang.research_bars_exact import load_raw_bars
+    return load_raw_bars(query, sina_contract(query["symbol"], query.get("contract_year")))
+
 def build_chain(ak: Any, params: dict) -> dict:
+    # `ak` remains an API-compatible argument; source prices never pass through its DataFrames.
+    del ak
     spec = next(item for item in AK_UNDERLYINGS if item["symbol"] == params["symbol"])
-    metadata = {
-        sina_contract(item["symbol"], int(item["month"][:4])): item for item in params["contracts"]
-    }
-    warnings = []
+    if spec.get("quote_source") in ("czce-option-daily", "gfex-option-daily"):
+        from tracefang.official_option_daily import build_daily_chain
+        return build_daily_chain(params, spec)
+    if spec.get("quote_source") == "catalog-only":
+        from tracefang.official_option_daily import build_metadata_only
+        return build_metadata_only(params, spec)
+    metadata = {sina_contract(item["symbol"], int(item["month"][:4])): item for item in params["contracts"]}
+    warnings: list[str] = []
+    source_evidence: list[dict] = []
+    def preserve(proof: dict) -> None:
+        if sum(entry["byte_count"] for entry in source_evidence) + proof["byte_count"] > 8 * 1024 * 1024:
+            raise ValueError("option source evidence exceeds bound; no partial completion")
+        source_evidence.append(proof)
     quotes: dict[str, dict] = {}
     reference_spot = None
     reference_at = None
-    truncated = False
+    reference_date = None
+    reference_label = None
+    reference_received_at = None
     if spec["category"] == "etf":
-        codes = []
-        for kind in ("看涨期权", "看跌期权"):
-            codes.extend(
-                str(row["期权代码"])
-                for row in records(
-                    ak.option_sse_codes_sina(
-                        symbol=kind, trade_date=params["month"], underlying=spec["symbol"][:6]
-                    )
-                )
-            )
+        underlying_symbol = etf_underlying_symbol(spec["symbol"])
+        codes: list[str] = []
+        for side in ("UP", "DOWN"):
+            name = f"OP_{side}_{spec['symbol'][:6]}{params['month'][-4:]}"
+            text, proof = fetch_raw("https://hq.sinajs.cn/list=" + name)
+            preserve(proof)
+            codes.extend(field.removeprefix("CON_OP_") for field in assignment_fields(text,name) if field.startswith("CON_OP_"))
         codes = list(dict.fromkeys(codes))
-        truncated = len(codes) > 160
-
-        def quote(code: str) -> tuple[str, dict | None]:
+        if len(codes) > 30000 or any(not re.fullmatch(r"\d{8}", code) for code in codes):
+            raise ValueError("invalid or excessive ETF contract list")
+        def quote(code: str) -> tuple[str, dict | None, dict | None]:
+            proof = None
             try:
-                rows = records(ak.option_sse_spot_price_sina(symbol=code))
-                return code, {row["字段"]: row["值"] for row in rows}
+                text, proof = fetch_raw("https://hq.sinajs.cn/list=CON_OP_" + code)
+                return code, etf_quote(text,code), proof
             except Exception:
-                return code, None
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            for code, fields in pool.map(quote, codes[:160]):
+                return code, None, proof
+        # All source codes, bounded concurrency. No160-code truncation.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for code, fields, proof in pool.map(quote,codes):
+                if proof is not None: preserve(proof)
                 if fields is None:
-                    warnings.append(f"合约 {code} 报价读取失败。")
+                    warnings.append(f"合约 {code} 报价读取失败；保留目录并标未知。")
                     continue
-                quotes[code] = {
-                    "bid": number(fields.get("买价"), positive=True),
-                    "ask": number(fields.get("卖价"), positive=True),
-                    "last": number(fields.get("最新价"), positive=True),
-                    "observed_at": quote_time(fields.get("行情时间")),
-                    "quote_underlying": fields.get("标的股票"),
-                    "quote_strike": number(fields.get("行权价"), positive=True),
-                }
+                fields["source_body_sha256"] = proof["body_sha256"]
+                fields["source_received_at"] = proof["received_at"]
+                quotes[code] = fields
         try:
-            rows = records(
-                ak.option_sse_underlying_spot_price_sina(symbol="sh" + spec["symbol"][:6])
-            )
-            fields = {row["字段"]: row["值"] for row in rows}
-            reference_spot = number(fields.get("最近成交价"), positive=True)
-            reference_at = quote_time(f"{fields.get('行情日期')} {fields.get('行情时间')}")
+            text, proof = fetch_raw("https://hq.sinajs.cn/list=" + underlying_symbol)
+            preserve(proof)
+            fields = assignment_fields(text,underlying_symbol)
+            if len(fields) < 32: raise ValueError("invalid ETF underlying quote")
+            reference_spot = exact_decimal(fields[3],positive=True)
+            reference_label = f"{fields[30]} {fields[31]}"
+            reference_received_at = proof["received_at"]
+            # This independent ETF-underlying protocol likewise has no verified timezone/clock role.
+            reference_at = None
         except Exception:
-            warnings.append("未读取到标的价格, 请手工填写情景价格。")
+            warnings.append("未读取到标的价格；情景价格需手工填写。")
     else:
-        underlying = sina_contract(
-            params["contracts"][0]["underlying"], int(params["month"][:4])
-        ).lower()
-        frame = (
-            getattr(ak, f"option_cffex_{spec['sina']}_spot_sina")(symbol=underlying)
-            if spec["category"] == "index"
-            else ak.option_commodity_contract_table_sina(symbol=spec["sina"], contract=underlying)
-        )
-        for row in records(frame):
-            for label in ("看涨", "看跌"):
-                code = row.get(f"{label}合约-{label}期权合约", row.get(f"{label}合约-标识"))
-                if not code:
-                    continue
-                quotes[contract_key(str(code))] = {
-                    "bid": number(row.get(f"{label}合约-买价"), positive=True),
-                    "ask": number(row.get(f"{label}合约-卖价"), positive=True),
-                    "last": number(row.get(f"{label}合约-最新价"), positive=True),
-                    "observed_at": None,
-                    "quote_strike": number(row.get("行权价"), positive=True),
-                }
-        warnings.append("来源的期权 T 型报价未提供报价时间; 读取时间不等同于成交时间。")
+        underlying = sina_contract(params["contracts"][0]["underlying"],int(params["month"][:4])).lower()
+        if spec["category"] == "index":
+            product, exchange = spec["symbol"].lower(), "cffex"
+        else:
+            text, proof = fetch_raw("https://stock.finance.sina.com.cn/futures/view/optionsDP.php/pg_o/dce")
+            preserve(proof)
+            parser = ProductLinks(); parser.feed(text)
+            product, exchange = parser.products[spec["sina"]]
+        text, proof = fetch_raw("https://stock.finance.sina.com.cn/futures/api/openapi.php/OptionService.getOptionData", {"type":"futures","product":product,"exchange":exchange,"pinzhong":underlying})
+        preserve(proof)
+        for fields in table_quotes(text):
+            fields["source_body_sha256"] = proof["body_sha256"]
+            quotes[contract_key(fields["code"])] = fields
+        warnings.append("来源T型报价没有行情时刻；接收时间仅为本次获取证据，不当成交时间。")
         if spec["category"] == "future":
             try:
-                history = records(ak.futures_zh_daily_sina(symbol=underlying.upper()))
+                text, proof = fetch_raw("https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_V21052021_4_12=/InnerFuturesNewService.getDailyKLine", {"symbol":underlying.upper(),"type":"2021_04_12"})
+                preserve(proof)
+                match = re.search(r"=\((.*)\);?\s*$",text,re.S)
+                history = json_exact(match[1]) if match else []
                 if history:
-                    reference_spot = number(history[-1].get("close"), positive=True)
-                    reference_at = quote_time(history[-1].get("date"))
+                    last = history[-1]
+                    # The public daily protocol uses d/c; date/close is the SDK shape.
+                    day = last.get("d", last.get("date"))
+                    close = exact_decimal(last.get("c", last.get("close")), positive=True)
+                    if isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and close is not None:
+                        reference_date = date_string(day)
+                        reference_spot = close
             except Exception:
-                warnings.append("未读取到标的价格, 请手工填写情景价格。")
-    contracts = []
+                warnings.append("未读取到日线参考价；情景价格需手工填写。")
+            if reference_date:
+                warnings.append("标的参考价来自日线收盘，日期仅日精度，不是实时标的报价时刻。")
+    contracts: list[dict] = []
     unmatched = 0
     for code, fields in quotes.items():
         meta = metadata.get(code)
-        if (
-            meta is None
-            or fields["quote_strike"] != meta["strike"]
-            or (
-                fields.get("quote_underlying")
-                and contract_key(str(fields["quote_underlying"]))
-                != contract_key(meta["underlying"])
-            )
-        ):
+        strike = exact_decimal(fields.get("strike_raw"),positive=True)
+        if meta is None or strike is None or Decimal(strike) != Decimal(meta["strike"]) or (fields.get("kind") and fields["kind"] != meta["kind"]) or (fields.get("quote_underlying") and contract_key(str(fields["quote_underlying"])) != contract_key(meta["underlying"])):
             unmatched += 1
             continue
-        bid, ask = fields["bid"], fields["ask"]
-        if bid is not None and ask is not None and bid > ask:
-            fields.update(bid=None, ask=None)
-            warnings.append(f"合约 {meta['symbol']} 买卖价倒挂, 已排除盘口价格。")
-        contracts.append(
-            {
-                **meta,
-                **{key: fields[key] for key in ("bid", "ask", "last", "observed_at")},
-                "iv": None,
-                "greeks": {},
-            }
-        )
-    if unmatched:
-        warnings.append(f"{unmatched} 条报价缺少匹配的有效合约元数据, 已排除。")
-    if not contracts:
-        raise ValueError("no matched option quotes")
-    return {
-        "source": "akshare",
-        "feed": "AKShare / 新浪期权",
-        "underlying": params["symbol"],
-        "month": params["month"],
-        "currency": "CNY",
-        "truncated": truncated,
-        "pricing_model": "black76" if spec["category"] == "future" else "black-scholes",
-        "reference_spot": reference_spot,
-        "reference_observed_at": reference_at,
-        "contracts": sorted(contracts, key=lambda row: (row["strike"], row["kind"])),
-        "warnings": warnings,
-        "note": "新浪公开期权快照; 到期日、乘数及标的由 OpenCTP 合约目录核对。",
-    }
+        prices = {key:exact_decimal(fields.get(key+"_raw"),positive=True) for key in ("bid","ask","last")}
+        if prices["bid"] is not None and prices["ask"] is not None and Decimal(prices["bid"]) > Decimal(prices["ask"]):
+            prices.update(bid=None,ask=None)
+            warnings.append(f"合约 {meta['symbol']} 买卖价倒挂；原值保留，盘口不可用于情景。")
+        observed_raw = fields.get("observed_at_raw")
+        observed_at = None if spec["category"] == "etf" else quote_time(observed_raw)
+        if spec["category"] == "etf" and isinstance(observed_raw,str) and observed_raw.endswith("00:00:00"):
+            warnings.append(f"合约 {meta['symbol']} 来源仅返回午夜时间，无法核实实际报价时刻；原始标记保留。")
+        contracts.append({**meta,**prices,"observed_at":observed_at,"observed_precision":"second" if observed_at else "day" if isinstance(observed_raw,str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}",observed_raw) else "unknown",
+            "volume":exact_decimal(fields.get("volume_raw")),"open_interest":exact_decimal(fields.get("open_interest_raw")),
+            "source_change":exact_decimal(fields.get("source_change_raw"),signed=True),"source_change_percent":exact_decimal(fields.get("source_change_percent_raw"),signed=True),
+            "source_change_unit":"unknown","source_change_semantics":"unverified SDK label: 涨跌; raw value is not asserted to be an amount or percentage",
+            "change_basis":"not_verified; preserve source change only","previous_close":exact_decimal(fields.get("previous_close_raw"),positive=True),
+            "source_quote":{"mapping_version":"sina-option-sdk-core-fields-v1","body_sha256":fields["source_body_sha256"],"raw_fields":fields["source_fields"],"observed_label":observed_raw,"price_policy":"nonpositive source prices are unavailable for a scenario; original lexemes retained","numeric_policy":"source-decimal-lexeme-v1",**({"clock_qualification":"unverified_timezone_and_role","clock_timezone":None,"received_at":fields["source_received_at"]} if spec["category"]=="etf" else {})},"iv":None,"greeks":{},**({"source_received_at":fields["source_received_at"],"source_clock_label":observed_raw,"source_clock_qualification":"unverified_timezone_and_role"} if spec["category"]=="etf" else {})})
+    quoted_ids = {row["symbol"] for row in contracts}
+    for meta in metadata.values():
+        if meta["symbol"] not in quoted_ids:
+            contracts.append({**meta,"bid":None,"ask":None,"last":None,"observed_at":None,"observed_precision":"unknown","volume":None,"open_interest":None,"iv":None,"greeks":{},"quote_state":"not_returned_or_metadata_conflict"})
+    if unmatched: warnings.append(f"{unmatched} 源报价与有效目录身份/行权价不符；原响应保留，不导入报价。")
+    if not quotes: warnings.append("原通道该有效月份没有报价；有效合约目录不代表价格可用。")
+    if spec["category"]=="etf": warnings.append("来源行情时间的时区与时钟角色尚未核实；仅保留原始标记与获取时刻，不能据此认定精确成交时间。")
+    if not contracts: raise ValueError("no valid option metadata")
+    return {"source":"akshare","feed":"AKShare / 新浪期权（原词法精确）","underlying":params["symbol"],"month":params["month"],"currency":"CNY","truncated":False,
+        "pricing_model":"black76" if spec["category"]=="future" else "black-scholes","model_numeric_policy":"IV/Greeks/payoff scenarios use approximate binary floats; source prices remain exact strings",
+        "reference_spot":reference_spot,"reference_observed_at":reference_at,"reference_date":reference_date,"reference_precision":"day" if reference_date else "second" if reference_at else "unknown",**({"reference_source_label":reference_label,"reference_received_at":reference_received_at,"reference_clock_qualification":"unverified_timezone_and_role"} if spec["category"]=="etf" else {}),
+        "contracts":sorted(contracts,key=lambda row:(Decimal(row["strike"]),row["kind"],row["symbol"])),"metadata_contract_count":str(len(metadata)),"quoted_contract_count":str(sum(row.get("source_quote") is not None for row in contracts)),"quote_status":"metadata_only_quotes_unavailable" if not quotes else "partial" if len(quoted_ids)<len(metadata) else "source_rows_available",
+        "source_evidence":source_evidence,"metadata_evidence":params.get("metadata_evidence"),"precision_policy":"source-decimal-lexeme-v1","warnings":warnings,"note":"既有新浪公开期权响应原词法保存；到期/乘数/标的由OpenCTP目录核对，未知源时间不补。"}
 
 
 def execute(operation: str, params: dict) -> Any:
-    import akshare as ak
+    if operation == "metadata":
+        return load_metadata()
+
+    if operation == "daily_source":
+        from tracefang.official_option_daily import fetch_report
+        return fetch_report(params["source_family"], params["report_date"])
+
+    if operation == "chain":
+        return build_chain(None, params)
 
     if operation == "bars":
-        return load_bars(ak, params)
-    if operation == "metadata":
-        return normalize_metadata(records(ak.option_contract_info_ctp()))
-    if operation == "chain":
-        return build_chain(ak, params)
+        return load_bars(None, params)
+
     raise ValueError("unsupported AKShare operation")
 
 
