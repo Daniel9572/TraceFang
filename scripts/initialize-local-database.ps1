@@ -18,12 +18,20 @@ function Test-ConfiguredValue {
 }
 
 if (Test-Path -LiteralPath $localEnvFile) {
+    if (-not (Test-ConfiguredValue -Path $localEnvFile -Name 'TRACEFANG_NATS_URL') -and
+        -not (Test-ConfiguredValue -Path $baseEnvFile -Name 'TRACEFANG_NATS_URL')) {
+        $natsPort = '14222'
+        $portLine = Get-Content -LiteralPath $localEnvFile | Where-Object {
+            $_ -match '^\s*TRACEFANG_NATS_PORT\s*=\s*\d+\s*$'
+        } | Select-Object -First 1
+        if ($portLine) { $natsPort = ($portLine -split '=', 2)[1].Trim() }
+        Add-Content -LiteralPath $localEnvFile -Value "`nTRACEFANG_NATS_URL=nats://127.0.0.1:$natsPort" -Encoding utf8
+    }
     return
 }
 
 if (Test-ConfiguredValue -Path $baseEnvFile -Name "TRACEFANG_DATABASE_URL") {
-    Write-Host "External PostgreSQL configuration found in .env; local database credentials were not generated."
-    return
+    throw 'External database configuration detected. Create .env.local with the intended database and NATS settings before managed installation.'
 }
 
 $databaseName = "tracefang"
@@ -41,6 +49,7 @@ $databaseUrl = "postgresql://${databaseUser}:${databasePassword}@127.0.0.1:${dat
     "POSTGRES_PASSWORD=$databasePassword"
     "TRACEFANG_POSTGRES_PORT=$databasePort"
     "TRACEFANG_DATABASE_URL=$databaseUrl"
+    "TRACEFANG_NATS_URL=nats://127.0.0.1:14222"
 ) | Set-Content -LiteralPath $localEnvFile -Encoding utf8
 
 Write-Host "Created private local PostgreSQL settings in .env.local." -ForegroundColor Green

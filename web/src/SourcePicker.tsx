@@ -356,6 +356,11 @@ export function SourcePicker({
                       {quoteServiceNotes[optionServiceTier]}
                     </span>
                     <span>{capabilitySummary}</span>
+                    <span>
+                      {source.history_backfill_configured
+                        ? "历史恢复通道已绑定"
+                        : "无历史恢复通道"}
+                    </span>
                     {source.access_model !== "unmetered" ? (
                       <span className={"source-access-badge is-" + source.access_model}>
                         {sourceAccessLabels[source.access_model]}

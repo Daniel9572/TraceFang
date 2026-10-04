@@ -58,10 +58,38 @@ export interface InstrumentEntry {
   price_unit: string;
   price_digits: number;
   quote_kind: "direct" | "derived";
-  history_available: boolean;
+  history_backfill_supported: boolean;
   source_ids: SourceId[];
+  source_period_reference?: SourcePeriodReferenceMapping | null;
   dependencies: string[];
   market_schedule?: MarketSchedule | null;
+}
+
+export interface SourcePeriodReferenceMapping { source_id: string; period: "min_5"; market: string; code: string }
+export interface SourcePeriodReferenceScope { code: string; mapping: SourcePeriodReferenceMapping }
+export interface SourcePeriodPriceRow {
+  row_index: number;
+  source_label: string;
+  label_utc_display: string;
+  source_fields: Record<string, unknown>;
+  field_presence: Record<string, boolean>;
+  open: string | null; high: string | null; low: string | null; close: string | null;
+  volume: string | null; turnover: string | null;
+  finality: "unknown";
+}
+export interface SourcePeriodPriceReference {
+  code: string; name: string; source_id: string;
+  source_instrument: { market: string; code: string };
+  requested_source_period: "min_5"; adjust_type: "actual";
+  source_response_state: "rows" | "empty";
+  delivery_mode: "live" | "fixed_original_body";
+  rows: SourcePeriodPriceRow[];
+  reference_id: string; reference_url: string;
+  source_evidence: {
+    url: string; request: Record<string, unknown>; requested_at: string; received_at: string;
+    body_sha256: string; body_bytes: number; body_base64: string;
+    fixed_manifest_sha256?: string;
+  };
 }
 
 export interface QuoteSnapshot {
@@ -94,10 +122,11 @@ export interface Candle {
   low: number | string;
   close: number | string;
   volume: number | string | null;
+  open_interest?: number | null;
   source: SourceMetadata;
   evidence_channel_id: string;
   state: "provisional_quote" | "provisional_authoritative" | "final";
-  revision: number;
+  revision: number | string;
   finalized_at: string | null;
 }
 
@@ -106,11 +135,13 @@ export interface SourceDescriptor {
   display_name: string;
   description: string;
   capabilities: string[];
+  history_backfill_configured: boolean;
   selectable: boolean;
   delayed: boolean;
   requires_running_app: boolean;
   structured: boolean;
   quote_poll_interval_seconds: number;
+  quote_timestamp_precision_seconds?: number;
   quote_streaming: boolean;
   quote_service_tier: QuoteServiceTier;
   access_model: SourceAccessModel;
@@ -127,10 +158,16 @@ export interface SourceDescriptor {
 
 export interface CandleBackfillResult {
   source_id: SourceId;
-  state: "cached" | "fetched";
+  state: "cached" | "joined" | "fetched" | "advanced" | "exhausted" | "deferred";
   start: string;
   end: string;
   row_count: number;
+  covered_start: string | null;
+  covered_end: string | null;
+  authoritative_through: string | null;
+  history_floor: string | null;
+  retry_after: string | null;
+  evidence_version: string | null;
 }
 
 export interface SourceConnectionTest {
@@ -138,10 +175,13 @@ export interface SourceConnectionTest {
   code: string;
   state: string;
   detail: string | null;
+  history_backfill_configured: boolean;
   data_fresh: boolean;
   last: number | string | null;
   observed_at: string | null;
-  latency_ms: number;
+  latency_ms: number | string | null;
+  validation_performed?:boolean;
+  capture_position?:{epoch:string;sequence:string;digest:string};
   quality: "complete" | "degraded" | "unavailable";
   unavailable_fields: string[];
   stale_fields: string[];
@@ -155,7 +195,7 @@ export interface InstrumentSourceSelection {
 }
 
 export interface QuoteStreamEvent {
-  kind: "bar" | "gap" | "quote" | "sample" | "status";
+  kind: "bar" | "gap" | "quote" | "sample" | "status" | "range_invalidated" | "period_tail_changed";
   state: "connecting" | "live" | "unavailable";
   emitted_at: string;
   period_id: BarPeriodId;
@@ -163,51 +203,66 @@ export interface QuoteStreamEvent {
   quote: QuoteView | null;
   sample: QuoteSample | null;
   error: string | null;
-  delivery_sequence?: number | null;
-  gap_from_sequence?: number | null;
-  gap_to_sequence?: number | null;
+  delivery_sequence?: string | number | null;
+  source_id?:SourceId; symbol?:string; start_ns?:string;end_ns?:string;
+  change?:{source_id:SourceId;symbol:string;start_ns:string;end_ns:string;interval_seconds:number;series_version:Record<string,unknown>};
+  snapshot_version?:{commit_id:string;store_epoch:string};
+  gap_from_sequence?: string | number | null;
+  gap_to_sequence?: string | number | null;
 }
 
+export type ExactSequence = string | number;
 export interface ReplayFrameBounds {
   state: "ready" | "empty" | "unavailable";
-  first_sequence: number | null;
-  last_sequence: number | null;
-  message_count: number;
-  first_received_at: string | null;
-  last_received_at: string | null;
-  source_ids: SourceId[];
-  detail: string | null;
+  first_sequence: ExactSequence | null; last_sequence: ExactSequence | null;
+  message_count: ExactSequence;
+  first_received_at: string | null; last_received_at: string | null;
+  first_logical_at_ns?: string | null; last_logical_at_ns?: string | null;
+  source_ids: SourceId[]; detail: string | null;
 }
-
 export interface ReplayFrameCursor {
-  sequence: number;
-  received_at: string;
-  channel: string;
-  connection_id: string;
-  provider_sequence: number;
+  sequence: ExactSequence; received_at: string; received_at_ns?: string | null;
+  logical_at_ns?: string | null; channel: string; connection_id: string;
+  provider_sequence: ExactSequence;
 }
-
 export interface ReplayStreamEvent {
-  kind: "bar" | "decode_error" | "frame" | "quote" | "status";
-  state?: "playing" | "completed" | "unavailable";
-  stream_sequence?: number | null;
-  frame_received_at?: string;
-  frame_channel?: string;
-  period_id?: string;
-  source_id?: SourceId;
-  quote?: QuoteSnapshot | null;
-  bar?: Candle | null;
-  error?: string | null;
-  start_sequence?: number;
-  end_sequence?: number;
-  replay_policy?: "original";
+  kind: "bar" | "decode_error" | "frame" | "quote" | "status" | "snapshot" | "period_snapshot";
+  state?: "playing" | "paused" | "seeking" | "completed" | "unavailable";
+  items?: Candle[]; reset?: boolean; stream_sequence?: ExactSequence | null;
+  frame_received_at?: string; actual_received_at_ns?: string | null; logical_at_ns?: string | null;
+  knowledge_at_ns?:string|null;
+  frame_channel?: string; period_id?: string; source_id?: SourceId;
+  quote?: QuoteSnapshot | null; bar?: Candle | null; error?: string | null;
+  start_sequence?: ExactSequence; end_sequence?: ExactSequence;
+  replay_policy?: string; input_watermark?: {epoch:string;sequence:ExactSequence}|null;
+  session_id?:string; quant_snapshot?:import("./quantTypes").QuantSnapshot;
 }
 
 export interface ChartBarPage {
+  coverage?:{calendar_projection?:{excluded_outside_schedule:string;earliest_ns:string|null;latest_ns:string|null;schedule_version:string;reason:string|null;complete:boolean}};
   period_id: string;
   items: Candle[];
   next_before: string | null;
+  next_cursor: string | null;
+  local_status: "ready" | "empty";
   has_more: boolean;
+}
+
+export type ChartHistorySourceStatus =
+  | "available"
+  | "deferred"
+  | "exhausted"
+  | "unsupported";
+
+export interface ChartHistoryResponse {
+  source_id: SourceId;
+  period_id: string;
+  local_status: "ready" | "empty";
+  source_status: ChartHistorySourceStatus;
+  page: ChartBarPage;
+  next_before: string | null;
+  next_cursor: string | null;
+  backfill: CandleBackfillResult | null;
 }
 
 export interface QuoteSample {
@@ -219,6 +274,7 @@ export interface QuoteSample {
   observed_at: string;
   received_at: string;
   value: number | string;
+  observation_kind: "event" | "snapshot";
   storage_id: number | null;
 }
 

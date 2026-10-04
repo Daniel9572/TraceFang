@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from hashlib import sha256
 
 from tracefang.domain.models import Candle, Instrument, QuoteSnapshot
 
@@ -21,6 +22,13 @@ class BarFinalityPolicy(StrEnum):
 
     EXPLICIT = "explicit"
     NEXT_AUTHORITATIVE_BAR = "next_authoritative_bar"
+
+
+class QuoteObservationKind(StrEnum):
+    """Whether one quote observation was pushed or sampled by polling."""
+
+    EVENT = "event"
+    SNAPSHOT = "snapshot"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +84,49 @@ class BarEvent:
 MarketEvent = QuoteEvent | BarEvent
 
 
+def quote_event_id(quote: QuoteSnapshot) -> str:
+    """Returns one stable opaque identity for a captured quote event.
+
+    Transport identity wins when a provider exposes it. Providers without a
+    connection/sequence pair still receive a deterministic capture identity;
+    equal prices or equal source timestamps are deliberately not identities.
+    """
+
+    source = quote.source
+    raw = source.raw_payload or {}
+    connection_id = raw.get("connection_id")
+    sequence = raw.get("sequence")
+    parts = [source.provider, source.provider_symbol]
+    if isinstance(connection_id, str) and connection_id and isinstance(sequence, int):
+        parts.extend(("transport", connection_id, str(sequence)))
+    else:
+        parts.extend(
+            (
+                "capture",
+                source.observed_at.isoformat(timespec="microseconds"),
+                source.received_at.isoformat(timespec="microseconds"),
+                str(quote.last),
+                str(quote.open),
+                str(quote.high),
+                str(quote.low),
+                str(quote.volume),
+                str(quote.change),
+                str(quote.change_percent),
+            )
+        )
+    digest = sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+    return f"quote:{digest}"
+
+
+def quote_observation_kind(quote: QuoteSnapshot) -> QuoteObservationKind:
+    raw = quote.source.raw_payload or {}
+    return (
+        QuoteObservationKind.SNAPSHOT
+        if raw.get("observation_kind") == QuoteObservationKind.SNAPSHOT.value
+        else QuoteObservationKind.EVENT
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class QuoteSample:
     """One canonical business timeline sample derived from lossless raw evidence."""
@@ -88,6 +139,7 @@ class QuoteSample:
     observed_at: datetime
     received_at: datetime
     value: Decimal
+    observation_kind: QuoteObservationKind = QuoteObservationKind.EVENT
     storage_id: int | None = None
 
     def __post_init__(self) -> None:
@@ -101,6 +153,8 @@ class QuoteSample:
                 raise ValueError(f"{field} must be timezone-aware")
         if not self.value.is_finite():
             raise ValueError("sample value must be finite")
+        if not isinstance(self.observation_kind, QuoteObservationKind):
+            raise ValueError("sample observation_kind is invalid")
         if self.storage_id is not None and self.storage_id < 1:
             raise ValueError("storage_id must be positive")
 

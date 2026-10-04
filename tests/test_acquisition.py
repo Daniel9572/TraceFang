@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from tracefang.application.acquisition import QuoteAcquisitionRouter
+from tracefang.application.sources import SourceHealth
 from tracefang.domain.models import QuoteSnapshot, SourceMetadata
 from tracefang.infrastructure.providers.jin10 import SPOT_GOLD, SPOT_SILVER
 
@@ -118,6 +119,30 @@ class QuoteAcquisitionRouterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.polled.calls, 1)
         self.assertEqual(self.received[0].source.provider, "polled_channel")
+
+    async def test_source_rate_gate_spreads_startup_and_reports_partial_failure(self) -> None:
+        calls = []
+        failed = True
+
+        async def get_quote(instrument):
+            calls.append((instrument, asyncio.get_running_loop().time()))
+            if failed and instrument == SPOT_GOLD:
+                raise RuntimeError("fixture transport unavailable")
+            return quote("polled_channel", instrument)
+
+        self.polled.get_quote = get_quote
+        self.router._poll_interval = lambda _: 0.25
+        await self.router.start({SPOT_GOLD: "polled_source", SPOT_SILVER: "polled_source"})
+        self.assertEqual(self.router.poll_probe("polled_channel").health, SourceHealth.UNKNOWN)
+        await asyncio.sleep(0.35)
+        self.assertEqual(len(calls), 2)
+        self.assertGreaterEqual(calls[1][1] - calls[0][1], 0.24)
+        probe = self.router.poll_probe("polled_channel")
+        self.assertEqual(probe.health, SourceHealth.DEGRADED)
+        self.assertIn("fixture transport", probe.detail)
+        failed = False
+        await self.router.sample_source("polled_source", SPOT_GOLD)
+        self.assertEqual(self.router.poll_probe("polled_channel").health, SourceHealth.HEALTHY)
 
     async def test_source_test_temporarily_subscribes_then_restores_route(self) -> None:
         await self.router.start({SPOT_GOLD: "backup_source"})

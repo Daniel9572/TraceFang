@@ -5,6 +5,10 @@ import type {
   SourceDescriptor,
   SourceId,
 } from "./types";
+import {
+  quoteStreamCloseDecision,
+  quoteStreamReconnectDelay,
+} from "./quoteStreamConnection.ts";
 
 export interface WatchlistQuoteStreamTarget {
   code: string;
@@ -55,7 +59,7 @@ export function startWatchlistQuoteStream({
 
   const scheduleReconnect = () => {
     if (disposed) return;
-    const delay = Math.min(1_000, 100 * 2 ** retryCount);
+    const delay = quoteStreamReconnectDelay(retryCount);
     retryCount += 1;
     retryTimer = globalThis.setTimeout(connect, delay);
   };
@@ -88,8 +92,10 @@ export function startWatchlistQuoteStream({
       }
     };
     nextSocket.onerror = () => nextSocket.close();
-    nextSocket.onclose = () => {
+    nextSocket.onclose = (event) => {
       if (disposed || socket !== nextSocket) return;
+      socket = null;
+      if (!quoteStreamCloseDecision(event, retryCount).retry) return;
       scheduleReconnect();
     };
   };

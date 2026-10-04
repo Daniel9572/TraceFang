@@ -1,3 +1,4 @@
+import { compareSourceRevision } from "./quantFormat.ts";
 import { sameCandleVersion, upsertRealtimeBar } from "./chartModel.ts";
 import type { Candle } from "./types.ts";
 
@@ -31,7 +32,7 @@ function epochSeconds(value: string): number | null {
  */
 export class RealtimeBarStream {
   private readonly listeners = new Set<RealtimeBarListener>();
-  private readonly latestByDataset = new Map<string, DeliveredBarVersion>();
+  private readonly latestByDataset = new Map<string, Map<string, DeliveredBarVersion>>();
 
   subscribe(listener: RealtimeBarListener): () => void {
     this.listeners.add(listener);
@@ -43,20 +44,22 @@ export class RealtimeBarStream {
     const openTime = epochSeconds(bar.open_time);
     if (openTime === null) return false;
 
-    const previous = this.latestByDataset.get(datasetKey);
+    const versions=this.latestByDataset.get(datasetKey)??new Map<string,DeliveredBarVersion>();
+    const previous = versions.get(bar.open_time);
     if (previous) {
-      if (openTime < previous.openTime) return false;
       if (openTime === previous.openTime) {
-        if (bar.revision < previous.bar.revision) return false;
+        if (compareSourceRevision(bar.revision, previous.bar.revision) < 0) return false;
         if (
-          bar.revision === previous.bar.revision
+          compareSourceRevision(bar.revision, previous.bar.revision) === 0
           && candleStateRank[bar.state] <= candleStateRank[previous.bar.state]
         ) return false;
         if (sameCandleVersion(previous.bar, bar)) return false;
       }
     }
 
-    this.latestByDataset.set(datasetKey, { bar, openTime });
+    versions.set(bar.open_time,{bar,openTime});
+    if(versions.size>4096)versions.delete(versions.keys().next().value!);
+    this.latestByDataset.set(datasetKey,versions);
     const delivery = { datasetKey, bar };
     for (const listener of this.listeners) listener(delivery);
     return true;
@@ -89,7 +92,10 @@ export class RealtimeBarCommitBuffer {
   }
 
   push(bar: Candle): boolean {
-    this.pending = upsertRealtimeBar(this.pending, bar);
+    const time=epochSeconds(bar.open_time);
+    if(time!==null&&this.pending.length&&time<epochSeconds(this.pending[0].open_time)!){this.pending=[bar,...this.pending];}
+    else if(time!==null&&this.pending.length&&time<epochSeconds(this.pending.at(-1)!.open_time)!&&!this.pending.some(row=>row.open_time===bar.open_time)){this.pending=[...this.pending,bar].sort((a,b)=>epochSeconds(a.open_time)!-epochSeconds(b.open_time)!);}
+    else this.pending = upsertRealtimeBar(this.pending, bar);
     return this.pending.length >= this.maxBars;
   }
 

@@ -44,9 +44,9 @@ class OptionContractQuote:
     ask: Decimal | None
     last: Decimal | None
     previous_settlement: Decimal | None
-    volume: int
-    open_interest: int
-    open_interest_change: int
+    volume: int | None
+    open_interest: int | None
+    open_interest_change: int | None
     turnover: Decimal | None
     observed_at: datetime
     delta: Decimal | None = None
@@ -61,7 +61,7 @@ class OptionContractQuote:
             raise ValueError("option contract multiplier must be positive and finite")
         for field in ("bid", "ask", "last", "previous_settlement", "turnover"):
             _require_non_negative(getattr(self, field), field)
-        if min(self.volume, self.open_interest) < 0:
+        if any(value is not None and value < 0 for value in (self.volume, self.open_interest)):
             raise ValueError("option volume and open interest cannot be negative")
         if self.delta is not None and (
             not self.delta.is_finite() or not Decimal("-1") <= self.delta <= Decimal("1")
@@ -77,8 +77,8 @@ class OptionUnderlyingQuote:
     ask: Decimal | None
     last: Decimal | None
     previous_settlement: Decimal | None
-    volume: int
-    open_interest: int
+    volume: int | None
+    open_interest: int | None
     observed_at: datetime
 
     def __post_init__(self) -> None:
@@ -86,7 +86,7 @@ class OptionUnderlyingQuote:
             raise ValueError("underlying contract id cannot be empty")
         for field in ("bid", "ask", "last", "previous_settlement"):
             _require_non_negative(getattr(self, field), field)
-        if min(self.volume, self.open_interest) < 0:
+        if any(value is not None and value < 0 for value in (self.volume, self.open_interest)):
             raise ValueError("underlying volume and open interest cannot be negative")
         _require_aware(self.observed_at, "observed_at")
 

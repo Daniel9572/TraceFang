@@ -114,7 +114,7 @@ class Jin10WebProvider:
         fresh = [
             quote
             for quote in self._latest.values()
-            if (now - quote.source.received_at).total_seconds() <= self.settings.stale_after_seconds
+            if self._connected and quote.source.is_fresh(now, self.settings.stale_after_seconds)
         ]
         if fresh:
             newest = max(fresh, key=lambda quote: quote.source.received_at)
@@ -161,8 +161,11 @@ class Jin10WebProvider:
         quote = self._latest.get(provider_code)
         if quote is None:
             return None
-        age = (datetime.now(UTC) - quote.source.received_at).total_seconds()
-        return quote if age <= self.settings.stale_after_seconds else None
+        return (
+            quote
+            if quote.source.is_fresh(datetime.now(UTC), self.settings.stale_after_seconds)
+            else None
+        )
 
     async def _run(self) -> None:
         delay = _RECONNECT_MIN_SECONDS
@@ -192,7 +195,8 @@ class Jin10WebProvider:
             origin=self.settings.origin,
             open_timeout=self.settings.connect_timeout_seconds,
             close_timeout=5,
-            ping_interval=None,
+            ping_interval=20,
+            ping_timeout=20,
             max_size=1024 * 1024,
         ) as socket:
             subscription = encode_quote_subscription(
@@ -306,10 +310,10 @@ class Jin10WebProvider:
         )
         try:
             observed_at = datetime.fromtimestamp(wire.timestamp, tz=UTC)
-        except (OSError, OverflowError, ValueError):
-            observed_at = received_at
-        if abs((received_at - observed_at).total_seconds()) > 7 * 24 * 3600:
-            observed_at = received_at
+        except (OSError, OverflowError, ValueError) as error:
+            raise ProviderDataError("Jin10 quote timestamp is invalid") from error
+        if wire.timestamp <= 0:
+            raise ProviderDataError("Jin10 quote timestamp must be positive")
         return QuoteSnapshot(
             instrument=instrument,
             last=last,
@@ -327,6 +331,7 @@ class Jin10WebProvider:
                 raw_payload={
                     "protocol": protocol,
                     "channel": "jin10_public_websocket",
+                    "observation_kind": "event",
                     "connection_id": connection_id,
                     "sequence": sequence,
                     "previous_close": str(previous_close) if previous_close else None,

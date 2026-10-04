@@ -13,6 +13,10 @@ class ProviderUnavailableError(ProviderError):
     """The provider is temporarily unavailable."""
 
 
+class ProviderAuthenticationError(ProviderUnavailableError):
+    """The provider rejected credentials that may be refreshed once."""
+
+
 class ProviderRateLimitError(ProviderError):
     """The local or upstream provider quota has been exhausted."""
 

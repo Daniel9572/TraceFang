@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createReplayProjectionStart,
+  replayProjectionStateLabel,
   formatReplayTimecode,
   REPLAY_DERIVED_DOMAIN_NOTICE,
   replayStreamQuery,
@@ -70,3 +71,5 @@ test("isolates every live-only derived domain while a replay projection exists",
   assert.match(REPLAY_DERIVED_DOMAIN_NOTICE, /历史域/);
   assert.match(REPLAY_DERIVED_DOMAIN_NOTICE, /隔离/);
 });
+
+test("paused replay remains visibly distinct from a stopped connection",()=>{assert.equal(replayProjectionStateLabel("paused"),"回放已暂停");assert.equal(replayProjectionStateLabel("stopped"),"回放已停止");assert.equal(replayProjectionStateLabel("seeking"),"正在定位回放");});

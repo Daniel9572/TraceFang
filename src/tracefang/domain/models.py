@@ -63,6 +63,17 @@ class SourceMetadata:
         _require_aware(self.observed_at, "observed_at")
         _require_aware(self.received_at, "received_at")
 
+    def is_fresh(self, now: datetime, max_age_seconds: float) -> bool:
+        """A newly received old snapshot is still old market data."""
+        precision = (self.raw_payload or {}).get("timestamp_precision_seconds", 0)
+        precision = precision if isinstance(precision, (int, float)) else 0
+        precision = min(60, max(0, precision))
+        age = (now - self.observed_at).total_seconds()
+        return (
+            -max_age_seconds <= age <= max_age_seconds + precision
+            and (now - self.received_at).total_seconds() <= max_age_seconds
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class QuoteSnapshot:

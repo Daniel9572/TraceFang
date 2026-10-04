@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -15,6 +16,26 @@ from tracefang.domain.errors import ProviderUnavailableError
 from tracefang.domain.market_events import BarState, QuoteSample, RealtimeBar
 from tracefang.domain.models import QuoteSnapshot, SourceMetadata
 from tracefang.infrastructure.providers.jin10 import SPOT_GOLD
+
+
+class QuoteFreshnessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_idle_feed_expires_without_a_new_upstream_event(self) -> None:
+        current = view("jin10_client")
+
+        async def load(_instrument, _source):
+            return current
+
+        stream = QuoteStreamCoordinator(load_quote=load, freshness_interval_seconds=0.01)
+        try:
+            async with stream.subscribe(SPOT_GOLD, source="jin10_client") as queue:
+                await queue.get()
+                self.assertEqual((await queue.get()).state, "live")
+                current = replace(current, stale_fields=("last",), quality=QuoteQuality.DEGRADED)
+                event = await asyncio.wait_for(queue.get(), 1)
+                self.assertEqual(event.state, "unavailable")
+                self.assertEqual(event.quote.quote.last, current.quote.last)
+        finally:
+            await stream.close()
 
 
 def quote(source: str, price: str = "4242.65") -> QuoteSnapshot:
@@ -133,7 +154,11 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         coordinator = QuoteStreamCoordinator(load_quote=load)
         try:
-            async with coordinator.subscribe(SPOT_GOLD, source="jin10_client") as queue:
+            async with coordinator.subscribe(
+                SPOT_GOLD,
+                source="jin10_client",
+                period="1s",
+            ) as queue:
                 await asyncio.wait_for(queue.get(), 1)
                 await asyncio.wait_for(queue.get(), 1)
 
@@ -206,7 +231,11 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             value=value.last,
         )
         try:
-            async with coordinator.subscribe(SPOT_GOLD, source="jin10_client") as queue:
+            async with coordinator.subscribe(
+                SPOT_GOLD,
+                source="jin10_client",
+                period="1s",
+            ) as queue:
                 await asyncio.wait_for(queue.get(), 1)
                 await asyncio.wait_for(queue.get(), 1)
                 coordinator.publish_sample(sample)
@@ -217,11 +246,11 @@ class QuoteStreamCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(event.sample, sample)
                 self.assertIsNone(event.quote)
 
-                value = bar("jin10_client")
+                value = bar("jin10_client", interval=timedelta(seconds=1))
                 coordinator.publish_bar_update(value)
                 bar_event = await asyncio.wait_for(queue.get(), 0.05)
                 self.assertEqual(bar_event.kind, "bar")
-                self.assertEqual(bar_event.period_id, "1m")
+                self.assertEqual(bar_event.period_id, "1s")
                 self.assertEqual(bar_event.bar, value)
                 self.assertIsNone(bar_event.quote)
                 self.assertIsNone(bar_event.sample)

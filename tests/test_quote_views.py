@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -59,6 +60,44 @@ class QuoteViewServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.cache = LatestQuoteCache(loader)
         self.service = QuoteViewService(self.cache, stale_after=lambda _: 10)
+
+    async def test_newly_received_old_quote_keeps_its_price_but_is_not_live(self) -> None:
+        value = quote("jin10_web", "4252.34")
+        value = replace(
+            value,
+            source=replace(value.source, observed_at=value.source.observed_at - timedelta(days=2)),
+        )
+        self.service.accept(value)
+        with self.assertRaises(ProviderUnavailableError):
+            await self.service.get(SPOT_GOLD, JIN10_CLIENT_SOURCE)
+        last = await self.service.get_last(SPOT_GOLD, JIN10_CLIENT_SOURCE)
+        self.assertIn("last", last.stale_fields)
+        self.assertEqual(last.quote.last, value.last)
+        self.assertEqual(last.quote.change, value.change)
+        self.assertEqual(last.quote.source.observed_at, value.source.observed_at)
+
+    async def test_late_source_timestamp_cannot_replace_latest_price(self) -> None:
+        latest = quote("jin10_web", "4252.34")
+        old = replace(
+            latest,
+            last=Decimal("4200"),
+            source=replace(
+                latest.source,
+                observed_at=latest.source.observed_at - timedelta(seconds=1),
+                received_at=latest.source.received_at + timedelta(seconds=1),
+            ),
+        )
+        self.assertTrue(self.cache.put(latest))
+        self.assertFalse(self.cache.put(old))
+        self.assertEqual(self.cache.peek(SPOT_GOLD, "jin10_web"), latest)
+
+    def test_source_minute_precision_does_not_extend_to_another_day(self) -> None:
+        now = datetime.now(UTC)
+        value = SourceMetadata(
+            "test", "TEST", now - timedelta(seconds=50), now, {"timestamp_precision_seconds": 60}
+        )
+        self.assertTrue(value.is_fresh(now, 10))
+        self.assertFalse(value.is_fresh(now + timedelta(seconds=80), 10))
 
     async def test_client_view_exposes_one_aggregated_realtime_result(self) -> None:
         web = quote("jin10_web", "4252.34")

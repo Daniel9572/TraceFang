@@ -1,7 +1,10 @@
+import { compareSourceRevision } from "./quantFormat.ts";
+import { decodeReplayFrameBounds, decodeReplayFrameCursor } from "./replayContract.ts";
 import type {
   Candle,
   CandleBackfillResult,
   ChartBarPage,
+  ChartHistoryResponse,
   InstrumentEntry,
   InstrumentSourceSelection,
   QuoteView,
@@ -10,9 +13,11 @@ import type {
   SourceConnectionTest,
   SourceDescriptor,
   SourceId,
+  SourcePeriodPriceReference,
 } from "./types";
 import type {
   ExpertAiAnalysis,
+  ExpertAiModel,
   ExpertAiStatus,
   ExpertGoldEventCatalogSnapshot,
   ExpertMultiTimeframeContext,
@@ -23,7 +28,7 @@ import type {
 import type { BarPeriodId } from "./chartPeriods";
 import { BoundedBarPageCache } from "./barPageCache.ts";
 import { sameCandleVersion } from "./chartModel.ts";
-import { historyWindowBefore, type HistoryWindow } from "./historyLoading.ts";
+import type { HistoryWindow } from "./historyLoading.ts";
 import { replayStreamQuery, type ReplayStreamOptions } from "./expertReplay.ts";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -49,7 +54,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const HISTORY_PAGE_SIZE = 1_000;
-const BACKFILL_TRANSPORT_PAGE_MINUTES = 10_000;
+export const BACKFILL_TRANSPORT_PAGE_MINUTES = 10_000;
 
 interface CandleRequestOptions {
   time?: number;
@@ -60,6 +65,80 @@ interface CandleRequestOptions {
 interface CandleHistoryBackfill {
   result: CandleBackfillResult;
   candles: Candle[];
+  page: ChartBarPage | null;
+}
+
+function isoBoundary(
+  values: readonly (string | null)[],
+  selector: (left: number, right: number) => number,
+): string | null {
+  const timestamps = values
+    .filter((value): value is string => value !== null)
+    .map((value) => Date.parse(value))
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) return null;
+  return new Date(timestamps.reduce((left, right) => selector(left, right))).toISOString();
+}
+
+const BACKFILL_STATE_PRIORITY: Record<CandleBackfillResult["state"], number> = {
+  cached: 0,
+  joined: 1,
+  advanced: 2,
+  fetched: 3,
+  exhausted: 4,
+  deferred: 5,
+};
+
+export function aggregateBackfillResults(
+  sourceId: SourceId,
+  window: HistoryWindow,
+  results: readonly CandleBackfillResult[],
+): CandleBackfillResult {
+  if (results.length === 0) {
+    throw new Error("history transport returned no result");
+  }
+  const state = results.reduce((strictest, item) => (
+    BACKFILL_STATE_PRIORITY[item.state] > BACKFILL_STATE_PRIORITY[strictest]
+      ? item.state
+      : strictest
+  ), results[0].state);
+  const evidenceVersions = [...new Set(
+    results
+      .map((item) => item.evidence_version)
+      .filter((value): value is string => Boolean(value)),
+  )].sort();
+  return {
+    source_id: sourceId,
+    state,
+    start: new Date(window.start * 1_000).toISOString(),
+    end: new Date(window.end * 1_000).toISOString(),
+    row_count: results.reduce((total, item) => total + item.row_count, 0),
+    covered_start: isoBoundary(results.map((item) => item.covered_start), Math.min),
+    covered_end: isoBoundary(results.map((item) => item.covered_end), Math.max),
+    authoritative_through: isoBoundary(
+      results.map((item) => item.authoritative_through),
+      Math.max,
+    ),
+    history_floor: isoBoundary(results.map((item) => item.history_floor), Math.min),
+    retry_after: isoBoundary(results.map((item) => item.retry_after), Math.max),
+    evidence_version: evidenceVersions.length > 0 ? evidenceVersions.join("|") : null,
+  };
+}
+
+export function backfillTransportWindows(window: HistoryWindow): HistoryWindow[] {
+  const windows: HistoryWindow[] = [];
+  for (
+    let time = window.start;
+    time < window.end;
+    time += BACKFILL_TRANSPORT_PAGE_MINUTES * 60
+  ) {
+    const count = Math.min(
+      BACKFILL_TRANSPORT_PAGE_MINUTES,
+      Math.ceil((window.end - time) / 60),
+    );
+    windows.push({ start: time, end: Math.min(window.end, time + count * 60), count });
+  }
+  return windows;
 }
 
 const barPageCache = new BoundedBarPageCache();
@@ -72,6 +151,7 @@ function candleTimeKey(candle: Candle): string {
 }
 
 interface BarPageRequest {
+  cursor?: string;
   before?: number;
   pageSize?: number;
   signal?: AbortSignal;
@@ -89,13 +169,13 @@ export function mergeCandleRows(...pages: Candle[][]): Candle[] {
         continue;
       }
       const stateRank = { provisional_quote: 0, provisional_authoritative: 1, final: 2 };
-      const incomingWins = candle.revision > current.revision
+      const incomingWins = compareSourceRevision(candle.revision, current.revision) > 0
         || (
-          candle.revision === current.revision
+          compareSourceRevision(candle.revision, current.revision) === 0
           && stateRank[candle.state] > stateRank[current.state]
         )
         || (
-          candle.revision === current.revision
+          compareSourceRevision(candle.revision, current.revision) === 0
           && candle.state === current.state
           && Date.parse(candle.source.received_at) > Date.parse(current.source.received_at)
         );
@@ -154,17 +234,12 @@ async function backfillCandleWindow(
 ): Promise<CandleHistoryBackfill> {
   const revalidate = options.revalidate === true;
   const results: CandleBackfillResult[] = [];
-  for (
-    let time = window.start;
-    time < window.end;
-    time += BACKFILL_TRANSPORT_PAGE_MINUTES * 60
-  ) {
+  for (const transportWindow of backfillTransportWindows(window)) {
     options.signal?.throwIfAborted();
-    const count = Math.min(
-      BACKFILL_TRANSPORT_PAGE_MINUTES,
-      Math.ceil((window.end - time) / 60),
-    );
-    const params = new URLSearchParams({ time: String(time), count: String(count) });
+    const params = new URLSearchParams({
+      time: String(transportWindow.start),
+      count: String(transportWindow.count),
+    });
     if (revalidate) params.set("revalidate", "true");
     const result = await request<CandleBackfillResult>(
       `/api/candles/${encodeURIComponent(code)}/backfill?${params.toString()}`,
@@ -175,29 +250,39 @@ async function backfillCandleWindow(
     }
     results.push(result);
   }
-  const result: CandleBackfillResult = {
-    source_id: sourceId,
-    state: results.some((item) => item.state === "fetched") ? "fetched" : "cached",
-    start: new Date(window.start * 1_000).toISOString(),
-    end: new Date(window.end * 1_000).toISOString(),
-    row_count: results.reduce((total, item) => total + item.row_count, 0),
-  };
-  return { result, candles: [] };
+  const result = aggregateBackfillResults(sourceId, window, results);
+  return { result, candles: [], page: null };
 }
 
-function loadOlderCandleHistory(
+async function loadOlderCandleHistory(
   code: string,
   sourceId: SourceId,
-  beforeEpochSeconds: number,
-  countMinutes: number,
+  periodId: BarPeriodId,
+  cursor: string,
+  countBack: number,
   signal?: AbortSignal,
-): Promise<CandleHistoryBackfill> {
-  return backfillCandleWindow(
-    code,
-    sourceId,
-    historyWindowBefore(beforeEpochSeconds, countMinutes),
-    { signal },
+): Promise<ChartHistoryResponse> {
+  const params = new URLSearchParams({
+    period: periodId,
+    cursor,
+    count_back: String(countBack),
+  });
+  const response = await request<ChartHistoryResponse>(
+    `/api/bars/${encodeURIComponent(code)}/history?${params}`,
+    { method: "POST", signal },
   );
+  if (
+    response.source_id !== sourceId
+    || response.period_id !== periodId
+    || response.page.period_id !== periodId
+    || response.page.items.some((item) => item.source.provider !== sourceId)
+  ) {
+    throw new Error("合约实时数据源已变化，请重新读取周期 Bar");
+  }
+  if (response.next_cursor !== response.page.next_cursor) {
+    throw new Error("历史响应包含不一致的服务端游标");
+  }
+  return response;
 }
 
 function revalidateCandleHistory(
@@ -210,12 +295,20 @@ function revalidateCandleHistory(
 }
 
 export interface ExpertAiAnalysisRequest {
+  source_id?: string; decision_as_of?: string; application_cursor?: string;
+  parameters?: import("./quantTypes").QuantParameters; expected_input_hash?:string;
   code: string;
   period: string;
   enabled_strategies: string[];
+  custom_prompt: string;
+  model: string;
+  reasoning_effort: string;
 }
 
 export const marketApi = {
+  sourcePeriodPrices: (code: string, signal: AbortSignal) => request<SourcePeriodPriceReference>(`/api/source-period-prices/${encodeURIComponent(code)}`, {
+    method: "POST", body: JSON.stringify({source_id:"tonghuashun_futures",period:"min_5",limit:100}), signal,
+  }),
   instruments: () => request<InstrumentEntry[]>("/api/instruments"),
   watchlist: () => request<InstrumentEntry[]>("/api/watchlist"),
   addToWatchlist: (code: string) =>
@@ -247,14 +340,22 @@ export const marketApi = {
     periodId: string,
     options: BarPageRequest = {},
   ) => {
-    const { before, signal } = options;
+    const { before, cursor, signal } = options;
+    if (before !== undefined && cursor !== undefined) {
+      return Promise.reject(new Error("周期 Bar 请求不能同时提供 cursor 和 before"));
+    }
     const pageSize = options.pageSize ?? 500;
     signal?.throwIfAborted();
-    const cacheKey = before === undefined ? null : {
+    const boundary = cursor !== undefined
+      ? `cursor:${cursor}`
+      : before !== undefined
+        ? `before:${before}`
+        : null;
+    const cacheKey = boundary === null ? null : {
       code,
       sourceId,
       periodId,
-      before,
+      boundary,
       pageSize,
     };
     const cached = cacheKey && options.cache !== "reload"
@@ -262,6 +363,7 @@ export const marketApi = {
       : undefined;
     if (cached) return Promise.resolve(cached);
     const params = new URLSearchParams({ period: periodId, page_size: String(pageSize) });
+    if (cursor !== undefined) params.set("cursor", cursor);
     if (before !== undefined) params.set("before", String(before));
     return request<ChartBarPage>(
       `/api/bars/${encodeURIComponent(code)}?${params}`,
@@ -274,6 +376,10 @@ export const marketApi = {
       return page;
     });
   },
+  barRange:(code:string,sourceId:SourceId,periodId:string,start:string,end:string,signal?:AbortSignal)=>{
+    const params=new URLSearchParams({source_id:sourceId,period:periodId,start,end,max_rows:'10000'});
+    return request<{items:Candle[];complete:boolean;snapshot_version:{commit_id:string;store_epoch:string}}>(`/api/bars/${encodeURIComponent(code)}/range?${params}`,{signal}).then(result=>{if(!result.complete||result.items.some(row=>row.source.provider!==sourceId))throw new Error('修订范围未完整读取或行情来源已变化');return result;});
+  },
   olderCandleHistory: loadOlderCandleHistory,
   revalidateCandleHistory,
   openQuoteStream: (code: string, period: BarPeriodId = "1m") => {
@@ -282,11 +388,11 @@ export const marketApi = {
     const url = `${protocol}//${window.location.host}/api/stream/quotes/${encodeURIComponent(code)}?${params}`;
     return new WebSocket(url);
   },
-  replayFrameBounds: () => request<ReplayFrameBounds>("/api/replay/frames"),
-  replayFrameCursor: (sequence: number, signal?: AbortSignal) => request<ReplayFrameCursor>(
+  replayFrameBounds: (signal?:AbortSignal) => request<unknown>("/api/replay/frames", {signal}).then(decodeReplayFrameBounds),
+  replayFrameCursor: (sequence: string | number, signal?: AbortSignal) => request<unknown>(
     `/api/replay/cursor?sequence=${encodeURIComponent(String(sequence))}`,
     { signal },
-  ),
+  ).then(decodeReplayFrameCursor),
   openReplayStream: (
     code: string,
     options: ReplayStreamOptions,
@@ -302,6 +408,7 @@ export const marketApi = {
       { method: "POST" },
     ),
   expertAiStatus: () => request<ExpertAiStatus>("/api/expert/ai/status"),
+  expertAiModels: () => request<{ models: ExpertAiModel[] }>("/api/expert/ai/models"),
   expertAiAnalyze: (payload: ExpertAiAnalysisRequest) =>
     request<ExpertAiAnalysis>("/api/expert/ai/analyze", {
       method: "POST",

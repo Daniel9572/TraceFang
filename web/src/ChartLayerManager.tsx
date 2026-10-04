@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState, type DragEvent, type KeyboardEvent } from "react";
+import { volumeProfileSettings, type VolumeProfileSettings } from "./volumeProfile";
 
 import {
   chartLayerCapabilities,
@@ -33,6 +34,7 @@ interface ChartLayerManagerProps {
   onDeleteDrawingLayer: (layerId: string) => void;
   onMoveLayer: (layerId: string, targetLayerId: string) => void;
   onResizeIndicatorLayer: (layerId: string, height: number) => void;
+  onVolumeProfileChange: (settings: Partial<VolumeProfileSettings>) => void;
 }
 
 const GROUPS: Array<{ kind: ChartLayerKind; label: string }> = [
@@ -49,7 +51,8 @@ function layerDetail(
 ): string {
   if (layer.kind === "price") return "固定 · 不可隐藏";
   if (layer.kind === "drawing") return `${layer.drawings.length} 条画线`;
-  if (layer.kind === "indicator") return `${layer.height}px · 共享时间轴`;
+  if (layer.kind === "indicator") return `主图悬浮 · 独立刻度 · ${layer.height}px`;
+  if (layer.annotationId === "volume-profile") return "右侧叠加 · 可见区间 · K 线总量估算";
   if (layer.annotationId === "sessions") return "由资金主导策略输出，可单独隐藏";
   if (layer.annotationId === "gaps") return "由跳空视觉策略输出，仅标记复市首点";
   if (layer.annotationId === "events") return "由数据/事件策略输出：FOMC / 非农 / CPI / 央行购金";
@@ -74,6 +77,7 @@ export function ChartLayerManager({
   onDeleteDrawingLayer,
   onMoveLayer,
   onResizeIndicatorLayer,
+  onVolumeProfileChange,
 }: ChartLayerManagerProps) {
   const [draggedLayerId, setDraggedLayerId] = useState<string | null>(null);
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
@@ -227,10 +231,10 @@ export function ChartLayerManager({
                       </div>
                       {layer.kind === "indicator" ? (
                         <div className="expert-layer-height">
-                          <span>窗格高度</span>
+                          <span>图层高度</span>
                           <button
                             type="button"
-                            aria-label={`缩小 ${layer.name} 窗格`}
+                            aria-label={`缩小 ${layer.name} 图层`}
                             onClick={() => onResizeIndicatorLayer(layer.id, layer.height - 12)}
                           >−</button>
                           <input
@@ -238,15 +242,29 @@ export function ChartLayerManager({
                             min="92"
                             max="280"
                             value={layer.height}
-                            aria-label={`${layer.name}窗格高度`}
+                            aria-label={`${layer.name}图层高度`}
                             onChange={(event) => onResizeIndicatorLayer(layer.id, Number(event.target.value))}
                           />
                           <button
                             type="button"
-                            aria-label={`放大 ${layer.name} 窗格`}
+                            aria-label={`放大 ${layer.name} 图层`}
                             onClick={() => onResizeIndicatorLayer(layer.id, layer.height + 12)}
                           >+</button>
                           <em>{layer.height}</em>
+                        </div>
+                      ) : null}
+                      {layer.kind === "annotation" && layer.annotationId === "volume-profile" ? (
+                        <div className="expert-layer-profile-settings">
+                          <label>分布宽度<input type="range" min="60" max="240"
+                            value={volumeProfileSettings(layer.volumeProfile).width}
+                            aria-label="成交量分布宽度"
+                            onChange={(event) => onVolumeProfileChange({ width: Number(event.target.value) })} />
+                            <em>{volumeProfileSettings(layer.volumeProfile).width}px</em></label>
+                          <label>不透明度<input type="range" min="10" max="65"
+                            value={Math.round(volumeProfileSettings(layer.volumeProfile).opacity * 100)}
+                            aria-label="成交量分布不透明度"
+                            onChange={(event) => onVolumeProfileChange({ opacity: Number(event.target.value) / 100 })} />
+                            <em>{Math.round(volumeProfileSettings(layer.volumeProfile).opacity * 100)}%</em></label>
                         </div>
                       ) : null}
                     </article>
@@ -259,7 +277,7 @@ export function ChartLayerManager({
       </div>
       <footer>
         <span><i />活动画线层</span>
-        <span>拖动排序 · 分隔线缩放指标</span>
+        <span>拖动排序 · 调整悬浮图层高度</span>
       </footer>
     </section>
   );

@@ -1,0 +1,427 @@
+
+CREATE TABLE IF NOT EXISTS instruments (
+    symbol TEXT PRIMARY KEY,
+    asset_class TEXT NOT NULL,
+    base_asset TEXT,
+    quote_asset TEXT,
+    venue TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS watchlists (
+    profile_id TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS watchlist_items (
+    profile_id TEXT NOT NULL REFERENCES watchlists(profile_id) ON DELETE CASCADE,
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (profile_id, instrument_symbol)
+);
+
+CREATE INDEX IF NOT EXISTS ix_watchlist_items_order
+    ON watchlist_items (profile_id, position, added_at);
+
+CREATE TABLE IF NOT EXISTS market_sources (
+    source_id TEXT PRIMARY KEY,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS quote_events (
+    id BIGSERIAL PRIMARY KEY,
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    event_id TEXT,
+    provider_symbol TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    persisted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last NUMERIC(38, 18) NOT NULL,
+    open NUMERIC(38, 18),
+    high NUMERIC(38, 18),
+    low NUMERIC(38, 18),
+    volume NUMERIC(38, 18),
+    change NUMERIC(38, 18),
+    change_percent NUMERIC(38, 18),
+    raw_payload JSONB NOT NULL
+);
+
+ALTER TABLE quote_events DROP CONSTRAINT IF EXISTS uq_quote_event;
+ALTER TABLE quote_events ADD COLUMN IF NOT EXISTS event_id TEXT;
+
+DROP INDEX IF EXISTS uq_quote_event_received;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quote_event_identity
+    ON quote_events (source_id, event_id)
+    WHERE event_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_quote_events_instrument_observed
+    ON quote_events (instrument_symbol, observed_at DESC);
+CREATE INDEX IF NOT EXISTS ix_quote_events_source_observed
+    ON quote_events (source_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS ix_quote_events_timeline_cursor
+    ON quote_events (instrument_symbol, source_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS latest_quotes (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    last NUMERIC(38, 18) NOT NULL,
+    open NUMERIC(38, 18),
+    high NUMERIC(38, 18),
+    low NUMERIC(38, 18),
+    volume NUMERIC(38, 18),
+    change NUMERIC(38, 18),
+    change_percent NUMERIC(38, 18),
+    raw_payload JSONB NOT NULL,
+    PRIMARY KEY (instrument_symbol, source_id)
+);
+
+CREATE TABLE IF NOT EXISTS instrument_source_routes (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+    capability TEXT NOT NULL CHECK (capability = 'realtime'),
+    source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_symbol, capability)
+);
+
+CREATE INDEX IF NOT EXISTS ix_instrument_source_routes_source
+    ON instrument_source_routes (source_id, capability);
+
+-- Releases before the realtime-source boundary stored one route per capability.
+-- Preserve the former quote binding as the contract's complete realtime-source binding.
+ALTER TABLE instrument_source_routes
+    DROP CONSTRAINT IF EXISTS instrument_source_routes_capability_check;
+
+UPDATE instrument_source_routes
+SET capability = 'realtime'
+WHERE capability = 'quote';
+
+DELETE FROM instrument_source_routes
+WHERE capability <> 'realtime';
+
+ALTER TABLE instrument_source_routes
+    ADD CONSTRAINT instrument_source_routes_capability_check
+    CHECK (capability = 'realtime');
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_instrument_source_routes_instrument
+    ON instrument_source_routes (instrument_symbol);
+
+CREATE TABLE IF NOT EXISTS candles (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    persisted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    open NUMERIC(38, 18) NOT NULL,
+    high NUMERIC(38, 18) NOT NULL,
+    low NUMERIC(38, 18) NOT NULL,
+    close NUMERIC(38, 18) NOT NULL,
+    volume NUMERIC(38, 18),
+    raw_payload JSONB NOT NULL,
+    PRIMARY KEY (source_id, provider_symbol, interval_seconds, open_time)
+);
+
+CREATE INDEX IF NOT EXISTS ix_candles_instrument_interval_time
+    ON candles (instrument_symbol, interval_seconds, open_time DESC);
+
+CREATE SEQUENCE IF NOT EXISTS realtime_bar_mutation_id_seq;
+
+CREATE TABLE IF NOT EXISTS realtime_bars (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    evidence_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    persisted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    open NUMERIC(38, 18) NOT NULL,
+    high NUMERIC(38, 18) NOT NULL,
+    low NUMERIC(38, 18) NOT NULL,
+    close NUMERIC(38, 18) NOT NULL,
+    volume NUMERIC(38, 18),
+    state TEXT NOT NULL CHECK (
+        state IN ('provisional_quote', 'provisional_authoritative', 'final')
+    ),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    finalized_at TIMESTAMPTZ,
+    mutation_id BIGINT NOT NULL DEFAULT nextval('realtime_bar_mutation_id_seq'),
+    raw_payload JSONB NOT NULL,
+    CHECK (
+        (state = 'final' AND finalized_at IS NOT NULL)
+        OR (state <> 'final' AND finalized_at IS NULL)
+    ),
+    PRIMARY KEY (realtime_source_id, instrument_symbol, interval_seconds, open_time)
+);
+
+ALTER TABLE realtime_bars
+    ADD COLUMN IF NOT EXISTS mutation_id BIGINT;
+
+UPDATE realtime_bars
+SET mutation_id = nextval('realtime_bar_mutation_id_seq')
+WHERE mutation_id IS NULL;
+
+ALTER TABLE realtime_bars
+    ALTER COLUMN mutation_id SET DEFAULT nextval('realtime_bar_mutation_id_seq'),
+    ALTER COLUMN mutation_id SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_realtime_bars_source_instrument_time
+    ON realtime_bars (realtime_source_id, instrument_symbol, interval_seconds, open_time DESC);
+
+CREATE INDEX IF NOT EXISTS ix_realtime_bars_source_mutation
+    ON realtime_bars (realtime_source_id, instrument_symbol, mutation_id);
+
+CREATE TABLE IF NOT EXISTS derived_period_bars (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    period_id TEXT NOT NULL,
+    materialization_version TEXT NOT NULL,
+    evidence_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    first_component_open_time TIMESTAMPTZ NOT NULL,
+    bucket_end TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    materialized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    open NUMERIC(38, 18) NOT NULL,
+    high NUMERIC(38, 18) NOT NULL,
+    low NUMERIC(38, 18) NOT NULL,
+    close NUMERIC(38, 18) NOT NULL,
+    volume NUMERIC(38, 18),
+    state TEXT NOT NULL CHECK (
+        state IN ('provisional_quote', 'provisional_authoritative', 'final')
+    ),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    finalized_at TIMESTAMPTZ,
+    raw_payload JSONB NOT NULL,
+    CHECK (bucket_end > first_component_open_time),
+    CHECK (
+        (state = 'final' AND finalized_at IS NOT NULL)
+        OR (state <> 'final' AND finalized_at IS NULL)
+    ),
+    PRIMARY KEY (
+        realtime_source_id,
+        instrument_symbol,
+        period_id,
+        materialization_version,
+        open_time
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_derived_period_bars_page
+    ON derived_period_bars (
+        realtime_source_id,
+        instrument_symbol,
+        period_id,
+        materialization_version,
+        open_time DESC
+    );
+
+CREATE TABLE IF NOT EXISTS period_bar_materializations (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    period_id TEXT NOT NULL,
+    materialization_version TEXT NOT NULL,
+    source_cursor TIMESTAMPTZ,
+    oldest_bucket_open_time TIMESTAMPTZ,
+    history_exhausted BOOLEAN NOT NULL DEFAULT FALSE,
+    processed_mutation_id BIGINT NOT NULL DEFAULT 0 CHECK (processed_mutation_id >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (
+        realtime_source_id,
+        instrument_symbol,
+        period_id,
+        materialization_version
+    )
+);
+
+CREATE TABLE IF NOT EXISTS realtime_candle_cache_ranges (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    upstream_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    range_start TIMESTAMPTZ NOT NULL,
+    range_end TIMESTAMPTZ NOT NULL,
+    row_count INTEGER NOT NULL CHECK (row_count >= 0),
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (range_end > range_start),
+    PRIMARY KEY (
+        instrument_symbol,
+        realtime_source_id,
+        interval_seconds,
+        range_start,
+        range_end
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_realtime_candle_cache_coverage
+    ON realtime_candle_cache_ranges (
+        instrument_symbol,
+        realtime_source_id,
+        interval_seconds,
+        range_start,
+        range_end
+    );
+
+CREATE TABLE IF NOT EXISTS realtime_bar_series_state (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+    realtime_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    upstream_channel_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    provider_symbol TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    latest_authoritative_open_time TIMESTAMPTZ,
+    authoritative_through TIMESTAMPTZ NOT NULL,
+    history_floor TIMESTAMPTZ,
+    tail_checked_through TIMESTAMPTZ,
+    tail_checked_at TIMESTAMPTZ,
+    evidence_version TEXT NOT NULL CHECK (length(evidence_version) > 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (
+        latest_authoritative_open_time IS NULL
+        OR latest_authoritative_open_time < authoritative_through
+    ),
+    CHECK (history_floor IS NULL OR history_floor <= authoritative_through),
+    CHECK (
+        mod(EXTRACT(EPOCH FROM authoritative_through)::numeric, interval_seconds) = 0
+    ),
+    CHECK (
+        latest_authoritative_open_time IS NULL
+        OR mod(
+            EXTRACT(EPOCH FROM latest_authoritative_open_time)::numeric,
+            interval_seconds
+        ) = 0
+    ),
+    CHECK (
+        history_floor IS NULL
+        OR mod(EXTRACT(EPOCH FROM history_floor)::numeric, interval_seconds) = 0
+    ),
+    CHECK (
+        tail_checked_through IS NULL
+        OR mod(EXTRACT(EPOCH FROM tail_checked_through)::numeric, interval_seconds) = 0
+    ),
+    PRIMARY KEY (realtime_source_id, instrument_symbol, interval_seconds)
+);
+
+CREATE INDEX IF NOT EXISTS ix_realtime_bar_series_authority
+    ON realtime_bar_series_state (
+        realtime_source_id,
+        instrument_symbol,
+        interval_seconds,
+        authoritative_through
+    );
+
+CREATE TABLE IF NOT EXISTS candle_validation_results (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    validation_state TEXT NOT NULL CHECK (validation_state IN ('accepted', 'rejected')),
+    source_count INTEGER NOT NULL CHECK (source_count > 0),
+    max_close_deviation_ratio NUMERIC(38, 18) NOT NULL,
+    evidence JSONB NOT NULL,
+    evaluated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_symbol, interval_seconds, open_time)
+);
+
+CREATE TABLE IF NOT EXISTS standard_candles (
+    instrument_symbol TEXT NOT NULL REFERENCES instruments(symbol),
+    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+    open_time TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL,
+    validated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    open NUMERIC(38, 18) NOT NULL,
+    high NUMERIC(38, 18) NOT NULL,
+    low NUMERIC(38, 18) NOT NULL,
+    close NUMERIC(38, 18) NOT NULL,
+    volume NUMERIC(38, 18),
+    primary_source_id TEXT NOT NULL REFERENCES market_sources(source_id),
+    source_count INTEGER NOT NULL CHECK (source_count > 0),
+    validation_method TEXT NOT NULL,
+    max_close_deviation_ratio NUMERIC(38, 18) NOT NULL,
+    evidence JSONB NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    CHECK (low <= open AND open <= high),
+    CHECK (low <= close AND close <= high),
+    PRIMARY KEY (instrument_symbol, interval_seconds, open_time)
+);
+
+CREATE INDEX IF NOT EXISTS ix_standard_candles_instrument_time
+    ON standard_candles (instrument_symbol, interval_seconds, open_time DESC);
+
+CREATE OR REPLACE VIEW normalized_quote_events AS
+SELECT id, instrument_symbol, source_id, event_id, provider_symbol,
+    CASE WHEN raw_payload ->> 'bar_clock' = 'provider_frame.received_at'
+              AND raw_payload ->> 'wire_observed_at' IS NOT NULL
+         THEN (raw_payload ->> 'wire_observed_at')::timestamptz
+         ELSE observed_at END AS observed_at,
+    received_at, persisted_at, last, open, high, low, volume, change, change_percent,
+    raw_payload
+FROM quote_events;
+
+CREATE TABLE IF NOT EXISTS market_data_migrations (
+    migration_id TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM market_data_migrations WHERE migration_id = 'source-time-v1'
+    ) THEN
+        -- This is a recoverable quarantine, not destruction of recorded prices.
+        CREATE TABLE IF NOT EXISTS invalid_quote_time_bars
+            (LIKE realtime_bars INCLUDING ALL);
+        WITH moved AS (
+            DELETE FROM realtime_bars
+            WHERE realtime_source_id = 'tonghuashun_futures'
+              AND raw_payload ->> 'derivation' = 'quote_event'
+              AND raw_payload ->> 'quote_time_basis' IS DISTINCT FROM 'source'
+            RETURNING *
+        )
+        INSERT INTO invalid_quote_time_bars SELECT * FROM moved;
+
+        -- Period pages are disposable projections of the corrected minute facts.
+        DELETE FROM derived_period_bars
+        WHERE realtime_source_id = 'tonghuashun_futures';
+        DELETE FROM period_bar_materializations
+        WHERE realtime_source_id = 'tonghuashun_futures';
+
+        UPDATE latest_quotes
+        SET observed_at = (raw_payload ->> 'wire_observed_at')::timestamptz,
+            raw_payload = raw_payload || jsonb_build_object(
+                'bar_clock', 'source.observed_at', 'timestamp_precision_seconds', 60)
+        WHERE raw_payload ->> 'bar_clock' = 'provider_frame.received_at'
+          AND raw_payload ->> 'wire_observed_at' IS NOT NULL;
+
+        -- The old annual-file adapter wrongly confirmed the not-yet-published tail.
+        UPDATE realtime_bar_series_state
+        SET authoritative_through = LEAST(
+                authoritative_through, latest_authoritative_open_time + interval '1 minute'),
+            tail_checked_at = NULL, tail_checked_through = NULL
+        WHERE realtime_source_id = 'tonghuashun_futures'
+          AND latest_authoritative_open_time IS NOT NULL;
+        DELETE FROM realtime_candle_cache_ranges AS ranges
+        USING realtime_bar_series_state AS series
+        WHERE ranges.realtime_source_id = 'tonghuashun_futures'
+          AND ranges.realtime_source_id = series.realtime_source_id
+          AND ranges.instrument_symbol = series.instrument_symbol
+          AND ranges.interval_seconds = series.interval_seconds
+          AND ranges.range_end > series.authoritative_through;
+
+        INSERT INTO market_data_migrations (migration_id) VALUES ('source-time-v1');
+    END IF;
+END $$;

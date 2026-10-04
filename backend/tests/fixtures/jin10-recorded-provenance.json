@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-10-03T15:45:34.852349+00:00",
+  "scope": "New read-only retained-raw fixture export; old four-frame bundle bytes unavailable in session history",
+  "fixture_sha256": "9d54e9056136edc8f69c6bbdd47e11b37a800d84842cb1cf0c9585a737e2f806",
+  "frames": [
+    {
+      "stream_sequence": 3176663,
+      "channel": "jin10_local",
+      "protocol": 10005,
+      "body_sha256": "a16f6c151be0c8c20d152f38c61e789d24bfb94e9445540570e96173e8b5e087",
+      "received_at": "2026-10-03T15:45:20.726537Z"
+    },
+    {
+      "stream_sequence": 3176662,
+      "channel": "jin10_local",
+      "protocol": 10007,
+      "body_sha256": "fc70a8712ffd88a38121b60814a47075193e7b0b9642a81905b500c67bafbc07",
+      "received_at": "2026-10-03T15:45:20.721211Z"
+    },
+    {
+      "stream_sequence": 3176658,
+      "channel": "jin10_web",
+      "protocol": 10005,
+      "body_sha256": "f1b4c944b8cdb5ddcc1e15e1a6e6bce489b87368e045b85730c78b7482856eb3",
+      "received_at": "2026-10-03T15:45:20.678284Z"
+    },
+    {
+      "stream_sequence": 2723973,
+      "channel": "jin10_local",
+      "protocol": 10004,
+      "body_sha256": "9152004533059c3b8d6a8e60b69887571dbfb0f58651dd035cfc77b34d0bced9",
+      "received_at": "2026-09-30T06:05:58.859157Z"
+    }
+  ],
+  "wire_candles": 61
+}

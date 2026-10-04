@@ -47,11 +47,11 @@ class GoldOptionExpiryAnalysis:
     expiry: date
     underlying_price: Decimal | None
     option_count: int
-    call_open_interest: int
-    put_open_interest: int
+    call_open_interest: int | None
+    put_open_interest: int | None
     put_call_open_interest_ratio: Decimal | None
-    call_volume: int
-    put_volume: int
+    call_volume: int | None
+    put_volume: int | None
     put_call_volume_ratio: Decimal | None
     atm_strike: Decimal | None
     call_wall_strike: Decimal | None
@@ -125,20 +125,24 @@ _LIMITATIONS = (
 )
 
 
-def _ratio(numerator: int, denominator: int) -> Decimal | None:
-    if denominator <= 0:
+def _ratio(numerator: int | None, denominator: int | None) -> Decimal | None:
+    if numerator is None or denominator is None or denominator <= 0:
         return None
     return (Decimal(numerator) / Decimal(denominator)).quantize(Decimal("0.0001"))
 
 
 def _wall(quotes: Sequence[OptionContractQuote], option_type: OptionType) -> Decimal | None:
     candidates = [item for item in quotes if item.option_type is option_type]
+    if any(item.open_interest is None for item in candidates):
+        return None
     if not candidates or max(item.open_interest for item in candidates) <= 0:
         return None
     return max(candidates, key=lambda item: (item.open_interest, -item.strike)).strike
 
 
 def _max_pain(quotes: Sequence[OptionContractQuote]) -> Decimal | None:
+    if any(item.open_interest is None for item in quotes):
+        return None
     strikes = sorted({item.strike for item in quotes})
     if not strikes:
         return None
@@ -177,10 +181,15 @@ def _expiry_analyses(chain: OptionChainSnapshot) -> tuple[GoldOptionExpiryAnalys
     for (underlying_id, expiry), quotes in grouped.items():
         calls = [item for item in quotes if item.option_type is OptionType.CALL]
         puts = [item for item in quotes if item.option_type is OptionType.PUT]
-        call_oi = sum(item.open_interest for item in calls)
-        put_oi = sum(item.open_interest for item in puts)
-        call_volume = sum(item.volume for item in calls)
-        put_volume = sum(item.volume for item in puts)
+        # Missing exchange quantities must not become zero or a partial-chain total.
+        def total(items: Sequence[OptionContractQuote], field: str) -> int | None:
+            values = [getattr(item, field) for item in items]
+            return sum(values) if values and all(value is not None for value in values) else None
+
+        call_oi = total(calls, "open_interest")
+        put_oi = total(puts, "open_interest")
+        call_volume = total(calls, "volume")
+        put_volume = total(puts, "volume")
         put_call_oi = _ratio(put_oi, call_oi)
         underlying = chain.underlyings.get(underlying_id)
         underlying_price = underlying.last if underlying is not None else None

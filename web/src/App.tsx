@@ -23,28 +23,35 @@ import {
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { marketApi, mergeCandleRows } from "./api";
-import { barsFromCandles, upsertRealtimeBarBatch } from "./chartModel";
+import { barsFromCandles, candleAtChartTime, candleIntervalEvidence, upsertRealtimeBarBatch } from "./chartModel";
 import {
   buildChartLayers,
+  configureVolumeProfile,
   chartLayerStorageKey,
   createDefaultChartLayerWorkspace,
   LEGACY_DRAWING_STORAGE_KEY,
   LEGACY_EXPERT_LAYER_STORAGE_KEY,
   readChartLayerWorkspace,
-  resizeIndicatorLayer,
+  positionIndicatorLayer,
   type ChartLayerWorkspace,
 } from "./chartLayers";
 import { barDataPeriodId, chartPeriodById, type ChartPeriodId } from "./chartPeriods";
-import { formatBeijingClock, formatChartTimeLabel } from "./chartTimeAxis";
-import {
-  buildExpertIndicatorSeriesAt,
-  EXPERT_INDICATOR_HISTORY_VERSION,
-} from "./expertAnalysis";
+import { formatBeijingClock, formatBeijingDateTime, formatChartTimeLabel } from "./chartTimeAxis";
+import {useQuantSnapshot} from "./useQuantSnapshot";
+import {loadedInvalidationRange} from "./chartInvalidation";
+import {candlePrefixRevisionKey,latestFinalCandleIndex} from "./expertTechnical";
+import {projectQuantSeries} from "./quantProjection";
+import {replayNanosecondsIso} from "./expertReplay";
 import { expertMarketEventsFromSnapshot } from "./expertEvents";
 import {
-  historyBatchMinutes,
-  historyCursorEpoch,
+  canBackfillOlderHistory,
+  HISTORY_LOADING_INDICATOR_DELAY_MS,
+  historyDemandBars,
+  historyPageCursor,
+  resolveChartHistoryStep,
+  type HistoryDemand,
   type HistoryLoadOutcome,
+  type HistoryPageCursor,
   type HistoryWindow,
 } from "./historyLoading";
 import { marketSessionAt, SPOT_METALS_MARKET_SCHEDULE } from "./marketSession";
@@ -52,12 +59,17 @@ import { ExpertModeWorkspace } from "./ExpertModeWorkspace";
 import { MarketChart } from "./MarketChart";
 import { PeriodToolbar } from "./PeriodToolbar";
 import {
+  quoteStreamCloseDecision,
+  sourceUnavailableMessage,
+} from "./quoteStreamConnection";
+import {
   RealtimeBarCommitBuffer,
   RealtimeBarStream,
   realtimeBarDatasetKey,
 } from "./realtimeBarStream";
 import { SourcePicker, type SourceTestFeedback } from "./SourcePicker";
 import { startWatchlistQuoteStream, watchlistQuoteStreamTargets } from "./watchlistStreams";
+import { TraceFangLogo } from "./TraceFangLogo";
 import type { ExpertMarketEvent } from "./expertTypes";
 import type {
   Candle,
@@ -74,12 +86,12 @@ const defaultInstruments: InstrumentEntry[] = [
   {
     provider: "canonical",
     provider_code: "XAUUSD",
-    name: "现货黄金",
+    name: "国际现货黄金（伦敦金现）",
     instrument: { symbol: "XAU/USD", asset_class: "spot", base: "XAU", quote: "USD", venue: "OTC" },
-    price_unit: "美元/盎司",
+    price_unit: "美元/金衡盎司",
     price_digits: 2,
     quote_kind: "direct",
-    history_available: true,
+    history_backfill_supported: true,
     source_ids: ["jin10_client"],
     dependencies: [],
     market_schedule: SPOT_METALS_MARKET_SCHEDULE,
@@ -92,7 +104,7 @@ const defaultInstruments: InstrumentEntry[] = [
     price_unit: "美元/盎司",
     price_digits: 3,
     quote_kind: "direct",
-    history_available: true,
+    history_backfill_supported: true,
     source_ids: ["jin10_client"],
     dependencies: [],
     market_schedule: SPOT_METALS_MARKET_SCHEDULE,
@@ -101,9 +113,10 @@ const defaultInstruments: InstrumentEntry[] = [
 
 const REALTIME_REACT_COMMIT_INTERVAL_MS = 1_000;
 const REALTIME_REACT_COMMIT_MAX_BARS = 8;
+const EMPTY_CANDLES: Candle[] = [];
 
 const sourceLabels: Record<SourceId, string> = {
-  jin10_client: "金十客户端行情",
+  jin10_client: "金十统一行情",
   tonghuashun_futures: "同花顺公开行情",
 };
 
@@ -138,7 +151,8 @@ function unitFor(code: string, instrument?: InstrumentEntry): string {
   if (instrument) return instrument.price_unit;
   if (code === "USDCNH") return "人民币/美元";
   if (code === "XAUCNHG") return "人民币/克";
-  return code === "XAUUSD" || code === "XAGUSD" ? "美元/盎司" : "";
+  if (code === "XAUUSD") return "美元/金衡盎司";
+  return code === "XAGUSD" ? "美元/盎司" : "";
 }
 
 function formatPrice(
@@ -170,10 +184,6 @@ function epochSeconds(value: string | null | undefined): number | null {
   if (!value) return null;
   const seconds = Math.floor(Date.parse(value) / 1_000);
   return Number.isFinite(seconds) ? seconds : null;
-}
-
-function historyPageCursor(page: { next_before: string | null; items: Candle[] }): number | null {
-  return historyCursorEpoch(page.next_before, page.items.at(0)?.open_time);
 }
 
 function historyOutcome(
@@ -295,7 +305,7 @@ function readSharedLayerWorkspace(code: string): ChartLayerWorkspace {
   }
 }
 
-export default function App() {
+export default function App({onOpenOptions}:{onOpenOptions?:()=>void} = {}) {
   const [catalog, setCatalog] = useState(defaultInstruments);
   const [instruments, setInstruments] = useState(defaultInstruments);
   const [selectedCode, setSelectedCode] = useState("XAUUSD");
@@ -309,7 +319,9 @@ export default function App() {
   const [quote, setQuote] = useState<QuoteView | null>(null);
   const [watchQuotes, setWatchQuotes] = useState<Record<string, QuoteView>>({});
   const [watchPriceSeries, setWatchPriceSeries] = useState<Record<string, number[]>>({});
-  const [candles, setCandles] = useState<Candle[]>([]);
+  const [candleRows, setCandles] = useState<Candle[]>([]);
+  const candleRowsRef=useRef(candleRows);candleRowsRef.current=candleRows;
+  const [candleDatasetKey, setCandleDatasetKey] = useState("");
   const [realtimeBarStream] = useState(() => new RealtimeBarStream());
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
@@ -321,12 +333,13 @@ export default function App() {
   const [watchlistBusyCode, setWatchlistBusyCode] = useState<string | null>(null);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [periodId, setPeriodId] = useState<ChartPeriodId>("1m");
-  const [expertMode, setExpertMode] = useState(false);
+  const [expertMode, setExpertMode] = useState(true);
   const [goldEvents, setGoldEvents] = useState<ExpertMarketEvent[] | null>(null);
   const [goldEventsError, setGoldEventsError] = useState<string | null>(null);
   const [hover, setHover] = useState<HoverCandle | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [candleError, setCandleError] = useState<string | null>(null);
+  const [calendarCoverageNotice,setCalendarCoverageNotice]=useState<string|null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [sourceBusy, setSourceBusy] = useState(false);
   const [testMessage, setTestMessage] = useState<string | null>(null);
@@ -338,25 +351,68 @@ export default function App() {
   const [loadingCandles, setLoadingCandles] = useState(true);
   const [historySyncing, setHistorySyncing] = useState(false);
   const [historyRepairingCount, setHistoryRepairingCount] = useState(0);
+  const [historyIndicatorVisible, setHistoryIndicatorVisible] = useState(false);
   const [quoteStreamState, setQuoteStreamState] = useState<"connecting" | "live" | "waiting" | "unavailable">("connecting");
   const candleRequestRef = useRef(0);
   const candleSnapshotAbortRef = useRef<AbortController | null>(null);
   const historyPageAbortRef = useRef<AbortController | null>(null);
   const historyGapAbortRef = useRef(new Map<string, AbortController>());
   const candlesRef = useRef<Candle[]>([]);
-  const historyCursorRef = useRef<number | null>(null);
+  const historyCursorRef = useRef<HistoryPageCursor | null>(null);
   const historyLoadInFlightRef = useRef(false);
-  const historyGapAttemptsRef = useRef(new Set<string>());
-  candlesRef.current = candles;
+  const historyGapAttemptsRef = useRef(new Map<
+    string,
+    { evidenceVersion: string | null; retryAt: number }
+  >());
+  const historyActivitiesRef = useRef(new Set<number>());
+  const nextHistoryActivityIdRef = useRef(0);
+  const historyIndicatorTimerRef = useRef<number | null>(null);
   const watchlistQuoteStreamsRef = useRef(
     new Map<string, { sourceId: SourceId; stop: () => void }>(),
   );
+  const watchQuoteSnapshotRetryRef = useRef(new Map<string, number>());
+
+  const beginHistoryActivity = useCallback((): number => {
+    const activityId = ++nextHistoryActivityIdRef.current;
+    historyActivitiesRef.current.add(activityId);
+    if (historyActivitiesRef.current.size !== 1) return activityId;
+    if (historyIndicatorTimerRef.current !== null) {
+      window.clearTimeout(historyIndicatorTimerRef.current);
+    }
+    historyIndicatorTimerRef.current = window.setTimeout(() => {
+      historyIndicatorTimerRef.current = null;
+      if (historyActivitiesRef.current.size > 0) setHistoryIndicatorVisible(true);
+    }, HISTORY_LOADING_INDICATOR_DELAY_MS);
+    return activityId;
+  }, []);
+
+  const endHistoryActivity = useCallback((activityId: number) => {
+    if (!historyActivitiesRef.current.delete(activityId)) return;
+    if (historyActivitiesRef.current.size > 0) return;
+    if (historyIndicatorTimerRef.current !== null) {
+      window.clearTimeout(historyIndicatorTimerRef.current);
+      historyIndicatorTimerRef.current = null;
+    }
+    setHistoryIndicatorVisible(false);
+  }, []);
+
+  const resetHistoryActivity = useCallback(() => {
+    historyActivitiesRef.current.clear();
+    if (historyIndicatorTimerRef.current !== null) {
+      window.clearTimeout(historyIndicatorTimerRef.current);
+      historyIndicatorTimerRef.current = null;
+    }
+    setHistoryIndicatorVisible(false);
+  }, []);
 
   useEffect(() => () => {
     candleSnapshotAbortRef.current?.abort();
     historyPageAbortRef.current?.abort();
     for (const controller of historyGapAbortRef.current.values()) controller.abort();
     historyGapAbortRef.current.clear();
+    if (historyIndicatorTimerRef.current !== null) {
+      window.clearTimeout(historyIndicatorTimerRef.current);
+    }
   }, []);
 
   useEffect(() => {
@@ -416,13 +472,19 @@ export default function App() {
   }, [persistedLayerWorkspace, selectedCode]);
   const selectedSource = instrumentSources[selectedCode] ?? "jin10_client";
   const selectedPeriod = chartPeriodById(periodId);
+  const sourcePeriodReference = selectedInstrument.source_period_reference?.source_id === selectedSource
+    ? {code:selectedCode,mapping:selectedInstrument.source_period_reference} : undefined;
   const selectedBarPeriodId = barDataPeriodId(selectedPeriod);
   const selectedBarStreamKey = realtimeBarDatasetKey(
     selectedCode,
     selectedSource,
     selectedBarPeriodId,
   );
-  const chartHistoryLoading = historySyncing || historyRepairingCount > 0;
+  const candles = candleDatasetKey === selectedBarStreamKey ? candleRows : EMPTY_CANDLES;
+  candlesRef.current = candles;
+  const chartHistoryLoading = historySyncing
+    || historyRepairingCount > 0
+    || (!sourcesLoaded && sourceBusy);
   const sourceById = useMemo(
     () => new Map(sources.map((source) => [source.source_id, source])),
     [sources],
@@ -432,6 +494,10 @@ export default function App() {
     [selectedInstrument, sources],
   );
   const selectedSourceDescriptor = sourceById.get(selectedSource);
+  const historyBackfillEnabled = canBackfillOlderHistory(
+    selectedInstrument.history_backfill_supported,
+    selectedSourceDescriptor?.history_backfill_configured,
+  );
   const selectedSourceReady = Boolean(
     sourcesLoaded
     && selectedSourceDescriptor
@@ -477,7 +543,10 @@ export default function App() {
     setLoadingCandles(true);
     setHistorySyncing(false);
     setHistoryRepairingCount(0);
+    resetHistoryActivity();
     setHistoryError(null);
+    setCalendarCoverageNotice(null);
+    setCandleDatasetKey(selectedBarStreamKey);
     setCandles([]);
     try {
       const recent = await marketApi.barPage(
@@ -487,6 +556,8 @@ export default function App() {
         { signal: controller.signal },
       );
       if (requestId !== candleRequestRef.current) return;
+      const calendar=recent.coverage?.calendar_projection;
+      if(calendar&&/^\d+$/.test(calendar.excluded_outside_schedule)&&BigInt(calendar.excluded_outside_schedule)>0n)setCalendarCoverageNotice(`派生周期覆盖不完整：${calendar.excluded_outside_schedule} 条源分钟不在声明的交易时段范围（${calendar.earliest_ns?replayNanosecondsIso(calendar.earliest_ns):'未知'} 至 ${calendar.latest_ns?replayNanosecondsIso(calendar.latest_ns):'未知'}）。原始与 1 分钟数据仍保留。`);
       // The period stream may win the race against the initial snapshot.
       // Merge once so an already-delivered current Bar is never rolled back.
       setCandles((current) => mergeCandleRows(recent.items, current));
@@ -494,6 +565,31 @@ export default function App() {
       const firstCursor = historyPageCursor(recent);
       if (firstCursor !== null) {
         historyCursorRef.current = firstCursor;
+      }
+      // An empty chart has no visible range, so it cannot trigger edge pagination.
+      // Bootstrap once from the server cursor instead of waiting for a pan forever.
+      if (firstCursor !== null && recent.items.length === 0 && historyBackfillEnabled) {
+        historyLoadInFlightRef.current = true;
+        setHistorySyncing(true);
+        const activityId = beginHistoryActivity();
+        try {
+          const filled = await marketApi.olderCandleHistory(
+            selectedCode, selectedSource, selectedBarPeriodId, firstCursor.token, 300, controller.signal,
+          );
+          if (requestId !== candleRequestRef.current) return;
+          setCandles((current) => mergeCandleRows(filled.page.items, current));
+          historyCursorRef.current = historyPageCursor(filled.page);
+        } catch (failure) {
+          if (!isAbortError(failure) && requestId === candleRequestRef.current) {
+            setHistoryError(`首屏历史读取失败：${translateError(failure)}`);
+          }
+        } finally {
+          endHistoryActivity(activityId);
+          if (requestId === candleRequestRef.current) {
+            historyLoadInFlightRef.current = false;
+            setHistorySyncing(false);
+          }
+        }
       }
     } catch (error) {
       if (isAbortError(error)) return;
@@ -506,82 +602,52 @@ export default function App() {
       }
       if (requestId === candleRequestRef.current) setLoadingCandles(false);
     }
-  }, [selectedBarPeriodId, selectedCode, selectedSource]);
+  }, [beginHistoryActivity, endHistoryActivity, historyBackfillEnabled, resetHistoryActivity, selectedBarPeriodId, selectedBarStreamKey, selectedCode, selectedSource]);
 
-  const loadOlderCandles = useCallback(async (): Promise<HistoryLoadOutcome> => {
-    if (!selectedInstrument.history_available) return historyOutcome("exhausted");
+  const loadOlderCandles = useCallback(async (
+    demand: HistoryDemand,
+  ): Promise<HistoryLoadOutcome> => {
     if (historyLoadInFlightRef.current) return historyOutcome("busy");
-    const earliest = candlesRef.current.at(0);
-    const earliestSeconds = epochSeconds(earliest?.open_time);
-    const before = historyCursorRef.current ?? earliestSeconds;
-    if (before === null) return historyOutcome("exhausted");
+    const currentCursor = historyCursorRef.current;
+    if (currentCursor === null) return historyOutcome("exhausted");
+    const earliestSeconds = epochSeconds(candlesRef.current.at(0)?.open_time);
 
     const requestId = candleRequestRef.current;
     const controller = new AbortController();
     historyPageAbortRef.current = controller;
     historyLoadInFlightRef.current = true;
-    setHistorySyncing(true);
     setHistoryError(null);
+    const activityId = beginHistoryActivity();
     try {
-      const localPage = await marketApi.barPage(
-        selectedCode,
-        selectedSource,
-        selectedBarPeriodId,
-        { before, signal: controller.signal },
-      );
-      if (requestId !== candleRequestRef.current) return historyOutcome("exhausted");
-      if (localPage.items.length > 0) {
-        const localCursor = historyPageCursor(localPage);
-        if (localCursor === null || localCursor >= before) {
-          throw new Error("周期 Bar 游标未前进");
-        }
-        historyCursorRef.current = localCursor;
-        const added = localPage.items.filter((item) => (
-          earliestSeconds === null || (epochSeconds(item.open_time) ?? before) < earliestSeconds
-        )).length;
-        setCandles((current) => mergeCandleRows(localPage.items, current));
-        return historyOutcome(
-          added > 0 ? "loaded" : "advanced",
-          added,
-          Math.max(0, Math.ceil((before - localCursor) / 60)),
-        );
-      }
-      // One-second Bars are recorded from the live stream and cannot be
-      // reconstructed truthfully from the provider's one-minute backfill.
-      if (selectedBarPeriodId === "1s") return historyOutcome("exhausted");
+      setHistorySyncing(true);
       const filled = await marketApi.olderCandleHistory(
         selectedCode,
         selectedSource,
-        before,
-        historyBatchMinutes(selectedPeriod),
+        selectedBarPeriodId,
+        currentCursor.token,
+        historyDemandBars(
+          demand.visibleBars,
+          demand.indicatorWarmupBars,
+        ),
         controller.signal,
       );
-      if (requestId !== candleRequestRef.current) return historyOutcome("exhausted");
-      const page = await marketApi.barPage(
-        selectedCode,
-        selectedSource,
-        selectedBarPeriodId,
-        { before, signal: controller.signal, cache: "reload" },
-      );
-      if (requestId !== candleRequestRef.current) return historyOutcome("exhausted");
-      const filledStart = epochSeconds(filled.result.start);
-      const pageCursor = historyPageCursor(page);
-      const cursor = filledStart === null
-        ? pageCursor
-        : pageCursor === null ? filledStart : Math.min(filledStart, pageCursor);
-      if (cursor === null || cursor >= before) return historyOutcome("exhausted");
-      historyCursorRef.current = cursor;
-      const added = page.items.filter((item) => (
-        earliestSeconds === null || (epochSeconds(item.open_time) ?? before) < earliestSeconds
+      if (requestId !== candleRequestRef.current) return historyOutcome("busy");
+      const added = filled.page.items.filter((item) => (
+        earliestSeconds === null
+        || (epochSeconds(item.open_time) ?? currentCursor.before) < earliestSeconds
       )).length;
-      setCandles((current) => mergeCandleRows(page.items, current));
-      return historyOutcome(
-        added > 0 ? "loaded" : "advanced",
-        added,
-        Math.max(0, Math.ceil((before - cursor) / 60)),
-      );
+      setCandles((current) => mergeCandleRows(filled.page.items, current));
+      const resolution = resolveChartHistoryStep({
+        currentCursor,
+        page: filled.page,
+        localAdded: added,
+        sourceStatus: filled.source_status,
+        retryAfter: filled.backfill?.retry_after ?? null,
+      });
+      historyCursorRef.current = resolution.nextCursor;
+      return resolution.outcome;
     } catch (error) {
-      if (isAbortError(error)) return historyOutcome("exhausted");
+      if (isAbortError(error)) return historyOutcome("busy");
       if (requestId === candleRequestRef.current) {
         setHistoryError(`更早行情加载失败：${translateError(error)}`);
       }
@@ -590,25 +656,34 @@ export default function App() {
       if (historyPageAbortRef.current === controller) {
         historyPageAbortRef.current = null;
       }
+      endHistoryActivity(activityId);
       if (requestId === candleRequestRef.current) {
         historyLoadInFlightRef.current = false;
         setHistorySyncing(false);
       }
     }
-  }, [selectedBarPeriodId, selectedCode, selectedInstrument.history_available, selectedPeriod, selectedSource]);
+  }, [
+    beginHistoryActivity,
+    endHistoryActivity,
+    selectedBarPeriodId,
+    selectedCode,
+    selectedSource,
+  ]);
 
   const repairVisibleHistoryGap = useCallback(async (window: HistoryWindow): Promise<void> => {
     if (
-      !selectedInstrument.history_available
+      !historyBackfillEnabled
       || selectedPeriod.aggregation.kind !== "fixed"
       || selectedBarPeriodId === "1s"
     ) return;
     const key = `${selectedSource}:${selectedCode}:${window.start}:${window.count}`;
-    if (historyGapAttemptsRef.current.has(key)) return;
-    historyGapAttemptsRef.current.add(key);
+    if (historyGapAbortRef.current.has(key)) return;
+    const previousAttempt = historyGapAttemptsRef.current.get(key);
+    if (previousAttempt && Date.now() < previousAttempt.retryAt) return;
     const controller = new AbortController();
     historyGapAbortRef.current.set(key, controller);
     const requestId = candleRequestRef.current;
+    const activityId = beginHistoryActivity();
     setHistoryRepairingCount((current) => current + 1);
     setHistoryError(null);
     try {
@@ -619,6 +694,13 @@ export default function App() {
         controller.signal,
       );
       if (requestId !== candleRequestRef.current) return;
+      const retryAfter = filled.result.retry_after
+        ? Date.parse(filled.result.retry_after)
+        : Number.NaN;
+      historyGapAttemptsRef.current.set(key, {
+        evidenceVersion: filled.result.evidence_version,
+        retryAt: Number.isFinite(retryAfter) ? retryAfter : Date.now() + 30_000,
+      });
       const periodSeconds = selectedPeriod.aggregation.minutes * 60;
       const pageSize = Math.min(
         LOCAL_HISTORY_PAGE_SIZE,
@@ -637,32 +719,30 @@ export default function App() {
       );
       if (requestId !== candleRequestRef.current) return;
       setCandles((current) => mergeCandleRows(page.items, current));
-      const gapNowHasEvidence = page.items.some((item) => {
-        const openTime = epochSeconds(item.open_time);
-        return openTime !== null
-          && openTime >= window.start
-          && openTime < window.end;
-      });
-      if (filled.result.row_count === 0 || !gapNowHasEvidence) {
-        setHistoryError(
-          `已精确复核 ${new Date(window.start * 1_000).toLocaleString("zh-CN")} 的可见缺口，当前同源上游仍未返回有效 Bar`,
-        );
-      }
     } catch (error) {
       if (isAbortError(error)) return;
       if (requestId === candleRequestRef.current) {
+        historyGapAttemptsRef.current.set(key, {
+          evidenceVersion: previousAttempt?.evidenceVersion ?? null,
+          retryAt: Date.now() + 1_000,
+        });
         setHistoryError(`可见缺口复核失败：${translateError(error)}`);
       }
     } finally {
       if (historyGapAbortRef.current.get(key) === controller) {
         historyGapAbortRef.current.delete(key);
       }
-      setHistoryRepairingCount((current) => Math.max(0, current - 1));
+      if (requestId === candleRequestRef.current) {
+        setHistoryRepairingCount((current) => Math.max(0, current - 1));
+      }
+      endHistoryActivity(activityId);
     }
   }, [
+    beginHistoryActivity,
+    endHistoryActivity,
+    historyBackfillEnabled,
     selectedBarPeriodId,
     selectedCode,
-    selectedInstrument.history_available,
     selectedPeriod,
     selectedSource,
   ]);
@@ -732,6 +812,17 @@ export default function App() {
     let retryTimer: number | null = null;
     let retryCount = 0;
     let resyncPromise: Promise<void> | null = null;
+    const invalidationController=new AbortController();
+    let invalidationPromise:Promise<void>|null=null;
+    const pendingInvalidations:{start:string;end:string}[]=[];
+    const refreshInvalidatedRange=()=>{
+      if(invalidationPromise||!pendingInvalidations.length)return;
+      const ranges=pendingInvalidations.splice(0);const start=ranges.map(r=>r.start).sort()[0],end=ranges.map(r=>r.end).sort().at(-1)!;
+      invalidationPromise=marketApi.barRange(selectedCode,selectedSource,selectedBarPeriodId,start,end,invalidationController.signal).then(result=>{
+        if(disposed||selectedCodeRef.current!==selectedCode)return;
+        setCandles(current=>mergeCandleRows(current,result.items));setCandleError(null);
+      }).catch(error=>{if(!disposed&&!invalidationController.signal.aborted)setCandleError(`历史修订读取失败：${error instanceof Error?error.message:String(error)}`);}).finally(()=>{invalidationPromise=null;if(!disposed)refreshInvalidatedRange();});
+    };
     let reactCommitTimer: number | null = null;
     const reactCommitBuffer = new RealtimeBarCommitBuffer(REALTIME_REACT_COMMIT_MAX_BARS);
 
@@ -775,16 +866,38 @@ export default function App() {
 
     const connect = () => {
       if (disposed || selectedCodeRef.current !== selectedCode) return;
-      socket = marketApi.openQuoteStream(selectedCode, selectedBarPeriodId);
-      socket.onopen = () => {
-        if (disposed || selectedCodeRef.current !== selectedCode) return;
+      retryTimer = null;
+      let nextSocket: WebSocket;
+      try {
+        nextSocket = marketApi.openQuoteStream(selectedCode, selectedBarPeriodId);
+      } catch {
+        const decision = quoteStreamCloseDecision({ code: 0 }, retryCount);
+        setQuoteStreamState("unavailable");
+        setQuoteError(decision.message);
+        setLoadingQuote(false);
+        retryCount += 1;
+        retryTimer = window.setTimeout(connect, decision.delayMs ?? 0);
+        return;
+      }
+      socket = nextSocket;
+      nextSocket.onopen = () => {
+        if (
+          disposed
+          || socket !== nextSocket
+          || selectedCodeRef.current !== selectedCode
+        ) return;
         retryCount = 0;
         const marketClosed = marketPhaseRef.current === "closed";
         setQuoteStreamState(marketClosed ? "waiting" : "connecting");
+        setQuoteError(null);
         if (marketClosed) setLoadingQuote(false);
       };
-      socket.onmessage = (message) => {
-        if (disposed || selectedCodeRef.current !== selectedCode) return;
+      nextSocket.onmessage = (message) => {
+        if (
+          disposed
+          || socket !== nextSocket
+          || selectedCodeRef.current !== selectedCode
+        ) return;
         const event = JSON.parse(String(message.data)) as QuoteStreamEvent;
         const marketClosed = marketPhaseRef.current === "closed";
         if (event.kind === "gap") {
@@ -799,8 +912,11 @@ export default function App() {
               if (resyncPromise === pendingResync) resyncPromise = null;
             });
           }
+        } else if(event.kind==='range_invalidated'){
+          const change=event.change??event;if(change.source_id!==selectedSource||!change.start_ns||!change.end_ns)return;
+          try{const range=loadedInvalidationRange(candleRowsRef.current,change.start_ns,change.end_ns);if(range){pendingInvalidations.push(range);refreshInvalidatedRange();}}
+          catch(error){setCandleError(error instanceof Error?error.message:String(error));}
         } else if (event.kind === "bar" && event.bar) {
-          setQuoteStreamState(marketClosed ? "waiting" : "live");
           if (
             event.period_id === selectedBarPeriodId
             && event.bar.source.provider === selectedSource
@@ -813,34 +929,45 @@ export default function App() {
         } else if (event.kind === "sample") {
           // Raw samples remain an ingestion/replay concern. Every chart mode
           // consumes the complete period Bar emitted by the backend.
-          setQuoteStreamState(marketClosed ? "waiting" : "live");
         } else if (event.kind === "quote" && event.quote) {
-          setQuoteStreamState(marketClosed ? "waiting" : "live");
+          const stale = event.quote.stale_fields.includes("last");
+          setQuoteStreamState(marketClosed ? "waiting" : stale ? "unavailable" : "live");
           setQuote(event.quote);
           setWatchQuotes((current) => ({ ...current, [selectedCode]: event.quote as QuoteView }));
           setWatchPriceSeries((current) => appendWatchPriceSample(current, selectedCode, event.quote as QuoteView));
-          setQuoteError(null);
+          setQuoteError(stale && !marketClosed
+            ? `行情尚未更新，显示来源最后报价（${formatBeijingDateTime(Date.parse(event.quote.quote.source.observed_at) / 1_000)}）`
+            : null);
           setLoadingQuote(false);
         } else if (event.state === "unavailable") {
-          setQuoteStreamState(marketClosed ? "waiting" : "unavailable");
-          setQuoteError(marketClosed ? null : translateError(event.error ?? "当前行情源不可用"));
+          setQuoteStreamState("unavailable");
+          setQuoteError(sourceUnavailableMessage(
+            selectedSourceDescriptor?.display_name ?? "当前行情源",
+            translateError(event.error ?? "暂未收到可用行情"),
+          ));
           setLoadingQuote(false);
         } else {
           setQuoteStreamState(marketClosed ? "waiting" : event.state);
         }
       };
-      socket.onerror = () => socket?.close();
-      socket.onclose = () => {
-        if (disposed || selectedCodeRef.current !== selectedCode) return;
+      nextSocket.onerror = () => nextSocket.close();
+      nextSocket.onclose = (event) => {
+        if (
+          disposed
+          || socket !== nextSocket
+          || selectedCodeRef.current !== selectedCode
+        ) return;
+        socket = null;
         flushRealtimeBarsToReact();
         setQuoteStreamState("unavailable");
-        setQuoteError("实时报价连接已断开，正在重连");
+        const decision = quoteStreamCloseDecision(event, retryCount);
+        setQuoteError(decision.message);
         setLoadingQuote(false);
+        if (!decision.retry) return;
         const scheduleReconnect = () => {
           if (disposed) return;
-          const delay = Math.min(1_000, 100 * 2 ** retryCount);
           retryCount += 1;
-          retryTimer = window.setTimeout(connect, delay);
+          retryTimer = window.setTimeout(connect, decision.delayMs ?? 0);
         };
         if (resyncPromise === null) {
           scheduleReconnect();
@@ -860,6 +987,7 @@ export default function App() {
       if (reactCommitTimer !== null) window.clearTimeout(reactCommitTimer);
       reactCommitBuffer.clear();
       socket?.close();
+      invalidationController.abort();
       realtimeBarStream.reset(selectedBarStreamKey);
     };
   }, [
@@ -969,7 +1097,7 @@ export default function App() {
   }, [refreshSourceSnapshot, sources]);
 
   useEffect(() => {
-    if (!instrumentSourcesLoaded || !sourcesLoaded) return;
+    if (expertMode || !instrumentSourcesLoaded || !sourcesLoaded) return;
     const missing = instruments.filter(
       (item) => item.provider_code !== selectedCode && !watchQuotes[item.provider_code],
     );
@@ -979,12 +1107,22 @@ export default function App() {
         const source = instrumentSources[item.provider_code] ?? "jin10_client";
         const descriptor = sourceById.get(source);
         if (!descriptor || (descriptor.manual_connection_required && !descriptor.connection_active)) return;
-        const value = await marketApi.quote(item.provider_code);
-        setWatchQuotes((current) => ({ ...current, [item.provider_code]: value }));
-        setWatchPriceSeries((current) => appendWatchPriceSample(current, item.provider_code, value));
+        const key = `${source}:${item.provider_code}`;
+        if (Date.now() < (watchQuoteSnapshotRetryRef.current.get(key) ?? 0)) return;
+        // Each successful quote rerenders the watchlist. Keep the other pending
+        // or failed snapshots from being dispatched again by those renders.
+        watchQuoteSnapshotRetryRef.current.set(key, Number.POSITIVE_INFINITY);
+        try {
+          const value = await marketApi.quote(item.provider_code);
+          if (value.source_id !== source) return;
+          setWatchQuotes((current) => ({ ...current, [item.provider_code]: value }));
+          setWatchPriceSeries((current) => appendWatchPriceSample(current, item.provider_code, value));
+        } finally {
+          watchQuoteSnapshotRetryRef.current.set(key, Date.now() + 30_000);
+        }
       }),
     );
-  }, [instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded, watchQuotes]);
+  }, [expertMode, instrumentSources, instrumentSourcesLoaded, instruments, selectedCode, sourceById, sourcesLoaded, watchQuotes]);
 
   useEffect(() => {
     if (!instrumentSourcesLoaded || !sourcesLoaded) return;
@@ -1042,11 +1180,14 @@ export default function App() {
       const observedAt = value.observed_at
         ? formatBeijingClock(Date.parse(value.observed_at) / 1_000)
         : null;
-      const ready = value.data_fresh && value.kline_points > 0;
+      const ready = value.state==='connected' && value.validation_performed===true && !!value.capture_position && value.data_fresh;
       const qualityWarning = value.quality !== "complete";
+      const historyStatus = value.history_backfill_configured
+        ? "历史恢复通道已绑定"
+        : "无历史恢复通道";
       const message = ready
-        ? `连接成功 · 报价 ${formatPrice(value.last!, value.code, selectedInstrument)} · K线 ${value.kline_points} · ${value.latency_ms}ms · ${observedAt}`
-        : `连接已建立 · ${value.detail ?? "正在等待同源报价与 K 线"} · ${value.latency_ms}ms`;
+        ? `连接成功 · 报价 ${formatPrice(value.last!, value.code, selectedInstrument)} · K线 ${value.kline_points} · ${historyStatus} · ${value.latency_ms}ms · ${observedAt}`
+         : `${value.state==='not_tested'?'尚未测试':value.state==='stale'?'来源数据陈旧':'来源不可用'} · ${value.detail ?? '尚未取得新鲜验证证据'} · ${historyStatus}${value.latency_ms==null?'':` · ${value.latency_ms}ms`}`;
       setSourceTestResults((current) => ({
         ...current,
         [source.source_id]: {
@@ -1123,12 +1264,13 @@ export default function App() {
     [candles],
   );
   const displayBar = hover ?? chartBars.at(-1) ?? null;
+  const displayInterval=useMemo(()=>selectedPeriod.mode==="timeline"?null:candleIntervalEvidence(candleAtChartTime(candles,hover?.time??null)),[candles,hover?.time,selectedPeriod.mode]);
   const timelineReferencePrice = useMemo(() => {
     const last = numeric(priceQuote?.last);
     const change = numeric(priceQuote?.change);
     if (last !== null && change !== null) return last - change;
-    return chartBars[0]?.open ?? null;
-  }, [chartBars, priceQuote?.change, priceQuote?.last]);
+    return null;
+  }, [priceQuote?.change, priceQuote?.last]);
   const timelineChange = displayBar && timelineReferencePrice !== null
     ? displayBar.close - timelineReferencePrice
     : null;
@@ -1141,9 +1283,8 @@ export default function App() {
       ? "trend-up"
       : "trend-down";
   const quoteStreaming = selectedSourceDescriptor?.quote_streaming ?? false;
-  const timelineSamplingSeconds = quoteStreaming
-    ? 1
-    : selectedSourceDescriptor?.quote_poll_interval_seconds ?? 60;
+  const timelineSamplingSeconds = selectedSourceDescriptor?.quote_timestamp_precision_seconds
+    ?? (quoteStreaming ? 1 : 60);
   const timelineResolutionLabel = quoteStreaming
     ? "推送"
     : timelineSamplingSeconds <= 2
@@ -1152,15 +1293,8 @@ export default function App() {
         ? `${Math.round(timelineSamplingSeconds)}秒`
         : "分钟级";
 
-  const sharedIndicatorHistoryKey = `${EXPERT_INDICATOR_HISTORY_VERSION}:${selectedCode}:${candles.at(-1)?.source.provider ?? selectedSource}:${selectedBarPeriodId}`;
-  const sharedIndicatorSeries = useMemo(
-    () => buildExpertIndicatorSeriesAt(
-      candles,
-      candles.length - 1,
-      sharedIndicatorHistoryKey,
-    ),
-    [candles, sharedIndicatorHistoryKey],
-  );
+  const normalQuant = useQuantSnapshot(selectedCode,selectedSource,selectedBarPeriodId,candlePrefixRevisionKey(candles,latestFinalCandleIndex(candles)),!expertMode);
+  const sharedIndicatorSeries = useMemo(()=>projectQuantSeries(normalQuant.snapshot),[normalQuant.snapshot]);
   const sharedEventMarkers = useMemo(
     () => selectedCode === "XAUUSD" ? goldEvents ?? [] : [],
     [goldEvents, selectedCode],
@@ -1189,8 +1323,10 @@ export default function App() {
         ? "trend-up"
         : "trend-down"
       : "trend-neutral";
-  const aggregateState = quote?.stale_fields.length
-    ? "部分聚合字段已过期"
+  const aggregateState = quote?.stale_fields.includes("last")
+    ? "显示来源最后报价"
+    : quote?.stale_fields.length
+      ? "部分聚合字段已过期"
     : quote?.unavailable_fields.length
       ? "部分聚合字段缺失"
       : null;
@@ -1198,6 +1334,7 @@ export default function App() {
   if (expertMode) {
     return (
       <ExpertModeWorkspace
+        onOpenOptions={onOpenOptions}
         code={selectedCode}
         instrumentName={selectedInstrument.name}
         unit={unitFor(selectedCode, selectedInstrument) || "美元/盎司"}
@@ -1216,6 +1353,7 @@ export default function App() {
         marketSchedule={selectedInstrument.market_schedule}
         sourceLabel={selectedSourceDescriptor?.display_name ?? sourceLabels[selectedSource] ?? selectedSource}
         sourceId={selectedSource}
+        sourcePeriodReference={sourcePeriodReference}
         sourceState={quoteStreamState}
         liveIndicatorSeries={sharedIndicatorSeries}
         marketEvents={goldEvents ?? []}
@@ -1224,12 +1362,16 @@ export default function App() {
         layerWorkspace={layerWorkspace}
         onLayerWorkspaceChange={updateLayerWorkspace}
         historyLoading={chartHistoryLoading}
+        historyResetKey={candleRequestRef.current}
+        onRetryHistory={historyError || candleError ? () => void loadCandles() : undefined}
+        historyActivityVisible={historyIndicatorVisible}
         loading={loadingQuote || loadingCandles}
         error={quoteError ?? candleError ?? historyError}
+        coverageNotice={calendarCoverageNotice}
         onPeriodChange={setPeriodId}
         onRequestOlderHistory={loadOlderCandles}
         onRequestHistoryGap={repairVisibleHistoryGap}
-        onExit={() => setExpertMode(false)}
+        onOpenMarket={() => setExpertMode(false)}
       />
     );
   }
@@ -1241,7 +1383,7 @@ export default function App() {
     >
       <header className="top-command-bar">
         <div className="top-brand" title="TraceFang">
-          <div className="top-brand-mark"><span>M</span></div>
+          <span className="top-brand-mark"><TraceFangLogo /></span>
           <div>
             <small>MARKET WATCH</small>
             <strong>行情</strong>
@@ -1267,7 +1409,7 @@ export default function App() {
               setExpertMode(true);
             }}
           >
-            <Sparkles size={14} />专家模式
+            <Sparkles size={14} />返回专家工作台
           </button>
         </div>
         <div className="utility-cluster">
@@ -1509,6 +1651,7 @@ export default function App() {
             onTest={(source) => void testSource(source)}
             onOpenChange={handleSourceMenuOpenChange}
           />
+          {normalQuant.error?<span role="status" title={normalQuant.error}>指标不可用</span>:normalQuant.progress?.state==='building'?<span role="status">指标计算 · {normalQuant.progress.processed_bars} 根</span>:null}
           <button type="button" className="draw-button"><Activity size={15} />画线</button>
         </div>
 
@@ -1530,7 +1673,7 @@ export default function App() {
                 {selectedInstrument.quote_kind === "derived" ? (
                   <span
                     className="quote-derivation-badge"
-                    title="现货黄金(美元/盎司) × 美元兑离岸人民币 ÷ 31.1034768"
+                    title="国际现货黄金(美元/金衡盎司) × 美元兑离岸人民币 ÷ 31.1034768"
                   >
                     实时换算
                   </span>
@@ -1557,7 +1700,7 @@ export default function App() {
                   {quoteError
                     ? quoteError
                     : marketSession.phase === "closed"
-                      ? `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · 休市，显示最后有效行情${quoteObservedAt ? ` · ${formatBeijingClock(Date.parse(quoteObservedAt) / 1_000)}` : ""}${aggregateState ? ` · ${aggregateState}` : ""}`
+                      ? `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · 休市，显示最后有效行情${quoteObservedAt ? ` · ${formatBeijingDateTime(Date.parse(quoteObservedAt) / 1_000)}` : ""}`
                       : `${sourceById.get(selectedSource)?.display_name ?? sourceLabels[selectedSource]} · ${priceQuote ? formatBeijingClock(Date.parse(priceQuote.source.observed_at) / 1_000) : "等待数据"}${aggregateState ? ` · ${aggregateState}` : ""}`}
                 </span>
               </div>
@@ -1565,7 +1708,7 @@ export default function App() {
           </div>
           {displayBar ? (
             <div className={`ohlc-overlay ${selectedPeriod.mode === "timeline" ? "is-timeline" : ""}`}>
-              <span>{formatChartTimeLabel(displayBar.time, selectedPeriod, timelineSamplingSeconds)}</span>
+              <span style={displayInterval?{pointerEvents:"auto"}:undefined} title={displayInterval?`区间（左闭右开）${formatBeijingDateTime(displayInterval.start)} – ${formatBeijingDateTime(displayInterval.end)}${displayInterval.sourceLabel?`；来源标记 ${displayInterval.sourceLabel}（区间结束）`:""}`:undefined}>{displayInterval?`${formatChartTimeLabel(displayInterval.start,selectedPeriod,timelineSamplingSeconds)}–${formatBeijingClock(displayInterval.end,false)}`:formatChartTimeLabel(displayBar.time, selectedPeriod, timelineSamplingSeconds)}</span>
               {selectedPeriod.mode === "timeline" ? (
                 <>
                   <span>价格 <b>{formatPrice(displayBar.close, selectedCode, selectedInstrument)}</b></span>
@@ -1583,6 +1726,8 @@ export default function App() {
             </div>
           ) : null}
           <MarketChart
+            key={selectedBarStreamKey}
+            sourcePeriodReference={sourcePeriodReference}
             candles={candles}
             realtimeBarStream={realtimeBarStream}
             realtimeBarStreamKey={selectedBarStreamKey}
@@ -1594,15 +1739,19 @@ export default function App() {
             marketPhase={marketSession.phase}
             marketSchedule={selectedInstrument.market_schedule}
             historyLoading={chartHistoryLoading}
+            historyResetKey={candleRequestRef.current}
             onRequestOlderHistory={loadOlderCandles}
             onRequestHistoryGap={repairVisibleHistoryGap}
             onHover={setHover}
             layers={normalChartLayers}
-            onIndicatorPaneResize={(layerId, height) => {
-              updateLayerWorkspace((current) => resizeIndicatorLayer(current, layerId, height));
+            onIndicatorPositionChange={(layerId, position) => {
+              updateLayerWorkspace((current) => positionIndicatorLayer(current, layerId, position));
+            }}
+            onVolumeProfileChange={(settings) => {
+              updateLayerWorkspace((current) => configureVolumeProfile(current, settings));
             }}
           />
-          {historySyncing || historyRepairingCount > 0 ? (
+          {historyIndicatorVisible && (historySyncing || historyRepairingCount > 0) ? (
             <div
               className="history-loading-indicator"
               role="status"
@@ -1619,8 +1768,10 @@ export default function App() {
             <div className="history-loading-indicator is-error" role="alert">
               <CircleHelp size={12} aria-hidden="true" />
               <span>{historyError}</span>
+              <button type="button" onClick={() => void loadCandles()}>重试历史</button>
             </div>
           ) : null}
+          {calendarCoverageNotice?<div className="history-loading-indicator" role="status"><CircleHelp size={12}/><span>{calendarCoverageNotice}</span></div>:null}
           {loadingCandles && candles.length === 0 ? <div className="chart-state"><RefreshCw size={20} className="spin" /><strong>正在读取 K 线</strong></div> : null}
           {candleError ? <div className="chart-state is-error"><CircleHelp size={22} /><strong>K 线暂不可用</strong><span>{candleError}</span><button type="button" onClick={() => void loadCandles()}>重试</button></div> : null}
         </section>

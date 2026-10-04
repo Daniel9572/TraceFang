@@ -204,23 +204,26 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gold.change, Decimal("13.93"))
         self.assertEqual(gold.change_percent, Decimal("1.50"))
         self.assertEqual(gold.source.provider_symbol, "qh_au8888")
-        self.assertEqual(gold.source.observed_at, gold.source.received_at)
+        self.assertEqual(
+            gold.source.observed_at.isoformat(), gold.source.raw_payload["wire_observed_at"]
+        )
         self.assertEqual(
             gold.source.raw_payload["wire_observed_at"],
             "2026-08-08T02:30:00+08:00",
         )
         self.assertEqual(gold.source.raw_payload["wire_time_precision"], "minute")
-        self.assertEqual(gold.source.raw_payload["bar_clock"], "provider_frame.received_at")
+        self.assertEqual(gold.source.raw_payload["bar_clock"], "source.observed_at")
         self.assertEqual(silver.last, Decimal("15465"))
         self.assertEqual(silver.change, Decimal("248"))
         self.assertEqual(silver.change_percent, Decimal("1.63"))
 
     async def test_history_filters_year_file_to_requested_window(self) -> None:
-        rows = await self.provider.fetch_historical_candles(
+        batch = await self.provider.fetch_historical_candles(
             SHFE_GOLD_WEIGHTED,
             start=datetime(2026, 8, 7, 18, 29, tzinfo=UTC),
             count=1,
         )
+        rows = batch.candles
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].open, Decimal("942.80"))
@@ -230,6 +233,9 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
             rows[0].source.raw_payload["history_file"],
             "tonghuashun_public_line_61_year",
         )
+        self.assertEqual(batch.authoritative_through, batch.checked_end)
+        self.assertTrue(batch.evidence_version)
+        self.assertIsNone(batch.history_floor)
 
     async def test_nasdaq_quote_and_lines_use_their_respective_source_clocks(self) -> None:
         quote = await self.provider.get_quote(NASDAQ_COMPOSITE)
@@ -237,13 +243,15 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(quote.last, Decimal("26690.620"))
         self.assertEqual(quote.open, Decimal("26534.660"))
-        self.assertEqual(quote.source.observed_at, quote.source.received_at)
+        self.assertEqual(
+            quote.source.observed_at.isoformat(), quote.source.raw_payload["wire_observed_at"]
+        )
         self.assertEqual(
             quote.source.raw_payload["wire_observed_at"],
             "2026-08-08T04:00:00+08:00",
         )
         self.assertEqual(quote.source.raw_payload["wire_time_precision"], "minute")
-        self.assertEqual(quote.source.raw_payload["bar_clock"], "provider_frame.received_at")
+        self.assertEqual(quote.source.raw_payload["bar_clock"], "source.observed_at")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].close, Decimal("26690.620"))
         self.assertEqual(
@@ -305,7 +313,7 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(replayed), 1)
         self.assertEqual(provider._daily_cache, live_cache_before_replay)
 
-    async def test_same_wire_minute_uses_captured_arrival_seconds_for_live_and_replay(self) -> None:
+    async def test_same_wire_minute_preserves_source_time_for_live_and_replay(self) -> None:
         provider = TonghuashunFuturesProvider(TonghuashunFuturesSettings())
         received_times = (
             datetime(2026, 8, 10, 1, 0, 1, tzinfo=UTC),
@@ -361,15 +369,19 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [quote.source.observed_at for quote in live_quotes],
-            list(received_times),
+            [received_times[0].replace(second=0)] * 2,
         )
         self.assertEqual(
             [quote.source.observed_at for quote in replay_quotes],
-            list(received_times),
+            [received_times[0].replace(second=0)] * 2,
         )
         self.assertEqual(
             {quote.source.raw_payload["wire_observed_at"] for quote in replay_quotes},
             {"2026-08-10T09:00:00+08:00"},
+        )
+        self.assertEqual(
+            {quote.source.raw_payload["observation_kind"] for quote in replay_quotes},
+            {"snapshot"},
         )
 
         bars = RealtimeBarService(
@@ -394,10 +406,10 @@ class TonghuashunFuturesProviderTests(unittest.IsolatedAsyncioTestCase):
             await bars.close()
             await provider.close()
 
-        self.assertEqual(sorted(one_second_bars), list(received_times))
+        self.assertEqual(sorted(one_second_bars), [received_times[0].replace(second=0)])
         self.assertEqual(
-            [one_second_bars[open_time].close for open_time in received_times],
-            [Decimal("950.0"), Decimal("951.0")],
+            [bar.close for bar in one_second_bars.values()],
+            [Decimal("951.0")],
         )
 
     async def test_history_frames_decode_but_never_emit_realtime_quotes(self) -> None:

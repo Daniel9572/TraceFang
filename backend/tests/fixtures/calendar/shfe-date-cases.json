@@ -1,0 +1,425 @@
+{
+  "kind": "independent-official-shfe-gold-silver-calendar-cases-v1",
+  "scope": "SHFE AU/AG regular current hours plus 2025/2026 official annual closure/holiday evening exceptions. Not other exchanges; no future year extrapolation; auction excluded.",
+  "source_sha256": "98b08aa4b9aecc393708e565b7bc389512d4828813623aa12794f973a9986bd9",
+  "cases": [
+    {
+      "trading_date": "2025-01-02",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2025-01-02T09:00:00+08:00",
+          "local_end": "2025-01-02T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-01-02"
+        },
+        {
+          "local_start": "2025-01-02T10:30:00+08:00",
+          "local_end": "2025-01-02T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-01-02"
+        },
+        {
+          "local_start": "2025-01-02T13:30:00+08:00",
+          "local_end": "2025-01-02T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-01-02"
+        }
+      ]
+    },
+    {
+      "trading_date": "2025-02-05",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2025-02-05T09:00:00+08:00",
+          "local_end": "2025-02-05T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-02-05"
+        },
+        {
+          "local_start": "2025-02-05T10:30:00+08:00",
+          "local_end": "2025-02-05T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-02-05"
+        },
+        {
+          "local_start": "2025-02-05T13:30:00+08:00",
+          "local_end": "2025-02-05T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-02-05"
+        }
+      ]
+    },
+    {
+      "trading_date": "2025-04-07",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2025-04-07T09:00:00+08:00",
+          "local_end": "2025-04-07T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-04-07"
+        },
+        {
+          "local_start": "2025-04-07T10:30:00+08:00",
+          "local_end": "2025-04-07T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-04-07"
+        },
+        {
+          "local_start": "2025-04-07T13:30:00+08:00",
+          "local_end": "2025-04-07T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-04-07"
+        }
+      ]
+    },
+    {
+      "trading_date": "2025-05-06",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2025-05-06T09:00:00+08:00",
+          "local_end": "2025-05-06T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-05-06"
+        },
+        {
+          "local_start": "2025-05-06T10:30:00+08:00",
+          "local_end": "2025-05-06T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-05-06"
+        },
+        {
+          "local_start": "2025-05-06T13:30:00+08:00",
+          "local_end": "2025-05-06T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-05-06"
+        }
+      ]
+    },
+    {
+      "trading_date": "2025-06-03",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2025-06-03T09:00:00+08:00",
+          "local_end": "2025-06-03T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-06-03"
+        },
+        {
+          "local_start": "2025-06-03T10:30:00+08:00",
+          "local_end": "2025-06-03T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-06-03"
+        },
+        {
+          "local_start": "2025-06-03T13:30:00+08:00",
+          "local_end": "2025-06-03T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-06-03"
+        }
+      ]
+    },
+    {
+      "trading_date": "2025-10-09",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2025-10-09T09:00:00+08:00",
+          "local_end": "2025-10-09T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-10-09"
+        },
+        {
+          "local_start": "2025-10-09T10:30:00+08:00",
+          "local_end": "2025-10-09T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-10-09"
+        },
+        {
+          "local_start": "2025-10-09T13:30:00+08:00",
+          "local_end": "2025-10-09T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2025-10-09"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-01-05",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-01-05T09:00:00+08:00",
+          "local_end": "2026-01-05T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-01-05"
+        },
+        {
+          "local_start": "2026-01-05T10:30:00+08:00",
+          "local_end": "2026-01-05T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-01-05"
+        },
+        {
+          "local_start": "2026-01-05T13:30:00+08:00",
+          "local_end": "2026-01-05T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-01-05"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-02-24",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-02-24T09:00:00+08:00",
+          "local_end": "2026-02-24T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-02-24"
+        },
+        {
+          "local_start": "2026-02-24T10:30:00+08:00",
+          "local_end": "2026-02-24T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-02-24"
+        },
+        {
+          "local_start": "2026-02-24T13:30:00+08:00",
+          "local_end": "2026-02-24T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-02-24"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-04-07",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-04-07T09:00:00+08:00",
+          "local_end": "2026-04-07T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-04-07"
+        },
+        {
+          "local_start": "2026-04-07T10:30:00+08:00",
+          "local_end": "2026-04-07T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-04-07"
+        },
+        {
+          "local_start": "2026-04-07T13:30:00+08:00",
+          "local_end": "2026-04-07T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-04-07"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-05-06",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-05-06T09:00:00+08:00",
+          "local_end": "2026-05-06T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-05-06"
+        },
+        {
+          "local_start": "2026-05-06T10:30:00+08:00",
+          "local_end": "2026-05-06T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-05-06"
+        },
+        {
+          "local_start": "2026-05-06T13:30:00+08:00",
+          "local_end": "2026-05-06T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-05-06"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-06-22",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-06-22T09:00:00+08:00",
+          "local_end": "2026-06-22T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-06-22"
+        },
+        {
+          "local_start": "2026-06-22T10:30:00+08:00",
+          "local_end": "2026-06-22T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-06-22"
+        },
+        {
+          "local_start": "2026-06-22T13:30:00+08:00",
+          "local_end": "2026-06-22T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-06-22"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-09-21",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-09-18T21:00:00+08:00",
+          "local_end": "2026-09-19T02:30:00+08:00",
+          "phase": "incoming_night",
+          "trading_date": "2026-09-21"
+        },
+        {
+          "local_start": "2026-09-21T09:00:00+08:00",
+          "local_end": "2026-09-21T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-21"
+        },
+        {
+          "local_start": "2026-09-21T10:30:00+08:00",
+          "local_end": "2026-09-21T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-21"
+        },
+        {
+          "local_start": "2026-09-21T13:30:00+08:00",
+          "local_end": "2026-09-21T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-21"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-09-25",
+      "expected_continuous_sessions": []
+    },
+    {
+      "trading_date": "2026-09-28",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-09-28T09:00:00+08:00",
+          "local_end": "2026-09-28T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-28"
+        },
+        {
+          "local_start": "2026-09-28T10:30:00+08:00",
+          "local_end": "2026-09-28T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-28"
+        },
+        {
+          "local_start": "2026-09-28T13:30:00+08:00",
+          "local_end": "2026-09-28T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-28"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-09-29",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-09-28T21:00:00+08:00",
+          "local_end": "2026-09-29T02:30:00+08:00",
+          "phase": "incoming_night",
+          "trading_date": "2026-09-29"
+        },
+        {
+          "local_start": "2026-09-29T09:00:00+08:00",
+          "local_end": "2026-09-29T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-29"
+        },
+        {
+          "local_start": "2026-09-29T10:30:00+08:00",
+          "local_end": "2026-09-29T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-29"
+        },
+        {
+          "local_start": "2026-09-29T13:30:00+08:00",
+          "local_end": "2026-09-29T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-09-29"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-10-08",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-10-08T09:00:00+08:00",
+          "local_end": "2026-10-08T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-10-08"
+        },
+        {
+          "local_start": "2026-10-08T10:30:00+08:00",
+          "local_end": "2026-10-08T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-10-08"
+        },
+        {
+          "local_start": "2026-10-08T13:30:00+08:00",
+          "local_end": "2026-10-08T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-10-08"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-10-09",
+      "expected_continuous_sessions": [
+        {
+          "local_start": "2026-10-08T21:00:00+08:00",
+          "local_end": "2026-10-09T02:30:00+08:00",
+          "phase": "incoming_night",
+          "trading_date": "2026-10-09"
+        },
+        {
+          "local_start": "2026-10-09T09:00:00+08:00",
+          "local_end": "2026-10-09T10:15:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-10-09"
+        },
+        {
+          "local_start": "2026-10-09T10:30:00+08:00",
+          "local_end": "2026-10-09T11:30:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-10-09"
+        },
+        {
+          "local_start": "2026-10-09T13:30:00+08:00",
+          "local_end": "2026-10-09T15:00:00+08:00",
+          "phase": "day",
+          "trading_date": "2026-10-09"
+        }
+      ]
+    },
+    {
+      "trading_date": "2026-10-10",
+      "expected_continuous_sessions": []
+    }
+  ],
+  "critical_negative_cases": [
+    {
+      "civil_local_time": "2026-09-24T21:00:00+08:00",
+      "expected": "closed_by_no_evening_start_date"
+    },
+    {
+      "civil_local_time": "2026-09-19T01:00:00+08:00",
+      "expected": "continuous_incoming_night",
+      "trading_date": "2026-09-21"
+    },
+    {
+      "civil_local_time": "2026-09-20T09:00:00+08:00",
+      "expected": "weekend_closed_even_if_civil_makeup_workday"
+    },
+    {
+      "civil_local_time": "2026-10-08T21:00:00+08:00",
+      "expected": "continuous_incoming_night",
+      "trading_date": "2026-10-09"
+    },
+    {
+      "civil_local_time": "2027-01-04T09:00:00+08:00",
+      "expected": "calendar_year_not_verified_do_not_assume_open"
+    }
+  ]
+}

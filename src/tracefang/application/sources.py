@@ -76,6 +76,8 @@ class ProviderProbe:
     detail: str | None = None
     checked_at: datetime | None = None
     health: SourceHealth | None = None
+    connection_active: bool | None = None
+    last_success_at: datetime | None = None
 
 
 class SourceConfigurationStore(Protocol):
@@ -119,6 +121,7 @@ class SourceRegistration:
     structured: bool = True
     quote_poll_interval_seconds: float = 60.0
     quote_streaming: bool = False
+    quote_timestamp_precision_seconds: int = 1
     quote_service_tier: QuoteServiceTier = QuoteServiceTier.REFERENCE
     routing_role: SourceRoutingRole = SourceRoutingRole.REALTIME_SOURCE
     composition: RealtimeSourceComposition | None = None
@@ -148,6 +151,7 @@ class SourceDescriptor:
     structured: bool
     quote_poll_interval_seconds: float
     quote_streaming: bool
+    quote_timestamp_precision_seconds: int
     quote_service_tier: QuoteServiceTier
     routing_role: SourceRoutingRole
     access_model: SourceAccessModel
@@ -228,9 +232,8 @@ class MarketSourceManager:
             elif registration.probe is None:
                 self._runtime[source_id] = _RuntimeState(
                     connection_active=True,
-                    health=SourceHealth.HEALTHY,
-                    state="ready",
-                    checked_at=datetime.now(UTC),
+                    health=SourceHealth.UNKNOWN,
+                    state="waiting_first_result",
                 )
 
     def _merged_configuration(
@@ -298,6 +301,7 @@ class MarketSourceManager:
                     structured=registration.structured,
                     quote_poll_interval_seconds=registration.quote_poll_interval_seconds,
                     quote_streaming=registration.quote_streaming,
+                    quote_timestamp_precision_seconds=registration.quote_timestamp_precision_seconds,
                     quote_service_tier=registration.quote_service_tier,
                     routing_role=registration.routing_role,
                     access_model=registration.access_model,
@@ -337,6 +341,10 @@ class MarketSourceManager:
         state.state = probe.state
         state.error = probe.detail
         state.checked_at = probe.checked_at or datetime.now(UTC)
+        if probe.connection_active is not None:
+            state.connection_active = probe.connection_active
+        if probe.last_success_at is not None:
+            state.last_success_at = probe.last_success_at
 
     def configure(
         self,

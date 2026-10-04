@@ -1,0 +1,387 @@
+{
+  "spot_metals": {
+    "time_zone": "America/New_York",
+    "trading_day_rule": "session_end",
+    "reference": "OTC 贵金属来源校验交易时段",
+    "sessions": [
+      {
+        "weekday": 0,
+        "open": "18:00",
+        "close": "17:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 1,
+        "open": "18:00",
+        "close": "17:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 2,
+        "open": "18:00",
+        "close": "17:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 3,
+        "open": "18:00",
+        "close": "17:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 4,
+        "open": "18:00",
+        "close": "17:00",
+        "close_day_offset": 1
+      }
+    ]
+  },
+  "forex": {
+    "time_zone": "America/New_York",
+    "trading_day_rule": "session_end",
+    "reference": "OTC 外汇常规交易时段",
+    "sessions": [
+      {
+        "weekday": 0,
+        "open": "17:05",
+        "close": "16:59",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 1,
+        "open": "17:05",
+        "close": "16:59",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 2,
+        "open": "17:05",
+        "close": "16:59",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 3,
+        "open": "17:05",
+        "close": "16:59",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 4,
+        "open": "17:05",
+        "close": "16:59",
+        "close_day_offset": 1
+      }
+    ]
+  },
+  "shfe_metals": {
+    "time_zone": "Asia/Shanghai",
+    "trading_day_rule": "shfe",
+    "reference": "上海期货交易所贵金属期货常规交易时段",
+    "sessions": [
+      {
+        "weekday": 1,
+        "open": "09:00",
+        "close": "10:15",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 1,
+        "open": "10:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 1,
+        "open": "13:30",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 1,
+        "open": "21:00",
+        "close": "02:30",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 2,
+        "open": "09:00",
+        "close": "10:15",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 2,
+        "open": "10:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 2,
+        "open": "13:30",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 2,
+        "open": "21:00",
+        "close": "02:30",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 3,
+        "open": "09:00",
+        "close": "10:15",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 3,
+        "open": "10:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 3,
+        "open": "13:30",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 3,
+        "open": "21:00",
+        "close": "02:30",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 4,
+        "open": "09:00",
+        "close": "10:15",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 4,
+        "open": "10:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 4,
+        "open": "13:30",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 4,
+        "open": "21:00",
+        "close": "02:30",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 5,
+        "open": "09:00",
+        "close": "10:15",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 5,
+        "open": "10:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 5,
+        "open": "13:30",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 5,
+        "open": "21:00",
+        "close": "02:30",
+        "close_day_offset": 1
+      }
+    ]
+  },
+  "sse": {
+    "time_zone": "Asia/Shanghai",
+    "trading_day_rule": "session_start",
+    "reference": "上海证券交易所指数常规行情时段",
+    "sessions": [
+      {
+        "weekday": 1,
+        "open": "09:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 1,
+        "open": "13:00",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 2,
+        "open": "09:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 2,
+        "open": "13:00",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 3,
+        "open": "09:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 3,
+        "open": "13:00",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 4,
+        "open": "09:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 4,
+        "open": "13:00",
+        "close": "15:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 5,
+        "open": "09:30",
+        "close": "11:30",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 5,
+        "open": "13:00",
+        "close": "15:00",
+        "close_day_offset": 0
+      }
+    ]
+  },
+  "nasdaq": {
+    "time_zone": "America/New_York",
+    "trading_day_rule": "session_start",
+    "reference": "纳斯达克常规交易时段",
+    "sessions": [
+      {
+        "weekday": 1,
+        "open": "09:30",
+        "close": "16:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 2,
+        "open": "09:30",
+        "close": "16:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 3,
+        "open": "09:30",
+        "close": "16:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 4,
+        "open": "09:30",
+        "close": "16:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 5,
+        "open": "09:30",
+        "close": "16:00",
+        "close_day_offset": 0
+      }
+    ]
+  },
+  "usd_index": {
+    "time_zone": "UTC",
+    "trading_day_rule": "session_start",
+    "reference": "同花顺美元指数公开行情常规时段",
+    "sessions": [
+      {
+        "weekday": 1,
+        "open": "00:00",
+        "close": "00:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 2,
+        "open": "00:00",
+        "close": "00:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 3,
+        "open": "00:00",
+        "close": "00:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 4,
+        "open": "00:00",
+        "close": "00:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 5,
+        "open": "00:00",
+        "close": "00:00",
+        "close_day_offset": 1
+      }
+    ]
+  },
+  "ice_brent": {
+    "time_zone": "Europe/London",
+    "trading_day_rule": "session_end",
+    "reference": "ICE Futures Europe 布伦特原油常规电子交易时段",
+    "sessions": [
+      {
+        "weekday": 0,
+        "open": "23:00",
+        "close": "23:00",
+        "close_day_offset": 1
+      },
+      {
+        "weekday": 2,
+        "open": "01:00",
+        "close": "23:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 3,
+        "open": "01:00",
+        "close": "23:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 4,
+        "open": "01:00",
+        "close": "23:00",
+        "close_day_offset": 0
+      },
+      {
+        "weekday": 5,
+        "open": "01:00",
+        "close": "23:00",
+        "close_day_offset": 0
+      }
+    ]
+  },
+  "fuyao_unverified": {
+    "time_zone": "Asia/Shanghai",
+    "trading_day_rule": "session_start",
+    "reference": "Fuyao per-contract absolute trade_time exists; recurring holiday/session calendar has not yet been verified",
+    "sessions": []
+  }
+}

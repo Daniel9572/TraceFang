@@ -49,7 +49,9 @@ PERIOD_DEFINITIONS: dict[str, PeriodDefinition] = {
 }
 
 _DEFAULT_BAR_PAGE_SIZE = 500
-_PERIOD_BAR_MATERIALIZATION_ALGORITHM = "period-bars-v1"
+_LIVE_MINUTE_CACHE_SIZE = max(item.minutes or 0 for item in PERIOD_DEFINITIONS.values())
+_PERIOD_BAR_MATERIALIZATION_ALGORITHM = "period-bars-v2"
+_MAX_READ_OVERLAY_MUTATIONS = 20_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,25 @@ class PeriodBarPage:
 class PeriodBarInputChange:
     mutation_id: int
     open_time: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodBarBucketAggregate:
+    first_open_time: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None
+    all_final: bool
+    any_authoritative: bool
+    finalized_at: datetime | None
+    revision: int
+    component_count: int
+    provider_symbol: str
+    evidence_channel_id: str
+    observed_at: datetime
+    received_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +162,15 @@ class PeriodBarStore(Protocol):
         count: int,
     ) -> tuple[PeriodBarInputChange, ...]: ...
 
+    async def aggregate_realtime_bar_bucket(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> PeriodBarBucketAggregate | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class _SessionOccurrence:
@@ -154,6 +184,8 @@ class _Bucket:
     key: str
     start: datetime
     end: datetime
+    evidence_start: datetime | None = None
+    evidence_end: datetime | None = None
 
 
 def _clock(value: object) -> time:
@@ -208,15 +240,15 @@ def _session_occurrence(
     return None
 
 
-def _trading_day_end(
+def _trading_day_bounds(
     trading_date: date,
     schedule: Mapping[str, Any] | None,
-) -> datetime | None:
+) -> tuple[datetime, datetime] | None:
     if not schedule or not schedule.get("sessions"):
         return None
     zone = ZoneInfo(str(schedule["time_zone"]))
     rule = str(schedule.get("trading_day_rule", "session_end"))
-    ends: list[datetime] = []
+    occurrences: list[tuple[datetime, datetime]] = []
     for day_offset in range(-3, 2):
         start_date = trading_date + timedelta(days=day_offset)
         schedule_weekday = (start_date.weekday() + 1) % 7
@@ -230,8 +262,28 @@ def _trading_day_end(
                 tzinfo=zone,
             )
             if _trading_date_for(start, end, rule) == trading_date:
-                ends.append(end.astimezone(UTC))
-    return max(ends, default=None)
+                occurrences.append((start.astimezone(UTC), end.astimezone(UTC)))
+    if not occurrences:
+        return None
+    return min(start for start, _ in occurrences), max(end for _, end in occurrences)
+
+
+def _trading_period_bounds(
+    start_date: date,
+    end_date: date,
+    schedule: Mapping[str, Any] | None,
+) -> tuple[datetime, datetime] | None:
+    if not schedule or not schedule.get("sessions"):
+        return None
+    first = last = None
+    for offset in range(min(7, (end_date - start_date).days)):
+        if first is None:
+            first = _trading_day_bounds(start_date + timedelta(days=offset), schedule)
+        if last is None:
+            last = _trading_day_bounds(end_date - timedelta(days=offset + 1), schedule)
+        if first is not None and last is not None:
+            return first[0], last[1]
+    return None
 
 
 def _calendar_bounds(value: date, unit: str) -> tuple[date, date]:
@@ -285,9 +337,47 @@ def _bucket_for(
     start_date, end_date = _calendar_bounds(trading_date, str(definition.calendar_unit))
     start = datetime.combine(start_date, time(), tzinfo=zone).astimezone(UTC)
     end = datetime.combine(end_date, time(), tzinfo=zone).astimezone(UTC)
-    if definition.calendar_unit == "day":
-        end = _trading_day_end(trading_date, schedule) or end
-    return _Bucket(f"calendar:{definition.calendar_unit}:{start_date.isoformat()}", start, end)
+    evidence = _trading_period_bounds(start_date, end_date, schedule)
+    if evidence is not None and definition.calendar_unit == "day":
+        end = evidence[1]
+    return _Bucket(
+        f"calendar:{definition.calendar_unit}:{start_date.isoformat()}",
+        start,
+        end,
+        evidence[0] if evidence is not None else start,
+        evidence[1] if evidence is not None else end,
+    )
+
+
+def _previous_bucket(
+    bucket: _Bucket,
+    definition: PeriodDefinition,
+    schedule: Mapping[str, Any] | None,
+) -> _Bucket:
+    boundary = bucket.evidence_start or bucket.start
+    probe = boundary - timedelta(microseconds=1)
+    if schedule and schedule.get("sessions") and _session_occurrence(probe, schedule) is None:
+        zone = ZoneInfo(str(schedule["time_zone"]))
+        local_date = boundary.astimezone(zone).date()
+        ends: list[datetime] = []
+        for offset in range(8):
+            start_date = local_date - timedelta(days=offset)
+            for session in schedule["sessions"]:
+                if int(session["weekday"]) != (start_date.weekday() + 1) % 7:
+                    continue
+                end = datetime.combine(
+                    start_date + timedelta(days=int(session["close_day_offset"])),
+                    _clock(session["close"]),
+                    tzinfo=zone,
+                ).astimezone(UTC)
+                if end <= boundary:
+                    ends.append(end)
+        if ends:
+            probe = max(ends) - timedelta(microseconds=1)
+    previous = _bucket_for(probe, definition, schedule)
+    if previous.start >= bucket.start:
+        raise RuntimeError("period Bar bucket cursor did not advance")
+    return previous
 
 
 def project_period_bars(
@@ -296,6 +386,7 @@ def project_period_bars(
     period_id: str,
     schedule: Mapping[str, Any] | None,
     now: datetime | None = None,
+    _resolved_buckets: Mapping[datetime, _Bucket] | None = None,
 ) -> tuple[RealtimeBar, ...]:
     definition = PERIOD_DEFINITIONS.get(period_id)
     if definition is None:
@@ -303,7 +394,9 @@ def project_period_bars(
     observed_now = (now or datetime.now(UTC)).astimezone(UTC)
     grouped: dict[str, tuple[_Bucket, list[RealtimeBar]]] = {}
     for row in sorted(rows, key=lambda item: item.open_time):
-        bucket = _bucket_for(row.open_time, definition, schedule)
+        bucket = (
+            _resolved_buckets.get(row.open_time) if _resolved_buckets is not None else None
+        ) or _bucket_for(row.open_time, definition, schedule)
         grouped.setdefault(bucket.key, (bucket, []))[1].append(row)
 
     projected: list[RealtimeBar] = []
@@ -311,7 +404,7 @@ def project_period_bars(
         first = members[0]
         latest = max(members, key=lambda item: (item.open_time, item.source.received_at))
         all_final = all(item.state is BarState.FINAL for item in members)
-        if all_final and observed_now >= bucket.end:
+        if all_final and observed_now >= (bucket.evidence_end or bucket.end):
             state = BarState.FINAL
         elif any(item.state is not BarState.PROVISIONAL_QUOTE for item in members):
             state = BarState.PROVISIONAL_AUTHORITATIVE
@@ -351,8 +444,13 @@ def project_period_bars(
                         "derivation": "backend_period_projection",
                         "period_id": period_id,
                         "bucket_first_open_time": first.open_time.isoformat(),
-                        "bucket_end": bucket.end.isoformat(),
-                        "component_count": len(members),
+                        "bucket_end": (bucket.evidence_end or bucket.end).isoformat(),
+                        "component_count": sum(
+                            int((item.source.raw_payload or {}).get("component_count", 1))
+                            if (item.source.raw_payload or {}).get("derivation") == "period_prefix"
+                            else 1
+                            for item in members
+                        ),
                     },
                 ),
                 evidence_channel_id=latest.evidence_channel_id,
@@ -405,9 +503,7 @@ class PeriodBarService:
             tuple[str, Instrument, str, str], dict[datetime, RealtimeBar]
         ] = {}
         self._live_buckets: dict[tuple[str, Instrument, str], _Bucket] = {}
-        self._live_minutes: dict[
-            tuple[str, Instrument], dict[datetime, RealtimeBar]
-        ] = {}
+        self._live_minutes: dict[tuple[str, Instrument], dict[datetime, RealtimeBar]] = {}
 
     def seed_live(
         self,
@@ -419,6 +515,94 @@ class PeriodBarService:
 
         for row in sorted(rows, key=lambda item: item.open_time):
             self.accept_live(row, schedule=schedule, period_ids=())
+
+    async def prepare_live_period(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+    ) -> None:
+        """Restore the entire active bucket before publishing its first live revision."""
+        if period_id in {"timeline", "1s", "1m"}:
+            return
+        aggregate_loader = getattr(self._store, "aggregate_realtime_bar_bucket", None)
+        if not callable(aggregate_loader):
+            return
+        definition = PERIOD_DEFINITIONS[period_id]
+        count = min(REALTIME_BAR_READ_PAGE_SIZE_MAX, definition.minutes or 240)
+        rows = await self._realtime_bars.get_bars_before(
+            instrument,
+            source_id=source_id,
+            count=count,
+        )
+        if not rows:
+            return
+        latest = rows[-1]
+        self.seed_live(rows, schedule=schedule)
+        bucket = _bucket_for(latest.open_time, PERIOD_DEFINITIONS[period_id], schedule)
+        key = (source_id, instrument, period_id)
+        component_key = (*key, bucket.key)
+        # Retain hot components so corrections can lower an earlier high/low.
+        components = {
+            at: value
+            for at, value in self._live_minutes[(source_id, instrument)].items()
+            if (bucket.evidence_start or bucket.start) <= at < (bucket.evidence_end or bucket.end)
+        }
+        prefix_end = min(components)
+        prefix_start = bucket.evidence_start or bucket.start
+        if prefix_start < prefix_end:
+            prefix = await aggregate_loader(
+                instrument,
+                source_id=source_id,
+                start=prefix_start,
+                end=prefix_end,
+            )
+            if prefix is not None:
+                components[prefix.first_open_time] = RealtimeBar(
+                    instrument=instrument,
+                    interval=timedelta(minutes=1),
+                    open_time=prefix.first_open_time,
+                    open=prefix.open,
+                    high=prefix.high,
+                    low=prefix.low,
+                    close=prefix.close,
+                    volume=prefix.volume,
+                    source=SourceMetadata(
+                        provider=source_id,
+                        provider_symbol=prefix.provider_symbol,
+                        observed_at=prefix.observed_at,
+                        received_at=prefix.received_at,
+                        raw_payload={
+                            "derivation": "period_prefix",
+                            "component_count": prefix.component_count,
+                        },
+                    ),
+                    evidence_channel_id=prefix.evidence_channel_id,
+                    state=(
+                        BarState.FINAL
+                        if prefix.all_final
+                        else BarState.PROVISIONAL_AUTHORITATIVE
+                        if prefix.any_authoritative
+                        else BarState.PROVISIONAL_QUOTE
+                    ),
+                    revision=prefix.revision,
+                    finalized_at=prefix.finalized_at if prefix.all_final else None,
+                )
+        # Newer minute events may have arrived while the database read was pending.
+        components.update(
+            {
+                at: value
+                for at, value in self._live_minutes[(source_id, instrument)].items()
+                if prefix_end <= at < (bucket.evidence_end or bucket.end)
+            }
+        )
+        active = self._live_buckets.get(key)
+        if active is not None and active.start > bucket.start:
+            return
+        self._live_buckets[key] = bucket
+        self._live_components[component_key] = components
 
     def accept_live(
         self,
@@ -448,7 +632,7 @@ class PeriodBarService:
             )
         ):
             minute_rows[bar.open_time] = bar
-        overflow = len(minute_rows) - REALTIME_BAR_READ_PAGE_SIZE_MAX
+        overflow = len(minute_rows) - _LIVE_MINUTE_CACHE_SIZE
         if overflow > 0:
             for open_time in sorted(minute_rows)[:overflow]:
                 minute_rows.pop(open_time, None)
@@ -500,6 +684,7 @@ class PeriodBarService:
                 tuple(components.values()),
                 period_id=period_id,
                 schedule=schedule,
+                _resolved_buckets={at: bucket for at in components},
                 now=bar.source.received_at,
             )
             value = next(
@@ -529,13 +714,437 @@ class PeriodBarService:
         # Query endpoints are deliberately read-only. Expensive precomputation, if
         # introduced later, belongs to an explicit background command and must not
         # be triggered by an HTTP GET.
-        return await self._get_unmaterialized_page(
+        materialized = await self._load_current_materialized_page(
             instrument,
             source_id=source_id,
             period_id=period_id,
             schedule=schedule,
             before=before,
             page_size=page_size,
+        )
+        if materialized is not None:
+            page = materialized
+        elif period_id not in {"timeline", "1s", "1m"} and callable(
+            getattr(self._store, "aggregate_realtime_bar_bucket", None)
+        ):
+            page = await self._get_aggregated_page(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                before=before,
+                page_size=page_size,
+            )
+        else:
+            page = await self._get_unmaterialized_page(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                before=before,
+                page_size=page_size,
+            )
+        if (
+            before is None
+            and period_id not in {"timeline", "1s", "1m"}
+            and self._live_minutes.get((source_id, instrument))
+        ):
+            # Persistence is asynchronous. A latest-page snapshot must include
+            # the same hot minute replacements as its WebSocket updates.
+            await self.prepare_live_period(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+            )
+            active = self._live_buckets.get((source_id, instrument, period_id))
+            if active is not None:
+                components = self._live_components.get(
+                    (source_id, instrument, period_id, active.key)
+                )
+                if components:
+                    projected = project_period_bars(
+                        tuple(components.values()),
+                        period_id=period_id,
+                        schedule=schedule,
+                        _resolved_buckets={at: active for at in components},
+                    )
+                    values = {item.open_time: item for item in page.items}
+                    values.update({item.open_time: item for item in projected})
+                    items = tuple(sorted(values.values(), key=lambda item: item.open_time))[
+                        -page_size:
+                    ]
+                    page = replace(
+                        page,
+                        items=items,
+                        next_before=_payload_time(
+                            items[0], "bucket_first_open_time", items[0].open_time
+                        ),
+                        has_more=page.has_more or len(values) > page_size,
+                    )
+        return page
+
+    async def _get_aggregated_page(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        before: datetime | None,
+        page_size: int,
+    ) -> PeriodBarPage:
+        """Jump between indexed buckets instead of transferring their minute history."""
+        values: list[RealtimeBar] = []
+        cursor = before
+        batch_loader = getattr(self._store, "aggregate_realtime_bar_buckets", None)
+        first_loader = getattr(self._store, "first_realtime_bar_open_time", None)
+        first_open_time = (
+            await first_loader(instrument, source_id=source_id)
+            if callable(batch_loader) and callable(first_loader)
+            else None
+        )
+        while len(values) <= page_size:
+            rows = await self._realtime_bars.get_bars_before(
+                instrument,
+                source_id=source_id,
+                before=cursor,
+                count=1,
+            )
+            if not rows:
+                break
+            bucket = _bucket_for(rows[-1].open_time, PERIOD_DEFINITIONS[period_id], schedule)
+            if callable(batch_loader):
+                buckets = [bucket]
+                for _ in range(min(500, page_size - len(values))):
+                    if (
+                        first_open_time is not None
+                        and (buckets[-1].evidence_start or buckets[-1].start) <= first_open_time
+                    ):
+                        break
+                    buckets.append(
+                        _previous_bucket(buckets[-1], PERIOD_DEFINITIONS[period_id], schedule)
+                    )
+                aggregates = await batch_loader(
+                    instrument,
+                    source_id=source_id,
+                    bounds=tuple(
+                        (item.evidence_start or item.start, item.evidence_end or item.end)
+                        for item in buckets
+                    ),
+                )
+                for item, aggregate in zip(buckets, aggregates, strict=True):
+                    if aggregate is not None:
+                        values.append(
+                            self._project_aggregate(
+                                instrument,
+                                source_id=source_id,
+                                period_id=period_id,
+                                bucket=item,
+                                aggregate=aggregate,
+                            )
+                        )
+                if not any(aggregate is not None for aggregate in aggregates):
+                    return await self._get_unmaterialized_page(
+                        instrument,
+                        source_id=source_id,
+                        period_id=period_id,
+                        schedule=schedule,
+                        before=before,
+                        page_size=page_size,
+                    )
+                # A canonical bucket can be empty while its newest minute is
+                # still queued for persistence. Keep that hot minute visible.
+                if aggregates[0] is None:
+                    values.insert(
+                        len(values) - sum(item is not None for item in aggregates),
+                        project_period_bars(rows, period_id=period_id, schedule=schedule)[0],
+                    )
+                cursor = buckets[-1].evidence_start or buckets[-1].start
+                continue
+            value = await self._project_bucket(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                bucket=bucket,
+            )
+            if value is None:
+                # The minute may still be in the asynchronous persistence queue.
+                return await self._get_unmaterialized_page(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    schedule=schedule,
+                    before=before,
+                    page_size=page_size,
+                )
+            values.append(value)
+            next_cursor = min(rows[-1].open_time, bucket.evidence_start or bucket.start)
+            if cursor is not None and next_cursor >= cursor:
+                raise RuntimeError("period Bar bucket cursor did not advance")
+            cursor = next_cursor
+        ordered = tuple(reversed(values[:page_size]))
+        return PeriodBarPage(
+            period_id=period_id,
+            items=ordered,
+            next_before=(
+                _payload_time(ordered[0], "bucket_first_open_time", ordered[0].open_time)
+                if ordered
+                else None
+            ),
+            has_more=len(values) > page_size,
+        )
+
+    async def _load_current_materialized_page(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        before: datetime | None,
+        page_size: int,
+    ) -> PeriodBarPage | None:
+        definition = PERIOD_DEFINITIONS[period_id]
+        if self._store is None or definition.seconds is not None or period_id == "1m":
+            return None
+        materialization_version = _materialization_version(schedule)
+        state = await self._store.load_period_bar_materialization(
+            instrument,
+            source_id=source_id,
+            period_id=period_id,
+            materialization_version=materialization_version,
+        )
+        if state is None:
+            return None
+        target_mutation_id = await self._store.latest_realtime_bar_mutation_id(
+            instrument,
+            source_id=source_id,
+        )
+        affected: dict[str, _Bucket] = {}
+        mutation_cursor = state.processed_mutation_id
+        mutation_count = 0
+        definition = PERIOD_DEFINITIONS[period_id]
+        while mutation_cursor < target_mutation_id:
+            changes = await self._store.load_realtime_bar_input_changes(
+                instrument,
+                source_id=source_id,
+                after_mutation_id=mutation_cursor,
+                through_mutation_id=target_mutation_id,
+                count=min(
+                    REALTIME_BAR_READ_PAGE_SIZE_MAX,
+                    _MAX_READ_OVERLAY_MUTATIONS - mutation_count,
+                ),
+            )
+            if not changes:
+                break
+            mutation_count += len(changes)
+            for change in changes:
+                bucket = _bucket_for(change.open_time, definition, schedule)
+                if (
+                    state.oldest_bucket_open_time is None
+                    or bucket.start < state.oldest_bucket_open_time
+                ):
+                    return None
+                if before is None or bucket.start < before:
+                    affected[bucket.key] = bucket
+            next_cursor = max(item.mutation_id for item in changes)
+            if next_cursor <= mutation_cursor:
+                return None
+            mutation_cursor = next_cursor
+            if (
+                mutation_count >= _MAX_READ_OVERLAY_MUTATIONS
+                and mutation_cursor < target_mutation_id
+            ):
+                return None
+        values = await self._store.load_materialized_period_bars_before(
+            instrument,
+            source_id=source_id,
+            period_id=period_id,
+            materialization_version=materialization_version,
+            before=before,
+            count=page_size + len(affected) + 1,
+        )
+        rows = {value.open_time: value for value in values}
+        for bucket in affected.values():
+            value = await self._project_bucket(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                bucket=bucket,
+            )
+            if value is None:
+                rows.pop(bucket.start, None)
+            else:
+                rows[bucket.start] = value
+        ordered = tuple(
+            value
+            for value in sorted(rows.values(), key=lambda item: item.open_time)
+            if before is None or value.open_time < before
+        )
+        if not ordered and not state.history_exhausted:
+            return None
+        items = ordered[-page_size:]
+        oldest_component = (
+            _payload_time(items[0], "bucket_first_open_time", items[0].open_time) if items else None
+        )
+        return PeriodBarPage(
+            period_id=period_id,
+            items=items,
+            next_before=oldest_component,
+            has_more=len(ordered) > page_size or not state.history_exhausted,
+        )
+
+    async def materialize_page(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        before: datetime | None = None,
+        page_size: int = _DEFAULT_BAR_PAGE_SIZE,
+    ) -> PeriodBarPage:
+        """Explicitly prepares one derived-period page and returns the persisted result.
+
+        This is a command-side operation used after an accepted history demand. It
+        keeps ordinary chart GETs read-only while making repeated large-period
+        reads independent of the size of the canonical minute history.
+        """
+
+        if period_id not in PERIOD_DEFINITIONS:
+            raise ValueError(f"unsupported chart period {period_id!r}")
+        if page_size < 1:
+            raise ValueError("page_size must be positive")
+        if before is not None and (before.tzinfo is None or before.utcoffset() is None):
+            raise ValueError("before must be timezone-aware")
+        definition = PERIOD_DEFINITIONS[period_id]
+        if self._store is None or definition.seconds is not None or period_id == "1m":
+            return await self._get_unmaterialized_page(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                before=before,
+                page_size=page_size,
+            )
+
+        materialization_version = _materialization_version(schedule)
+        key = (source_id, instrument, period_id, materialization_version)
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            state = (
+                await self._store.load_period_bar_materialization(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=materialization_version,
+                )
+                or PeriodBarMaterializationState()
+            )
+            target_mutation_id = await self._store.latest_realtime_bar_mutation_id(
+                instrument,
+                source_id=source_id,
+            )
+            refreshed = await self._refresh_changed_buckets(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                schedule=schedule,
+                materialization_version=materialization_version,
+                state=state,
+                target_mutation_id=target_mutation_id,
+            )
+            if refreshed != state:
+                state = refreshed
+                await self._store.save_period_bar_materialization(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=materialization_version,
+                    state=state,
+                )
+
+            if callable(getattr(self._store, "aggregate_realtime_bar_buckets", None)):
+                page = await self._get_aggregated_page(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    schedule=schedule,
+                    before=before,
+                    page_size=page_size,
+                )
+                await self._store.save_materialized_period_bars(
+                    page.items,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=materialization_version,
+                )
+                oldest = page.items[0].open_time if page.items else None
+                cursors = [
+                    value for value in (state.source_cursor, page.next_before) if value is not None
+                ]
+                oldest_buckets = [
+                    value for value in (state.oldest_bucket_open_time, oldest) if value is not None
+                ]
+                await self._store.save_period_bar_materialization(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=materialization_version,
+                    state=replace(
+                        state,
+                        source_cursor=min(cursors) if cursors else None,
+                        oldest_bucket_open_time=min(oldest_buckets) if oldest_buckets else None,
+                        history_exhausted=state.history_exhausted or not page.has_more,
+                        processed_mutation_id=target_mutation_id,
+                    ),
+                )
+                return page
+
+            values: tuple[RealtimeBar, ...] = ()
+            while True:
+                values = await self._store.load_materialized_period_bars_before(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=materialization_version,
+                    before=before,
+                    count=page_size + 1,
+                )
+                if len(values) > page_size or state.history_exhausted:
+                    break
+                next_state = await self._materialize_next_history_chunk(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    schedule=schedule,
+                    materialization_version=materialization_version,
+                    state=state,
+                    remaining_bars=page_size + 1 - len(values),
+                )
+                if next_state == state:
+                    break
+                state = next_state
+                await self._store.save_period_bar_materialization(
+                    instrument,
+                    source_id=source_id,
+                    period_id=period_id,
+                    materialization_version=materialization_version,
+                    state=state,
+                )
+
+        items = values[-page_size:]
+        oldest_component = (
+            _payload_time(items[0], "bucket_first_open_time", items[0].open_time) if items else None
+        )
+        return PeriodBarPage(
+            period_id=period_id,
+            items=items,
+            next_before=oldest_component,
+            has_more=len(values) > page_size or not state.history_exhausted,
         )
 
     async def _refresh_changed_buckets(
@@ -556,6 +1165,7 @@ class PeriodBarService:
 
         cursor = state.processed_mutation_id
         affected: dict[str, _Bucket] = {}
+        discovered_older_input = False
         definition = PERIOD_DEFINITIONS[period_id]
         while cursor < target_mutation_id:
             changes = await self._store.load_realtime_bar_input_changes(
@@ -570,10 +1180,11 @@ class PeriodBarService:
             for change in changes:
                 bucket = _bucket_for(change.open_time, definition, schedule)
                 if (
-                    state.history_exhausted
-                    or state.oldest_bucket_open_time is None
-                    or bucket.start >= state.oldest_bucket_open_time
+                    state.oldest_bucket_open_time is None
+                    or bucket.start < state.oldest_bucket_open_time
                 ):
+                    discovered_older_input = True
+                else:
                     affected[bucket.key] = bucket
             next_cursor = max(item.mutation_id for item in changes)
             if next_cursor <= cursor:
@@ -589,7 +1200,11 @@ class PeriodBarService:
                 materialization_version=materialization_version,
                 bucket=bucket,
             )
-        return replace(state, processed_mutation_id=target_mutation_id)
+        return replace(
+            state,
+            history_exhausted=state.history_exhausted and not discovered_older_input,
+            processed_mutation_id=target_mutation_id,
+        )
 
     async def _recompute_bucket(
         self,
@@ -601,19 +1216,13 @@ class PeriodBarService:
         materialization_version: str,
         bucket: _Bucket,
     ) -> None:
-        rows = await self._load_bucket_rows(
+        value = await self._project_bucket(
             instrument,
             source_id=source_id,
             period_id=period_id,
             schedule=schedule,
             bucket=bucket,
         )
-        projected = project_period_bars(
-            rows,
-            period_id=period_id,
-            schedule=schedule,
-        )
-        value = next((item for item in projected if item.open_time == bucket.start), None)
         if value is None:
             await self._store.delete_materialized_period_bar(
                 instrument,
@@ -628,6 +1237,97 @@ class PeriodBarService:
             source_id=source_id,
             period_id=period_id,
             materialization_version=materialization_version,
+        )
+
+    async def _project_bucket(
+        self,
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        schedule: Mapping[str, Any] | None,
+        bucket: _Bucket,
+    ) -> RealtimeBar | None:
+        aggregate_loader = getattr(self._store, "aggregate_realtime_bar_bucket", None)
+        if callable(aggregate_loader):
+            aggregate = await aggregate_loader(
+                instrument,
+                source_id=source_id,
+                start=bucket.evidence_start or bucket.start,
+                end=bucket.evidence_end or bucket.end,
+            )
+            if aggregate is None:
+                return None
+            return self._project_aggregate(
+                instrument,
+                source_id=source_id,
+                period_id=period_id,
+                bucket=bucket,
+                aggregate=aggregate,
+            )
+
+        rows = await self._load_bucket_rows(
+            instrument,
+            source_id=source_id,
+            period_id=period_id,
+            schedule=schedule,
+            bucket=bucket,
+        )
+        projected = project_period_bars(
+            rows,
+            period_id=period_id,
+            schedule=schedule,
+        )
+        return next((item for item in projected if item.open_time == bucket.start), None)
+
+    @staticmethod
+    def _project_aggregate(
+        instrument: Instrument,
+        *,
+        source_id: str,
+        period_id: str,
+        bucket: _Bucket,
+        aggregate: PeriodBarBucketAggregate,
+    ) -> RealtimeBar:
+        definition = PERIOD_DEFINITIONS[period_id]
+        now = datetime.now(UTC)
+        if aggregate.all_final and now >= (bucket.evidence_end or bucket.end):
+            state = BarState.FINAL
+        elif aggregate.any_authoritative:
+            state = BarState.PROVISIONAL_AUTHORITATIVE
+        else:
+            state = BarState.PROVISIONAL_QUOTE
+        interval = (
+            timedelta(minutes=definition.minutes)
+            if definition.minutes is not None
+            else bucket.end - bucket.start
+        )
+        return RealtimeBar(
+            instrument=instrument,
+            interval=interval,
+            open_time=bucket.start,
+            open=aggregate.open,
+            high=aggregate.high,
+            low=aggregate.low,
+            close=aggregate.close,
+            volume=aggregate.volume,
+            source=SourceMetadata(
+                provider=source_id,
+                provider_symbol=aggregate.provider_symbol,
+                observed_at=aggregate.observed_at,
+                received_at=aggregate.received_at,
+                raw_payload={
+                    "derivation": "backend_period_projection",
+                    "period_id": period_id,
+                    "bucket_first_open_time": aggregate.first_open_time.isoformat(),
+                    "bucket_end": (bucket.evidence_end or bucket.end).isoformat(),
+                    "component_count": aggregate.component_count,
+                },
+            ),
+            evidence_channel_id=aggregate.evidence_channel_id,
+            state=state,
+            revision=aggregate.revision,
+            finalized_at=aggregate.finalized_at if state is BarState.FINAL else None,
         )
 
     async def _load_bucket_rows(
@@ -779,10 +1479,11 @@ class PeriodBarService:
         estimated_minutes_per_bar = definition.minutes or 24 * 60
         cursor = before
         minute_rows: dict[datetime, RealtimeBar] = {}
+        resolved_buckets: dict[datetime, _Bucket] = {}
+        bucket_keys: set[str] = set()
         exhausted = False
-        projected: tuple[RealtimeBar, ...] = ()
-        while len(projected) <= page_size:
-            remaining_bars = page_size + 1 - len(projected)
+        while len(bucket_keys) <= page_size:
+            remaining_bars = page_size + 1 - len(bucket_keys)
             minute_transport_size = max(
                 1,
                 min(
@@ -801,22 +1502,24 @@ class PeriodBarService:
                 break
             for row in page:
                 minute_rows[row.open_time] = row
-            projected = project_period_bars(
-                tuple(minute_rows.values()),
-                period_id=period_id,
-                schedule=schedule,
-            )
+                bucket = _bucket_for(row.open_time, definition, schedule)
+                resolved_buckets[row.open_time] = bucket
+                bucket_keys.add(bucket.key)
             next_cursor = page[0].open_time
             if cursor is not None and next_cursor >= cursor:
                 raise RuntimeError("minute Bar cursor did not advance")
             cursor = next_cursor
 
-        if not projected and minute_rows:
-            projected = project_period_bars(
+        projected = (
+            project_period_bars(
                 tuple(minute_rows.values()),
                 period_id=period_id,
                 schedule=schedule,
+                _resolved_buckets=resolved_buckets,
             )
+            if minute_rows
+            else ()
+        )
         items = projected[-page_size:]
         oldest_component = (
             _payload_time(items[0], "bucket_first_open_time", items[0].open_time) if items else None

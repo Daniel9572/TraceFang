@@ -4,7 +4,7 @@ export interface BarPageCacheKey {
   code: string;
   sourceId: string;
   periodId: string;
-  before: number;
+  boundary: string;
   pageSize: number;
 }
 
@@ -13,7 +13,7 @@ function keyOf(value: BarPageCacheKey): string {
     value.sourceId,
     value.code,
     value.periodId,
-    value.before,
+    value.boundary,
     value.pageSize,
   ].join(":");
 }

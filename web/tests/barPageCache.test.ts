@@ -5,11 +5,24 @@ import { BoundedBarPageCache, type BarPageCacheKey } from "../src/barPageCache.t
 import type { ChartBarPage } from "../src/types.ts";
 
 function key(before: number): BarPageCacheKey {
-  return { code: "XAUUSD", sourceId: "jin10_client", periodId: "1s", before, pageSize: 500 };
+  return {
+    code: "XAUUSD",
+    sourceId: "jin10_client",
+    periodId: "1s",
+    boundary: `before:${before}`,
+    pageSize: 500,
+  };
 }
 
 function page(periodId = "1s"): ChartBarPage {
-  return { period_id: periodId, items: [], next_before: null, has_more: false };
+  return {
+    period_id: periodId,
+    items: [],
+    next_before: null,
+    next_cursor: null,
+    local_status: "empty",
+    has_more: false,
+  };
 }
 
 test("evicts the least recently used immutable history page", () => {

@@ -16,5 +16,6 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: true,
+    rollupOptions: { output: { manualChunks: { charts: ["lightweight-charts"], react: ["react", "react-dom"] } } },
   },
 });

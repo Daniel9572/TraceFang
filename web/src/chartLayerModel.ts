@@ -11,6 +11,7 @@ import type {
   ExpertValueZone,
 } from "./expertTypes";
 import type { ExpertMarketStructureEvent } from "./expertSmartMoney.ts";
+import { volumeProfileSettings, type VolumeProfileSettings } from "./volumeProfile.ts";
 
 export const EXPERT_LAYER_STORAGE_KEY = "market-expert-layers-v1";
 export const LEGACY_DRAWING_STORAGE_KEY = "market-expert-drawings-v1";
@@ -20,10 +21,11 @@ export const EXPERT_GAP_LAYER_ID = "layer:annotation:gaps";
 export const EXPERT_EVENT_LAYER_ID = "layer:annotation:events";
 export const EXPERT_TREND_LINE_LAYER_ID = "layer:annotation:trend-lines";
 export const EXPERT_PATTERN_LAYER_ID = "layer:annotation:patterns";
+export const EXPERT_VOLUME_PROFILE_LAYER_ID = "layer:annotation:volume-profile";
 export const DEFAULT_DRAWING_LAYER_ID = "layer:drawing:1";
 
 export type ExpertLayerKind = "price" | "drawing" | "indicator" | "annotation";
-export type ExpertAnnotationId = "sessions" | "gaps" | "events" | "analysis" | "trend-lines" | "patterns";
+export type ExpertAnnotationId = "sessions" | "gaps" | "events" | "analysis" | "trend-lines" | "patterns" | "volume-profile";
 
 interface ExpertLayerBase {
   id: string;
@@ -45,13 +47,15 @@ export interface ExpertDrawingLayer extends ExpertLayerBase {
 export interface ExpertIndicatorLayer extends ExpertLayerBase {
   kind: "indicator";
   indicatorId: ExpertIndicatorId;
-  placement: "pane";
+  placement: "overlay";
   height: number;
+  verticalPosition?: number;
 }
 
 export interface ExpertAnnotationLayer extends ExpertLayerBase {
   kind: "annotation";
   annotationId: ExpertAnnotationId;
+  volumeProfile?: VolumeProfileSettings;
 }
 
 export type ExpertLayerDefinition =
@@ -122,6 +126,7 @@ const ANNOTATION_NAMES: Record<ExpertAnnotationId, string> = {
   analysis: "策略标注",
   "trend-lines": "智能趋势线",
   patterns: "结构印记",
+  "volume-profile": "成交量价格分布≈",
 };
 
 const INDICATOR_NAMES: Record<ExpertIndicatorId, string> = {
@@ -149,22 +154,31 @@ function indicatorHeight(value: unknown): number {
   return Math.round(Math.min(MAX_INDICATOR_HEIGHT, Math.max(MIN_INDICATOR_HEIGHT, height)));
 }
 
+function indicatorVerticalPosition(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(1, Math.max(0, value))
+    : undefined;
+}
+
 function validDrawing(value: unknown): value is ExpertDrawing {
   if (!isRecord(value) || !isRecord(value.start) || !isRecord(value.end)) return false;
   return typeof value.id === "string"
-    && (value.type === "trend" || value.type === "horizontal")
+    && (["trend", "ray", "horizontal", "vertical", "channel", "rectangle", "fibonacci", "text", "measure"].includes(String(value.type)))
     && Number.isFinite(value.start.time)
     && Number.isFinite(value.start.price)
     && Number.isFinite(value.end.time)
-    && Number.isFinite(value.end.price);
+    && Number.isFinite(value.end.price)
+    && (value.type !== "channel" || (isRecord(value.widthAnchor) && Number.isFinite(value.widthAnchor.time) && Number.isFinite(value.widthAnchor.price)));
 }
 
 function parseDrawings(value: unknown): ExpertDrawing[] {
   if (!Array.isArray(value)) return [];
   return value.filter(validDrawing).map((drawing) => ({
     ...drawing,
-    color: typeof drawing.color === "string" ? drawing.color : "#e5edf1",
-    label: typeof drawing.label === "string" ? drawing.label : "画线",
+    color: typeof drawing.color === "string" && drawing.color !== "#e5edf1" ? drawing.color : "#245c8c",
+    label: cleanName(drawing.label, "画线"),
+    ...(typeof drawing.locked === "boolean" ? { locked: drawing.locked } : {}),
+    ...(drawing.type === "text" ? { text: typeof drawing.text === "string" ? drawing.text.slice(0, 240) : "文字注释" } : {}),
   }));
 }
 
@@ -194,8 +208,9 @@ function canonicalAnnotationLayer(annotationId: ExpertAnnotationId, order: numbe
     kind: "annotation",
     annotationId,
     name: ANNOTATION_NAMES[annotationId],
-    visible: annotationId === "analysis" || annotationId === "trend-lines" || annotationId === "patterns",
+    visible: annotationId === "analysis" || annotationId === "trend-lines" || annotationId === "patterns" || annotationId === "volume-profile",
     order,
+    ...(annotationId === "volume-profile" ? { volumeProfile: volumeProfileSettings() } : {}),
   };
 }
 
@@ -210,7 +225,7 @@ function canonicalIndicatorLayer(
     name: INDICATOR_NAMES[indicatorId],
     visible: true,
     order,
-    placement: "pane",
+    placement: "overlay",
     height: MIN_INDICATOR_HEIGHT,
   };
 }
@@ -250,6 +265,7 @@ export function createDefaultExpertLayerWorkspace(
       canonicalIndicatorLayer("rsi", 80),
       canonicalIndicatorLayer("kdj", 90),
       canonicalIndicatorLayer("macd", 100),
+      canonicalAnnotationLayer("volume-profile", 110),
     ]),
   };
 }
@@ -279,8 +295,9 @@ function parseLayer(value: unknown, fallbackOrder: number): ExpertLayerDefinitio
       name: INDICATOR_NAMES[value.indicatorId],
       visible,
       order,
-      placement: "pane",
+      placement: "overlay",
       height: indicatorHeight(value.height),
+      verticalPosition: indicatorVerticalPosition(value.verticalPosition),
     };
   }
   if (
@@ -292,6 +309,7 @@ function parseLayer(value: unknown, fallbackOrder: number): ExpertLayerDefinitio
       || value.annotationId === "analysis"
       || value.annotationId === "trend-lines"
       || value.annotationId === "patterns"
+      || value.annotationId === "volume-profile"
     )
   ) {
     return {
@@ -301,6 +319,9 @@ function parseLayer(value: unknown, fallbackOrder: number): ExpertLayerDefinitio
       name: ANNOTATION_NAMES[value.annotationId],
       visible,
       order,
+      ...(value.annotationId === "volume-profile" ? {
+        volumeProfile: volumeProfileSettings(isRecord(value.volumeProfile) ? value.volumeProfile : undefined),
+      } : {}),
     };
   }
   return null;
@@ -352,7 +373,7 @@ export function readExpertLayerWorkspace(
       layers.filter((layer): layer is ExpertAnnotationLayer => layer.kind === "annotation")
         .map((layer) => layer.annotationId),
     );
-    for (const annotationId of ["sessions", "gaps", "trend-lines", "patterns", "analysis", "events"] as const) {
+    for (const annotationId of ["sessions", "gaps", "trend-lines", "patterns", "analysis", "events", "volume-profile"] as const) {
       if (!annotations.has(annotationId)) layers.push(canonicalAnnotationLayer(annotationId, layers.length * 10));
     }
     const indicators = new Set(
@@ -585,6 +606,33 @@ export function resizeExpertIndicatorLayer(
     ? { ...layer, height: nextHeight }
     : layer);
   return { ...workspace, layers };
+}
+
+export function positionExpertIndicatorLayer(
+  workspace: ExpertLayerWorkspace,
+  layerId: string,
+  position: number | null,
+): ExpertLayerWorkspace {
+  const verticalPosition = indicatorVerticalPosition(position);
+  let changed = false;
+  const layers = workspace.layers.map((layer) => {
+    if (layer.id !== layerId || layer.kind !== "indicator" || layer.verticalPosition === verticalPosition) return layer;
+    changed = true;
+    return { ...layer, verticalPosition };
+  });
+  return changed ? { ...workspace, layers } : workspace;
+}
+
+export function configureExpertVolumeProfile(
+  workspace: ExpertLayerWorkspace,
+  settings: Partial<VolumeProfileSettings>,
+): ExpertLayerWorkspace {
+  return {
+    ...workspace,
+    layers: workspace.layers.map((layer) => layer.kind === "annotation" && layer.annotationId === "volume-profile"
+      ? { ...layer, volumeProfile: volumeProfileSettings({ ...layer.volumeProfile, ...settings }) }
+      : layer),
+  };
 }
 
 export function buildExpertChartLayers(

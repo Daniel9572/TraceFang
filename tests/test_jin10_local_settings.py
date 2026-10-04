@@ -1,39 +1,43 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 
 from tracefang.infrastructure.providers.jin10_local.settings import Jin10LocalSettings
 
 
 class Jin10LocalSettingsTests(unittest.TestCase):
-    def test_resolves_user_id_from_latest_local_log(self) -> None:
-        token = "s" * 36
-        with tempfile.TemporaryDirectory() as directory:
-            log = Path(directory, "log_20260806_002004.txt")
-            log.write_text(
-                "发送行情登录 userId=8616672 tokenLen=36 vip=false\n",
-                encoding="utf-8",
-            )
-            settings = Jin10LocalSettings.from_env(
-                {
-                    "JIN10_LOCAL_SESSION_TOKEN": token,
-                    "JIN10_LOCAL_LOG_DIRECTORY": directory,
-                }
-            )
-        self.assertEqual(settings.user_id, 8616672)
-        self.assertEqual(settings.quote_frequency_ms, 1000)
-        self.assertNotIn(token, repr(settings))
+    def test_uses_explicit_session_token_without_an_account_id(self) -> None:
+        settings = Jin10LocalSettings.from_env(
+            {"JIN10_LOCAL_SESSION_TOKEN": "s" * 36}
+        )
 
-    def test_explicit_user_id_does_not_require_desktop_log(self) -> None:
+        credentials = settings.credentials()
+
+        self.assertEqual(credentials.session_token, "s" * 36)
+        self.assertFalse(hasattr(credentials, "user_id"))
+        self.assertEqual(settings.quote_frequency_ms, 1000)
+        self.assertNotIn("s" * 36, repr(settings))
+
+    def test_session_availability_is_not_required_during_static_setup(self) -> None:
+        settings = Jin10LocalSettings.from_env({})
+
+        self.assertIsNotNone(settings.session_resolver)
+
+    def test_history_backfill_settings_are_configurable(self) -> None:
         settings = Jin10LocalSettings.from_env(
             {
                 "JIN10_LOCAL_SESSION_TOKEN": "s" * 36,
-                "JIN10_LOCAL_USER_ID": "8616672",
+                "JIN10_LOCAL_KLINE_FILE_URL": "https://history.example.test/root/",
+                "JIN10_LOCAL_KLINE_FREQUENCY_MS": "4250",
+                "JIN10_LOCAL_KLINE_WAIT_TIMEOUT_SECONDS": "14",
+                "JIN10_LOCAL_KLINE_DOWNLOAD_TIMEOUT_SECONDS": "23",
             }
         )
-        self.assertEqual(settings.user_id, 8616672)
+
+        self.assertEqual(settings.kline_file_endpoint, "https://history.example.test/root")
+        self.assertEqual(settings.kline_frequency_ms, 4250)
+        self.assertEqual(settings.kline_wait_timeout_seconds, 14)
+        self.assertEqual(settings.kline_download_timeout_seconds, 23)
 
     def test_rejects_invalid_token_without_echoing_it(self) -> None:
         token = "too-short"

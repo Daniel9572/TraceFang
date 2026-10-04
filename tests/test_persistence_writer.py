@@ -111,3 +111,44 @@ class PersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedReadPoolRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_write_failure_retries_without_closing_read_pool(self):
+        import asyncpg
+
+        for failure in (asyncpg.DeadlockDetectedError("conflicting history write"), TimeoutError()):
+            with self.subTest(error=type(failure).__name__):
+
+                class RetryStore(MemoryStore):
+                    attempts = 0
+                    closes = 0
+
+                    def __init__(self, fail_error):
+                        super().__init__()
+                        self.failure = fail_error
+
+                    async def save_quote(self, value):
+                        self.attempts += 1
+                        if self.attempts == 1:
+                            raise self.failure
+                        await super().save_quote(value)
+
+                    async def close(self):
+                        self.closes += 1
+                        await super().close()
+
+                store = RetryStore(failure)
+                writer = BufferedMarketDataWriter(store, reconnect_seconds=0.01)
+                await writer.start()
+                try:
+                    value = quote()
+                    writer.submit_quote(value)
+                    await asyncio.wait_for(writer._queue.join(), timeout=1)
+                    self.assertEqual(store.quotes, [value])
+                    self.assertEqual(store.attempts, 2)
+                    self.assertEqual(store.closes, 0)
+                    self.assertTrue(store.opened)
+                    self.assertEqual(writer.health().state, "healthy")
+                finally:
+                    await writer.stop()

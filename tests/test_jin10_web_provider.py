@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from tracefang.application.provider_frames import ProviderFrame
@@ -46,6 +46,22 @@ class _RecordingSink:
 
 
 class Jin10WebProviderTests(unittest.TestCase):
+    def test_old_source_timestamp_is_preserved_instead_of_replaced_by_arrival(self) -> None:
+        provider = Jin10WebProvider(Jin10WebSettings())
+        timestamp = int((datetime.now(UTC) - timedelta(days=10)).timestamp())
+        provider._store_quote(
+            Jin10WebWireQuote(
+                provider_code="XAUUSD.GOODS",
+                timestamp=timestamp,
+                last_micros=4_252_340_000,
+                previous_close_micros=4_246_000_000,
+            ),
+            protocol=QUOTE_PUSH_PROTOCOL,
+        )
+        value = provider._latest["XAUUSD.GOODS"]
+        self.assertEqual(int(value.source.observed_at.timestamp()), timestamp)
+        self.assertIsNone(provider._fresh_quote("XAUUSD.GOODS"))
+
     def test_dispatches_every_decoded_quote_with_channel_sequence(self) -> None:
         provider = Jin10WebProvider(Jin10WebSettings())
         received = []
@@ -81,6 +97,7 @@ class Jin10WebProviderTests(unittest.TestCase):
         self.assertEqual(received[0].source.raw_payload["sequence"], 1)
         self.assertEqual(received[1].source.raw_payload["sequence"], 2)
         self.assertEqual(received[1].source.raw_payload["channel"], "jin10_public_websocket")
+        self.assertEqual(received[1].source.raw_payload["observation_kind"], "event")
         self.assertEqual(received[1].change, Decimal("6.360000"))
 
         provider.remove_quote_listener(received.append)

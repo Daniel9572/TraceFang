@@ -75,7 +75,10 @@ class LatestQuoteCache:
         current = self._values.get(key)
         if current == quote:
             return False
-        if current is not None and quote.source.received_at < current.source.received_at:
+        if current is not None and (quote.source.observed_at, quote.source.received_at) < (
+            current.source.observed_at,
+            current.source.received_at,
+        ):
             return False
         self._values[key] = quote
         return True
@@ -156,23 +159,28 @@ class QuoteViewService:
             allow_stale=True,
         )
 
-    def build_cached(self, instrument: Instrument, source_id: str) -> QuoteView:
+    def build_cached(
+        self, instrument: Instrument, source_id: str, *, allow_stale: bool = False
+    ) -> QuoteView:
         self._require_realtime_source(source_id)
         if source_id == TONGHUASHUN_FUTURES_SOURCE:
             return self._compose_direct(
                 instrument,
                 source_id,
                 self._cache.peek(instrument, source_id),
+                allow_stale=allow_stale,
             )
         if instrument == SPOT_GOLD_CNH_PER_GRAM:
             return self._compose_derived_gold(
                 self._cache.peek(SPOT_GOLD, JIN10_WEB_CHANNEL),
                 self._cache.peek(USD_CNH, JIN10_WEB_CHANNEL),
+                allow_stale=allow_stale,
             )
         return self._compose_client(
             instrument,
             self._cache.peek(instrument, JIN10_WEB_CHANNEL),
             self._cache.peek(instrument, JIN10_LOCAL_CHANNEL),
+            allow_stale=allow_stale,
         )
 
     @staticmethod
@@ -242,10 +250,10 @@ class QuoteViewService:
         allow_stale: bool = False,
     ) -> QuoteView:
         if price is None:
-            raise ProviderUnavailableError("金十客户端行情暂时没有实时价格")
+            raise ProviderUnavailableError("金十统一行情暂时没有实时价格")
         price_is_stale = self._is_stale(JIN10_WEB_CHANNEL, price)
         if price_is_stale and not allow_stale:
-            raise ProviderUnavailableError("金十客户端行情的实时价格已过期")
+            raise ProviderUnavailableError("金十统一行情的实时价格已过期")
 
         unavailable_fields = [
             field_name for field_name in _PRICE_FIELDS if getattr(price, field_name) is None
@@ -376,5 +384,4 @@ class QuoteViewService:
         )
 
     def _is_stale(self, source_id: str, quote: QuoteSnapshot) -> bool:
-        age = max(0.0, (datetime.now(UTC) - quote.source.received_at).total_seconds())
-        return age > self._stale_after(source_id)
+        return not quote.source.is_fresh(datetime.now(UTC), self._stale_after(source_id))

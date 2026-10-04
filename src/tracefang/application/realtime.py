@@ -50,10 +50,12 @@ class _Pump:
 class QuoteStreamCoordinator:
     """Passive fan-out for locally cached quotes; it never calls an upstream feed."""
 
-    def __init__(self, *, load_quote: LoadQuote) -> None:
+    def __init__(self, *, load_quote: LoadQuote, freshness_interval_seconds: float = 5) -> None:
         self._load_quote = load_quote
         self._pumps: dict[_StreamKey, _Pump] = {}
         self._lock = asyncio.Lock()
+        self._freshness_interval = freshness_interval_seconds
+        self._freshness_task: asyncio.Task[None] | None = None
 
     @asynccontextmanager
     async def subscribe(
@@ -90,6 +92,8 @@ class QuoteStreamCoordinator:
                 self._pumps[key] = pump
             pump.subscribers.add(queue)
             latest = pump.latest
+            if self._freshness_task is None:
+                self._freshness_task = asyncio.create_task(self._watch_freshness())
         if latest is not None:
             queue.put_nowait(latest)
         else:
@@ -105,8 +109,25 @@ class QuoteStreamCoordinator:
                         self._pumps.pop(key, None)
 
     async def close(self) -> None:
+        if self._freshness_task is not None:
+            self._freshness_task.cancel()
+            await asyncio.gather(self._freshness_task, return_exceptions=True)
+            self._freshness_task = None
         async with self._lock:
             self._pumps.clear()
+
+    async def _watch_freshness(self) -> None:
+        while True:
+            await asyncio.sleep(self._freshness_interval)
+            targets = {(pump.source, pump.instrument) for pump in self._pumps.values()}
+            for source, instrument in targets:
+                try:
+                    view = await self._load_quote(instrument, source)
+                except Exception as error:
+                    self.publish_unavailable(instrument, source, error)
+                else:
+                    if "last" in view.stale_fields:
+                        self.publish(view)
 
     def active_periods(self, instrument: Instrument, *, source: str) -> frozenset[str]:
         """Returns the resolutions currently consumed by browser connections."""
@@ -121,7 +142,11 @@ class QuoteStreamCoordinator:
         for pump in self._matching_pumps(view.source_id, view.quote.instrument):
             event = QuoteStreamEvent(
                 kind="quote",
-                state=QuoteStreamState.LIVE,
+                state=(
+                    QuoteStreamState.UNAVAILABLE
+                    if "last" in view.stale_fields
+                    else QuoteStreamState.LIVE
+                ),
                 emitted_at=datetime.now(UTC),
                 period_id=pump.period,
                 quote=view,
@@ -130,6 +155,8 @@ class QuoteStreamCoordinator:
 
     def publish_sample(self, sample: QuoteSample) -> None:
         for pump in self._matching_pumps(sample.source_id, sample.instrument):
+            if pump.period != "1s":
+                continue
             event = QuoteStreamEvent(
                 kind="sample",
                 state=QuoteStreamState.LIVE,
@@ -189,7 +216,11 @@ class QuoteStreamCoordinator:
         else:
             event = QuoteStreamEvent(
                 kind="quote",
-                state=QuoteStreamState.LIVE,
+                state=(
+                    QuoteStreamState.UNAVAILABLE
+                    if "last" in view.stale_fields
+                    else QuoteStreamState.LIVE
+                ),
                 emitted_at=datetime.now(UTC),
                 period_id=pump.period,
                 quote=view,
@@ -211,9 +242,7 @@ class QuoteStreamCoordinator:
                 while not queue.empty():
                     dropped.append(queue.get_nowait())
                 sequences = [
-                    item.delivery_sequence
-                    for item in dropped
-                    if item.delivery_sequence is not None
+                    item.delivery_sequence for item in dropped if item.delivery_sequence is not None
                 ]
                 fallback = max(1, delivered.delivery_sequence - 1)
                 queue.put_nowait(
