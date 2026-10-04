@@ -26,6 +26,7 @@ def load(name, relative):
 terminal = load('migration_terminal_handoff', 'scripts/migration-terminal-handoff.py')
 preflight = load('migration_space_preflight', 'scripts/migration-space-preflight.py')
 sealer = load('seal_migration_tools', 'scripts/seal-migration-tools.py')
+stop_evidence = load('legacy_stop_evidence', 'scripts/legacy-stop-evidence.py')
 
 
 def _write_json(path, value):
@@ -327,6 +328,148 @@ class ShortReader:
 
 
 class TerminalV3Guards(unittest.TestCase):
+    def test_capture_snapshot_copies_exact_bytes_and_refuses_an_open_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); source = root/'base.redb'; target = root/'independent.redb'
+            source.write_bytes(b'original native epoch and retained prefix')
+            before = source.stat(); content = source.read_bytes()
+            with mock.patch.object(terminal.subprocess, 'run',
+                                   return_value=types.SimpleNamespace(returncode=0, stdout=b'writer')):
+                with self.assertRaisesRegex(ValueError, 'no open handles'):
+                    terminal.clone_capture_snapshot(source, target)
+            self.assertFalse(target.exists())
+            proof = terminal.clone_capture_snapshot(source, target)
+            self.assertEqual(target.read_bytes(), content)
+            self.assertEqual(source.read_bytes(), content)
+            self.assertEqual(source.stat().st_ino, before.st_ino)
+            self.assertNotEqual(target.stat().st_ino, before.st_ino)
+            self.assertEqual(proof['sha256'], terminal.sha(source))
+            fallback = root/'independent-copy.redb'
+            original_run = terminal.subprocess.run
+            def unavailable_clone(command, **kwargs):
+                if command[:2] == ['/bin/cp', '-c']:
+                    return types.SimpleNamespace(returncode=1, stdout=b'')
+                return original_run(command, **kwargs)
+            with mock.patch.object(terminal.subprocess, 'run', side_effect=unavailable_clone):
+                copied = terminal.clone_capture_snapshot(source, fallback)
+            self.assertEqual(copied['method'], 'independent_copy')
+            self.assertEqual(fallback.read_bytes(), content)
+
+    def test_spool_uses_native_sequence_and_keeps_the_legacy_tail_binding(self):
+        early = {'stream': 'RAW', 'epoch': 'legacy-epoch', 'last_sequence': '3259671'}
+        manifest = {'raw': {**early, 'incremental_after': {'sequence': '3259671'},
+            'native_mapping': {'last_position': {'epoch': 'native-epoch',
+                'sequence': '535756', 'digest': 'a'*64}}}}
+        self.assertEqual(terminal.native_spool_through(manifest, early), '535756')
+        with self.assertRaisesRegex(ValueError, 'early tail differs'):
+            terminal.native_spool_through(manifest, {**early, 'last_sequence': '1'})
+        manifest['raw']['native_mapping']['last_position']['sequence'] = '0'
+        with self.assertRaisesRegex(ValueError, 'native capture boundary'):
+            terminal.native_spool_through(manifest, early)
+
+    def test_terminal_export_mapping_is_required_only_after_raw_import(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = root / 'base'; base.mkdir()
+            source = root / 'source'; source.mkdir()
+            for path, body in [(base/'raw.frames', b'base frames'), (base/'map.json', b'base map'),
+                               (source/'delta.frames', b'delta frames')]:
+                path.write_bytes(body)
+            base_raw = {'file': 'raw.frames', 'sha256': terminal.sha(base/'raw.frames'),
+                        'native_mapping': {'file': 'map.json', 'sha256': terminal.sha(base/'map.json')}}
+            _write_json(base/'manifest.json', {'id': 'base', 'raw': base_raw})
+            manifest = {'id': 'terminal', 'state': 'fixed_inputs_exported',
+                        'raw': {'file': 'delta.frames', 'sha256': terminal.sha(source/'delta.frames'),
+                            'state': 'fixed_range_exported', 'incremental_base': {
+                                'source_manifest_id': 'base', 'source_manifest_path': str(base/'manifest.json'),
+                                'source_manifest_sha256': terminal.sha(base/'manifest.json'), 'raw': base_raw}}}
+            _write_json(source/'manifest.json', manifest)
+            with self.assertRaisesRegex(ValueError, 'native raw mapping'):
+                terminal.verify_source_snapshot(source)
+            actual, before = terminal.verify_source_snapshot(source, require_mapping=False)
+            self.assertEqual(actual, manifest)
+            self.assertIn((base/'raw.frames').resolve(), before)
+            self.assertIn((base/'map.json').resolve(), before)
+            changed = json.loads(json.dumps(manifest)); changed['state'] = 'unknown'
+            _write_json(source/'manifest.json', changed)
+            with self.assertRaisesRegex(ValueError, 'explicit terminal export'):
+                terminal.verify_source_snapshot(source, require_mapping=False)
+            _write_json(source/'manifest.json', manifest)
+            (base/'map.json').write_bytes(b'changed map')
+            with self.assertRaisesRegex(ValueError, 'base archive/mapping changed'):
+                terminal.verify_source_snapshot(source, require_mapping=False)
+            (base/'map.json').write_bytes(b'base map')
+            (source/'native-map.json').write_bytes(b'actual imported map')
+            manifest['raw']['native_mapping'] = {'file': 'native-map.json',
+                                                  'sha256': terminal.sha(source/'native-map.json')}
+            _write_json(source/'manifest.json', manifest)
+            with self.assertRaisesRegex(ValueError, 'input changed'):
+                terminal.verify_pins(before)
+            imported, after = terminal.verify_source_snapshot(source)
+            terminal.verify_pins(after)
+            self.assertEqual(imported, manifest)
+            self.assertIn((source/'native-map.json').resolve(), after)
+
+    def test_export_resume_rejects_incomplete_stage_target_and_changed_core(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); old = root/'prior'; old.mkdir(); source = root/'source'; source.mkdir()
+            (source/'manifest.json').write_text('{}')
+            executor = root/'probe'; executor.write_bytes(b'exact executor')
+            seal_path = root/'tools.json'; seal_path.write_text('{}')
+            seal = {'backend_build_sha256': 'core', 'executables': {'probe': str(executor)}}
+            args = types.SimpleNamespace(resume_export_evidence=old, resume_tools_manifest=seal_path,
+                source=source, facts=root/'facts', capture=root/'capture',
+                progress_directory=root/'progress', clock_directory=root/'clock')
+            events = []
+            for phase in ('space-preflight-inputs', 'tail-before', 'terminal-export'):
+                log = old/(phase+'.log'); log.write_text('actual completed phase')
+                events.append({'phase': phase, 'state': 'complete', 'exit_code': 0, 'log': str(log)})
+            prior = {'schema': 'terminal-handoff-journal-v1', 'events': events,
+                'old_services_changed_by_this_tool': False, 'providers_started_by_this_tool': False,
+                'tools_manifest_sha256': terminal.sha(seal_path),
+                'source_path': str(source), 'facts_path': str(args.facts), 'capture_path': str(args.capture),
+                'progress_path': str(args.progress_directory), 'clock_path': str(args.clock_directory)}
+            tail = {'stream': 'RAW', 'epoch': 'epoch', 'last_sequence': '7'}
+            _write_json(old/'tail-before.json', tail)
+            manifest = {'raw': {'incremental_after': {'stream': 'RAW', 'epoch': 'epoch', 'sequence': '7'}}}
+            for mutate in (None, lambda p: p.update(source_path='another target'),
+                           lambda p: p['events'][-1].update(exit_code=1),
+                           lambda p: p['events'].append({'phase': 'raw-import', 'state': 'started'})):
+                changed = json.loads(json.dumps(prior))
+                if mutate: mutate(changed)
+                _write_json(old/'handoff-journal.json', changed)
+                with mock.patch.object(terminal, 'verify_seal', return_value=(seal, {}, {})), \
+                        mock.patch.object(terminal, 'verify_source_snapshot', return_value=(manifest, {})):
+                    if mutate:
+                        with self.assertRaises(ValueError): terminal.verify_export_resume(args, seal)
+                    else:
+                        path, proof = terminal.verify_export_resume(args, seal)
+                        self.assertEqual(path, (old/'tail-before.json').resolve())
+                        self.assertEqual(proof['source_manifest_sha256'], terminal.sha(source/'manifest.json'))
+                        with self.assertRaisesRegex(ValueError, 'exact compiled core'):
+                            terminal.verify_export_resume(args, {**seal, 'backend_build_sha256': 'different'})
+
+    def test_stop_sampling_includes_the_full_interval_and_final_revival_check(self):
+        for revived in (False, True):
+            with self.subTest(revived=revived):
+                clock = types.SimpleNamespace(now=0.0)
+                def sleep(seconds):
+                    clock.now += seconds
+                def job(_domain):
+                    clock.now += 0.1
+                    return {'registered': revived and clock.now >= 1.0}
+                with mock.patch.object(stop_evidence.time, 'monotonic', side_effect=lambda: clock.now), \
+                        mock.patch.object(stop_evidence.time, 'time_ns', side_effect=lambda: int(clock.now * 1e9)), \
+                        mock.patch.object(stop_evidence.time, 'sleep', side_effect=sleep), \
+                        mock.patch.object(stop_evidence, 'job', side_effect=job), \
+                        mock.patch.object(stop_evidence.socket, 'create_connection', side_effect=ConnectionRefusedError):
+                    if revived:
+                        with self.assertRaisesRegex(RuntimeError, 'job revived'):
+                            stop_evidence.stable_stop_observations('test/job', [], '127.0.0.1', 8000, 1)
+                    else:
+                        rows = stop_evidence.stable_stop_observations('test/job', [], '127.0.0.1', 8000, 1)
+                        self.assertGreaterEqual(int(rows[-1]['observed_at_ns']) - int(rows[0]['observed_at_ns']), 1_000_000_000)
+
     def test_stable_read_rejects_short_read_even_when_stat_is_nonzero(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'nonempty.json'
@@ -530,6 +673,43 @@ class TerminalV3Guards(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     preflight.validate_archive_receipt(fixture['receipt'])
 
+    def test_archive_allocation_change_keeps_content_and_restore_proof_exact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = _alias_archive_fixture(Path(temp))
+            observed = fixture['table_archive'].stat().st_blocks * 512
+            historical = observed + 4096
+            _refresh_receipt_after_restore_edit(fixture, lambda x: (
+                x['entries'][0].update(archive_allocated_bytes=historical),
+                x.update(archive_allocated_bytes_total=historical)))
+            producer_before = fixture['table_restore'].read_bytes()
+            native = json.loads(producer_before)['entries'][0]
+            with mock.patch.object(preflight, '_verify_gzip_stream',
+                                   side_effect=AssertionError('unnecessary decompression')):
+                checked = preflight.validate_archive_receipt(fixture['receipt'])
+            archive = checked['files'][preflight._path_key(native['primary_alias'])]['archive']
+            self.assertEqual(archive['allocated_bytes'], str(observed))
+            self.assertEqual(archive['producer_allocated_bytes'], str(historical))
+            self.assertEqual(fixture['table_restore'].read_bytes(), producer_before)
+            content = fixture['table_archive'].read_bytes()
+            fixture['table_archive'].write_bytes(bytes([content[0] ^ 1]) + content[1:])
+            with self.assertRaises(ValueError):
+                preflight.validate_archive_receipt(fixture['receipt'])
+
+    def test_planned_outputs_are_zero_until_created_and_never_follow_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'capture.redb'
+            self.assertEqual(preflight.allocated(path, missing_ok=True), {
+                'path': str(path.resolve()), 'kind': 'not_created',
+                'bytes': '0', 'allocated_bytes': '0'})
+            with self.assertRaises(FileNotFoundError):
+                preflight.allocated(path)
+            path.symlink_to(Path(temp) / 'absent')
+            with self.assertRaisesRegex(ValueError, 'symlinks'):
+                preflight.allocated(path, missing_ok=True)
+            path.unlink()
+            path.write_bytes(b'actual allocated input')
+            self.assertEqual(preflight.allocated(path, missing_ok=True)['bytes'], str(path.stat().st_size))
+
     def test_current_identity_rebind_requires_full_content_and_all_alias_proofs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -537,8 +717,6 @@ class TerminalV3Guards(unittest.TestCase):
             _refresh_receipt_after_restore_edit(fixture, lambda x: (
                 x['entries'][0].update(archive_allocated_bytes=8192),
                 x.update(archive_allocated_bytes_total=8192)))
-            with self.assertRaisesRegex(ValueError, 'allocation differs'):
-                preflight.validate_archive_receipt(fixture['receipt'])
             receipt = json.loads(fixture['receipt'].read_text())
             group = receipt['groups'][0]
             native = json.loads(fixture['table_restore'].read_text())['entries'][0]
@@ -566,7 +744,7 @@ class TerminalV3Guards(unittest.TestCase):
             proof_path = root / 'current-rebind.json'
             mutations = [None, lambda p: p['groups'][0]['entries'][0].update(full_source_bytes_rehashed=0),
                 lambda p: p['groups'][0]['entries'][0]['source_metadata_after_by_alias'].pop(),
-                lambda p: p['groups'][0]['entries'][0]['archive'].update(allocated_bytes=1),
+                lambda p: p['groups'][0]['entries'][0]['archive']['metadata_after']['identity'].update(inode=99),
                 lambda p: p['groups'][0]['restore_manifest'].update(sha256='f' * 64)]
             for index, mutate in enumerate(mutations):
                 changed = json.loads(json.dumps(proof))
@@ -639,12 +817,17 @@ class TerminalV3Guards(unittest.TestCase):
                     '--facts-kind', 'base', '--allow-archived-base-source',
                     '--archived-input-receipt', str(fixture['receipt']),
                     '--target-volume', str(root), '--phase', 'final_inputs',
+                    '--capture', str(root / 'future-capture.redb'),
+                    '--spool', str(root / 'future-spool.ndjson'),
                     '--raw-delta-budget-mib', '0', '--report', str(report_path)]
             with mock.patch.object(preflight.shutil, 'disk_usage',
                                    return_value=types.SimpleNamespace(free=100 * 1024**3)):
                 self.assertEqual(preflight.main(argv), 0)
             report = json.loads(report_path.read_text())
             self.assertTrue(report['facts_input']['archived'])
+            for key in ('capture', 'decoded_spool'):
+                self.assertEqual(report['allocated_input_evidence'][key]['kind'], 'not_created')
+                self.assertEqual(report['allocated_input_evidence'][key]['allocated_bytes'], '0')
             self.assertEqual(report['facts_input']['archive_group_id'], 'old-7051-facts')
             self.assertTrue(report['postgres_table_files'][0]['archived'])
             self.assertEqual(report['postgres_table_files'][0]['archive_group_id'],
@@ -838,6 +1021,61 @@ class TerminalV3Guards(unittest.TestCase):
                 sources, {'probe': digest}, backend.resolve())['probe']['authority_sha256'], digest)
             with self.assertRaisesRegex(ValueError, 'fixed authority SHA'):
                 sealer.validate_tool_sources(sources, {'probe': 'f' * 64}, backend.resolve())
+
+    def test_backend_policy_copy_seal_passes_consumer_and_rejects_changed_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            backend = root / 'backend'
+            (backend / 'src').mkdir(parents=True)
+            (backend / 'assets').mkdir()
+            policy = backend / 'src' / 'source_clock.rs'
+            policy.write_text('// fixed policy\n')
+            for name in ('Cargo.toml', 'Cargo.lock', 'build.rs'):
+                (backend / name).write_text('fixture\n')
+            auditor = root / 'auditor.py'
+            auditor.write_text('# independent auditor fixture\n')
+            witness = _write_json(root / 'witness.json', {'reviewed': True})
+            helper = root / 'helper'
+            report = {'schema': 'tracefang-migration-tool-identity-v1',
+                      'tool': 'fixture', 'backend_build_sha256': 'a' * 64,
+                      'version': '0.1.0'}
+            helper.write_text('#!/bin/sh\nprintf \'%s\\n\' \'' + json.dumps(report) + '\'\n')
+            helper.chmod(0o500)
+            release = root / 'release'
+            manifest = release / 'tools-manifest.json'
+            arguments = ['--backend-root', str(backend), '--release-directory', str(release),
+                         '--manifest', str(manifest), '--auditor', str(auditor),
+                         '--policy-source', str(policy), '--witness', str(witness)]
+            for name in ('probe', 'reconcile-probe', 'clock-probe', 'spool-probe'):
+                arguments.extend(['--tool', f'{name}={helper}'])
+            for name in sorted(sealer.REQUIRED_SCRIPTS):
+                arguments.extend(['--script', str(ROOT / 'scripts' / name)])
+            with mock.patch('sys.stdout', new=io.StringIO()):
+                self.assertEqual(sealer.main(arguments), 0)
+            seal, _sealed, roles = terminal.verify_seal(manifest)
+            copied_policy = Path(seal['clock_policy']['source'])
+            self.assertNotEqual(copied_policy, policy.resolve())
+            self.assertFalse(copied_policy.is_symlink())
+            self.assertEqual(copied_policy.read_bytes(), policy.read_bytes())
+            self.assertEqual(copied_policy.stat().st_mode & 0o222, 0)
+            self.assertIn(policy.resolve(), [path for path, _item in roles['backend_source']])
+            old_layout = json.loads(manifest.read_text())
+            old_layout['clock_policy']['source'] = str(policy.resolve())
+            next(item for item in old_layout['files']
+                 if item['role'] == 'clock_policy_source')['path'] = str(policy.resolve())
+            old_manifest = _write_json(root / 'old-duplicate-manifest.json', old_layout)
+            with self.assertRaisesRegex(ValueError, 'duplicate input paths'):
+                terminal.verify_seal(old_manifest)
+            policy.write_text('// changed policy\n')
+            with self.assertRaisesRegex(ValueError, 'sealed migration input changed'):
+                terminal.verify_seal(manifest)
+            duplicate_arguments = list(arguments)
+            duplicate_arguments[duplicate_arguments.index(str(release))] = str(root / 'duplicate-release')
+            duplicate_arguments[duplicate_arguments.index(str(manifest))] = str(root / 'duplicate-release' / 'tools-manifest.json')
+            duplicate_arguments.extend(['--witness', str(witness)])
+            with self.assertRaisesRegex(ValueError, 'duplicate input paths'):
+                sealer.main(duplicate_arguments)
+            self.assertFalse((root / 'duplicate-release').exists())
 
     def test_spool_audit_requires_full_fixed_prefix_roundtrip(self):
         with tempfile.TemporaryDirectory() as temp:

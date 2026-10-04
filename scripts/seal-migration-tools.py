@@ -281,6 +281,17 @@ def main(argv=None):
         if any(part in ('target', '.rust-target') for part in path.parts):
             raise ValueError(f'sealed input path names a mutable build target: {path}')
 
+    # Only the policy may share a backend input; its sealed role gets a copy.
+    input_paths = [*build_sources, *script_paths, auditor, *witnesses, python]
+    if len(input_paths) != len(set(input_paths)) or (
+            policy_source in input_paths and policy_source not in build_sources):
+        raise ValueError('seal contains duplicate input paths')
+    original_policy_source = policy_source
+    policy_source_sha256 = sha(original_policy_source)
+    policy_copy = release / 'clock-policy-source.rs'
+    if policy_copy == manifest or policy_copy in input_paths:
+        raise ValueError('policy copy path conflicts with another sealed input')
+
     if release.exists():
         if not release.is_dir():
             raise ValueError('release path exists and is not a directory')
@@ -291,6 +302,10 @@ def main(argv=None):
     manifest.parent.mkdir(parents=True, exist_ok=True)
     if manifest.exists():
         raise FileExistsError(f'never overwrite an existing tool seal: {manifest}')
+
+    copy_frozen(original_policy_source, policy_copy, policy_source_sha256)
+    os.chmod(policy_copy, 0o444)
+    policy_source = policy_copy.resolve(strict=True)
 
     file_records = []
     copied_tools = {}
@@ -359,6 +374,9 @@ def main(argv=None):
                 raise ValueError(f'executor source changed during sealing: {source}')
         elif sha(Path(record['path'])) != record['sha256']:
             raise ValueError(f'sealed input changed during sealing: {record["path"]}')
+
+    if sha(original_policy_source) != policy_source_sha256:
+        raise ValueError(f'clock policy source changed during sealing: {original_policy_source}')
 
     seal = {
         'schema': SCHEMA, 'complete': True,

@@ -137,6 +137,32 @@ def artifact_receipt(path):
     return {'file': path.name, 'sha256': stable_sha(path)}
 
 
+def stable_stop_observations(domain, bound, hostname, port, stable_seconds):
+    deadline = time.monotonic() + stable_seconds
+    observations = []
+    while True:
+        current = job(domain)
+        if current['registered']:
+            raise RuntimeError('old launchd job revived; keep native providers stopped')
+        if any(identity(row['pid']) == row['start_identity_sha256'] for row in bound):
+            raise RuntimeError('old process tree revived; keep native providers stopped')
+        try:
+            connection = socket.create_connection((hostname, port), timeout=1)
+        except ConnectionRefusedError:
+            pass
+        except OSError as error:
+            raise RuntimeError('unable to prove old listener closed; keep native providers stopped') from error
+        else:
+            connection.close()
+            raise RuntimeError('old listener revived or port reused; keep native providers stopped')
+        observations.append({'observed_at_ns': str(time.time_ns()), 'job_registered': False,
+                             'ready_endpoint_closed': True, 'process_tree_exited': True})
+        if (time.monotonic() >= deadline
+                and int(observations[-1]['observed_at_ns']) - int(observations[0]['observed_at_ns'])
+                    >= int(stable_seconds * 1_000_000_000)):
+            return observations
+        time.sleep(.25)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=('inspect', 'stop'))
@@ -246,26 +272,8 @@ def main():
         if time.monotonic() > deadline:
             raise RuntimeError('old process tree did not terminate; no clean stop report generated; keep native providers stopped')
         time.sleep(.25)
-    deadline = time.monotonic() + args.stable_seconds
-    observations = []
-    while time.monotonic() < deadline:
-        current = job(domain)
-        if current['registered']:
-            raise RuntimeError('old launchd job revived; keep native providers stopped')
-        if any(identity(row['pid']) == row['start_identity_sha256'] for row in bound):
-            raise RuntimeError('old process tree revived; keep native providers stopped')
-        try:
-            connection = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=1)
-        except ConnectionRefusedError:
-            pass
-        except OSError as error:
-            raise RuntimeError('unable to prove old listener closed; keep native providers stopped') from error
-        else:
-            connection.close()
-            raise RuntimeError('old listener revived or port reused; keep native providers stopped')
-        observations.append({'observed_at_ns': str(time.time_ns()), 'job_registered': False,
-                             'ready_endpoint_closed': True, 'process_tree_exited': True})
-        time.sleep(.25)
+    observations = stable_stop_observations(
+        domain, bound, parsed.hostname, parsed.port or 80, args.stable_seconds)
     attempt.update({'phase': 'stopped_process_tree_and_listener_verified',
                     'native_providers_started': False, 'process_tree_exited': True,
                     'listener_closed': True, 'stable_no_restart_observations': observations,

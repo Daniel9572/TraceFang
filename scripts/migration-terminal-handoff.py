@@ -469,7 +469,8 @@ def verify_execution(command, sealed):
                 raise ValueError('execution would use an unsealed/changed Python input: ' + str(path))
 
 
-def verify_source_snapshot(source, archive_receipt=None, allow_archived=False):
+def verify_source_snapshot(source, archive_receipt=None, allow_archived=False,
+                           require_mapping=True):
     source = Path(source).resolve(strict=True)
     manifest_path = source / 'manifest.json'
     manifest = read(manifest_path)
@@ -524,8 +525,32 @@ def verify_source_snapshot(source, archive_receipt=None, allow_archived=False):
     add(raw['file'], raw['sha256'])
     mapping = raw.get('native_mapping') or {}
     if not mapping.get('file') or not mapping.get('sha256'):
-        raise ValueError('source manifest must preserve its native raw mapping')
-    add(mapping['file'], mapping['sha256'])
+        if require_mapping or mapping:
+            raise ValueError('source manifest must preserve its native raw mapping')
+        base = raw.get('incremental_base') or {}
+        if (manifest.get('state') != 'fixed_inputs_exported'
+                or raw.get('state') != 'fixed_range_exported'
+                or not base.get('source_manifest_path') or not base.get('source_manifest_sha256')):
+            raise ValueError('only an explicit terminal export may precede native raw mapping')
+        base_path = Path(base['source_manifest_path']).resolve(strict=True)
+        if sha(base_path) != require_sha(base['source_manifest_sha256'], 'incremental base manifest SHA'):
+            raise ValueError('incremental raw base manifest changed')
+        base_manifest = read(base_path)
+        base_raw = base_manifest.get('raw') or {}
+        if (base_manifest.get('id') != base.get('source_manifest_id')
+                or base_raw != base.get('raw')):
+            raise ValueError('terminal export embeds a different incremental raw base')
+        pins[base_path] = base['source_manifest_sha256']
+        for record in (base_raw, base_raw.get('native_mapping') or {}):
+            name = record.get('file')
+            if not isinstance(name, str) or Path(name).name != name:
+                raise ValueError('incremental raw base artifact must be an immutable basename')
+            path = base_path.parent / name
+            if path.is_symlink() or sha(path) != require_sha(record.get('sha256'), 'incremental raw base artifact SHA'):
+                raise ValueError('incremental raw base archive/mapping changed')
+            pins[path.resolve(strict=True)] = record['sha256']
+    else:
+        add(mapping['file'], mapping['sha256'])
     descriptor = descriptor_path
     if descriptor.exists():
         pins[descriptor] = sha(descriptor)
@@ -540,6 +565,106 @@ def verify_pins(pins):
     for path, expected in pins.items():
         if sha(path) != expected:
             raise ValueError('input changed before execution: ' + str(path))
+
+
+def verify_export_resume(args, seal):
+    evidence = args.resume_export_evidence.resolve(strict=True)
+    prior_journal = evidence / 'handoff-journal.json'
+    prior = read(prior_journal)
+    if (prior.get('schema') != 'terminal-handoff-journal-v1'
+            or any(prior.get(key) != str(getattr(args, argument)) for key, argument in
+                   [('source_path', 'source'), ('facts_path', 'facts'), ('capture_path', 'capture'),
+                    ('progress_path', 'progress_directory'), ('clock_path', 'clock_directory')])
+            or prior.get('old_services_changed_by_this_tool') is not False
+            or prior.get('providers_started_by_this_tool') is not False):
+        raise ValueError('export checkpoint belongs to another target or service operation')
+    completed = [row for row in prior.get('events', []) if row.get('state') == 'complete']
+    if ([row.get('phase') for row in completed]
+            != ['space-preflight-inputs', 'tail-before', 'terminal-export']
+            or any(row.get('exit_code') != 0 for row in completed)
+            or any(row.get('phase') not in ('space-preflight-inputs', 'tail-before',
+                    'terminal-export', 'prepare-terminal-inputs') for row in prior.get('events', []))):
+        raise ValueError('only the completed export checkpoint may be resumed')
+    old_seal_path = args.resume_tools_manifest.resolve(strict=True)
+    old_sha = sha(old_seal_path)
+    if old_sha != prior.get('tools_manifest_sha256'):
+        raise ValueError('export checkpoint tool seal changed')
+    old_seal, _old_pins, _old_roles = verify_seal(old_seal_path, old_sha)
+    if (old_seal['backend_build_sha256'] != seal['backend_build_sha256']
+            or set(old_seal['executables']) != set(seal['executables'])
+            or any(sha(old_seal['executables'][name]) != sha(path)
+                   for name, path in seal['executables'].items())):
+        raise ValueError('export resume must retain the exact compiled core and executors')
+    if (args.source / 'canonical-bars-v1.manifest.json').exists():
+        raise ValueError('export-only checkpoint cannot resume a later source transformation')
+    manifest, _pins = verify_source_snapshot(args.source, require_mapping=False)
+    tail_path = evidence / 'tail-before.json'
+    tail = read(tail_path)
+    after = manifest['raw'].get('incremental_after') or {}
+    if (tail.get('stream') != after.get('stream') or tail.get('epoch') != after.get('epoch')
+            or str(tail.get('last_sequence')) != str(after.get('sequence'))):
+        raise ValueError('export checkpoint tail does not match its completed fixed raw range')
+    logs = []
+    for row in completed:
+        path = Path(row['log']).resolve(strict=True)
+        if path.parent != evidence:
+            raise ValueError('export checkpoint log escapes its preserved evidence directory')
+        logs.append({'file': str(path), 'sha256': sha(path)})
+    return tail_path, {'journal': {'file': str(prior_journal), 'sha256': sha(prior_journal)},
+                      'tools_manifest': {'file': str(old_seal_path), 'sha256': old_sha},
+                      'source_manifest_sha256': sha(args.source / 'manifest.json'), 'logs': logs}
+
+
+def clone_capture_snapshot(source, destination):
+    """Clone a quiescent capture without changing its native epoch or source."""
+    source, destination = Path(source), Path(destination)
+    if source.is_symlink() or not source.is_file() or destination.exists() or destination.is_symlink():
+        raise ValueError('base capture must be regular and its independent destination fresh')
+    source = source.resolve(strict=True)
+    handles = subprocess.run(['lsof', str(source)], capture_output=True)
+    if handles.returncode != 1 or handles.stdout:
+        raise ValueError('base capture must have no open handles before snapshot')
+    before = source.stat()
+    source_sha = sha(source)
+    copied = subprocess.run(['/bin/cp', '-c', str(source), str(destination)],
+                            capture_output=True)
+    method = 'apfs_clone'
+    if copied.returncode:
+        if shutil.disk_usage(destination.parent).free < before.st_size + 4*1024**3:
+            raise RuntimeError('independent capture copy would breach the 4GiB free floor; preserve all inputs')
+        shutil.copyfile(source, destination)
+        method = 'independent_copy'
+    with destination.open('rb') as stream:
+        os.fsync(stream.fileno())
+    after = source.stat()
+    stable = lambda value: (*file_identity(value), value.st_ctime_ns, value.st_nlink)
+    if (stable(before) != stable(after) or sha(source) != source_sha
+            or sha(destination) != source_sha or destination.stat().st_ino == after.st_ino):
+        raise ValueError('base capture snapshot/source identity or complete bytes changed')
+    directory = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return {'source': str(source), 'destination': str(destination), 'sha256': source_sha, 'method': method,
+            'bytes': str(before.st_size), 'source_device': str(before.st_dev),
+            'source_inode': str(before.st_ino), 'source_mtime_ns': str(before.st_mtime_ns),
+            'source_ctime_ns': str(before.st_ctime_ns),
+            'destination_inode': str(destination.stat().st_ino),
+            'source_unchanged': True, 'all_handles_closed': True, 'native_epoch_preserved_by_exact_bytes': True}
+
+
+def native_spool_through(manifest, early):
+    raw = manifest.get('raw') or {}
+    if (early.get('stream') != raw.get('stream') or early.get('epoch') != raw.get('epoch')
+            or str(early.get('last_sequence')) != str((raw.get('incremental_after') or {}).get('sequence'))):
+        raise ValueError('early tail differs from the exact raw stream/epoch/range in the fresh export')
+    position = (raw.get('native_mapping') or {}).get('last_position') or {}
+    value = str(position.get('sequence', ''))
+    if not value.isdecimal() or not 0 < int(value) <= 2**64-1 or not position.get('epoch'):
+        raise ValueError('decoded spool requires the imported native capture boundary')
+    require_sha(position.get('digest'), 'native capture boundary digest')
+    return value
 
 
 def load_archive_receipt(path, preflight_namespace):
@@ -1025,6 +1150,8 @@ def main():
     parser.add_argument('--base-source', type=Path, required=True)
     parser.add_argument('--base-facts', type=Path, required=True,
                         help='original base facts path; it may be absent only with its named verified archive receipt')
+    parser.add_argument('--base-capture', type=Path,
+                        help='quiescent original native capture matching the base raw mapping; cloned before delta import')
     parser.add_argument('--archived-input-receipt', type=Path)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--facts', type=Path, required=True)
@@ -1042,11 +1169,19 @@ def main():
     parser.add_argument('--progress-directory', type=Path)
     parser.add_argument('--spool', type=Path)
     parser.add_argument('--tools-manifest', type=Path, required=True)
+    parser.add_argument('--resume-export-evidence', type=Path,
+                        help='preserved journal with only the inputs gate, early tail and terminal export completed')
+    parser.add_argument('--resume-tools-manifest', type=Path,
+                        help='exact preserved tool seal bound to the exported-source journal')
     parser.add_argument('--facts-cap-gib', type=int, default=16)
     parser.add_argument('--spool-cap-gib', type=int, default=NATIVE_SPOOL_CAP_GIB,
                         choices=(NATIVE_SPOOL_CAP_GIB,),
                         help='fixed native spool physical file cap in GiB')
     args = parser.parse_args()
+    if bool(args.resume_export_evidence) != bool(args.resume_tools_manifest):
+        raise ValueError('export resume requires both prior evidence and its tool seal')
+    if args.resume_export_evidence and args.phase != 'prepare-terminal-inputs':
+        raise ValueError('export resume is only valid during input preparation')
     for key in ('backend', 'base_source', 'stop_report'):
         setattr(args, key, getattr(args, key).resolve(strict=True))
     for key in ('probe', 'base_facts', 'capture', 'source', 'facts', 'evidence'):
@@ -1179,17 +1314,19 @@ def main():
             raise ValueError('fixed original PG/source manifest copy changed during freeze')
         return frozen
 
-    def pin_source(directory, allow_archived=False):
-        _manifest, source_pins = verify_source_snapshot(directory, archive_receipt, allow_archived)
-        return source_pins
+    def pin_source(directory, allow_archived=False, require_mapping=True):
+        return verify_source_snapshot(directory, archive_receipt, allow_archived, require_mapping)
 
     try:
         if args.phase == 'prepare-terminal-inputs':
             # Check maximum allowed coexistence BEFORE a fleet stop is allowed.
             # This terminal invocation checks it again; root uses standalone preflight before stopping.
             stopped = stop_input(args.stop_report)
-            if any(path.exists() for path in (args.source, args.facts, args.clock_directory, args.progress_directory,
-                                               args.capture, args.spool, args.reconciliation_report)):
+            if args.base_capture is None:
+                raise ValueError('terminal delta import requires its exact original native base capture')
+            fresh = (args.facts, args.clock_directory, args.progress_directory,
+                     args.capture, args.spool, args.reconciliation_report)
+            if any(path.exists() for path in (*fresh, *(() if args.resume_export_evidence else (args.source,)))):
                 raise ValueError('fresh terminal source/facts required; preserve failed targets, resume explicitly through probe')
             outputs = [journal, args.evidence/'space-preflight-inputs.json',
                        args.evidence/'tail-before.json', args.evidence/'space-preflight-facts.json',
@@ -1202,22 +1339,51 @@ def main():
                        args.evidence/'terminal-spool-build.json', args.evidence/'terminal-spool-audit.json']
             if any(path.exists() or path.is_symlink() for path in outputs):
                 raise FileExistsError('prepare phase output already exists; preserve receipts and select a fresh evidence directory')
+            resumed = verify_export_resume(args, seal) if args.resume_export_evidence else None
             preflight('space-preflight-inputs', args.base_source, args.base_facts,
                       'final_inputs', 'base', True,
                       extra=[(path, digest) for path, digest in base_pins.items()])
-            run('tail-before', [args.probe, 'tail-observe', args.evidence, args.evidence/'tail-before.json'],
-                input_paths=[(base_manifest_path, sha(base_manifest_path))])
+            if resumed:
+                tail_path, checkpoint = resumed
+                copy_immutable(tail_path, args.evidence/'tail-before.json', sha(tail_path))
+                event('terminal-export', 'reused_verified_export_checkpoint', **checkpoint)
+            else:
+                run('tail-before', [args.probe, 'tail-observe', args.evidence, args.evidence/'tail-before.json'],
+                    input_paths=[(base_manifest_path, sha(base_manifest_path))])
             if int(read(args.evidence/'tail-before.json')['observed_at_ns']) < int(stopped['observed_at_ns']):
                 raise ValueError('early tail must be a real observation after producer stop')
-            run('terminal-export', [args.probe, 'terminal-export', args.source, base_manifest_path],
-                input_paths=[(path, digest) for path, digest in base_pins.items()])
-            source_manifest, source_pins = pin_source(args.source)
+            if not resumed:
+                run('terminal-export', [args.probe, 'terminal-export', args.source, base_manifest_path],
+                    input_paths=[(path, digest) for path, digest in base_pins.items()])
+            source_manifest, source_pins = pin_source(args.source, require_mapping=False)
+            base_raw = read(base_manifest_path)['raw']
+            if source_manifest['raw']['incremental_base']['source_manifest_sha256'] != sha(base_manifest_path):
+                raise ValueError('terminal raw increment must retain the selected base source')
+            snapshot = clone_capture_snapshot(args.base_capture, args.capture)
+            event('base-capture-snapshot', 'complete', **snapshot)
+            base_validation = args.evidence/'base-prefix-validation'
+            base_validation.mkdir()
+            copy_immutable(base_manifest_path, base_validation/'manifest.json', sha(base_manifest_path))
+            base_map = args.base_source/base_raw['native_mapping']['file']
+            copy_immutable(base_map, base_validation/base_map.name, base_raw['native_mapping']['sha256'])
+            run('base-raw-verify', [args.probe, 'raw-verify', base_validation, args.capture],
+                input_paths=[(base_manifest_path, sha(base_manifest_path)),
+                             (base_map, base_raw['native_mapping']['sha256']),
+                             (args.capture, snapshot['sha256'])])
+            base_verified = read(base_validation/'manifest.json')['phases'][-1]
+            last = base_raw['native_mapping']['last_position']
+            if (base_verified.get('state') != 'complete_reopened_every_envelope'
+                    or base_verified.get('verified_last_position') != last
+                    or base_verified.get('bounds', {}).get('last_sequence') != last['sequence']
+                    or base_verified.get('bounds', {}).get('epoch') != last['epoch']):
+                raise ValueError('base capture does not end at its independently verified native mapping')
             with tempfile.TemporaryDirectory(prefix='canonical-terminal-', dir=args.evidence) as derived:
                 run('canonical-select', [sys.executable, scripts/'prepare-legacy-canonical-bars.py', args.source, derived],
                     input_paths=[(path, digest) for path, digest in source_pins.items()])
-            source_manifest, source_pins = pin_source(args.source)
+            source_manifest, source_pins = pin_source(args.source, require_mapping=False)
             run('raw-import', [args.probe, 'raw-import', args.source, args.capture],
                 input_paths=[(path, digest) for path, digest in source_pins.items()])
+            source_manifest, source_pins = pin_source(args.source)
             run('raw-verify', [args.probe, 'raw-verify', args.source, args.capture],
                 input_paths=[(path, digest) for path, digest in source_pins.items()])
             source_manifest, source_pins = pin_source(args.source)
@@ -1295,17 +1461,14 @@ def main():
                              (frozen, sha(frozen)), (args.facts, sha(args.facts)),
                              (args.capture, sha(args.capture))])
             early = read(args.evidence/'tail-before.json')
-            if (early.get('stream') != source_manifest['raw']['stream']
-                    or early.get('epoch') != source_manifest['raw']['epoch']
-                    or str(early.get('last_sequence')) != str(source_manifest['raw']['incremental_after']['sequence'])):
-                raise ValueError('early tail differs from the exact raw stream/epoch/range in the fresh export')
+            native_through = native_spool_through(read(frozen), early)
             spool_build_report = args.evidence/'terminal-spool-build.json'
             run('global-spool-build', [seal['executables']['spool-probe'], 'build', args.capture,
-                frozen, str(early['last_sequence']), args.spool, spool_build_report],
+                frozen, str(native_through), args.spool, spool_build_report],
                 input_paths=[(frozen, sha(frozen)), (args.capture, sha(args.capture))])
             spool_audit_report = args.evidence/'terminal-spool-audit.json'
             run('global-spool-audit', [seal['executables']['spool-probe'], 'audit', args.capture,
-                frozen, str(early['last_sequence']), args.spool, spool_audit_report],
+                frozen, str(native_through), args.spool, spool_audit_report],
                 input_paths=[(frozen, sha(frozen)), (args.capture, sha(args.capture)),
                              (args.spool, sha(args.spool))])
             validate_spool_audit(spool_audit_report, sha(frozen), seal['backend_build_sha256'],

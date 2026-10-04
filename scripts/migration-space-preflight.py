@@ -735,11 +735,11 @@ def validate_archive_receipt(receipt_path, verify_streams=False):
                         or current_identity.get('inode') != archive_stat.st_ino
                         or current_identity.get('size') != archive_stat.st_size
                         or current_identity.get('mtime_ns') != archive_stat.st_mtime_ns
-                        or current_identity.get('ctime_ns') != archive_stat.st_ctime_ns
-                        or _decimal(current_archive.get('allocated_bytes'), 'current archive allocation') != observed_allocated):
+                        or current_identity.get('ctime_ns') != archive_stat.st_ctime_ns):
                     raise ValueError(f'{group_id} archive differs from its explicit current identity rebind')
-            elif observed_allocated != archive_allocated:
-                raise ValueError(f'{group_id} compressed archive allocation differs from native receipt')
+            # Physical allocation may change after fsync on APFS. Keep the
+            # producer's historical count and use today's count for capacity;
+            # compressed SHA/length and any rebound file identity stay exact.
             output_fd_closed = (native_entry.get('output_fd_closed') is True
                                 or native_entry.get('archive_fd_closed') is True)
             required_flags = ('file_fsync_succeeded', 'archive_directory_fsync_succeeded',
@@ -850,13 +850,20 @@ def input_file(path, label, receipt=None, group_kind=None, expected_sha=None):
             'metadata': record['metadata']}
 
 
-def allocated(path):
+def allocated(path, missing_ok=False):
     """Report actual allocated bytes without deriving any future savings."""
     if path is None:
         return None
-    path = Path(path).resolve(strict=True)
+    path = Path(path)
     if path.is_symlink():
         raise ValueError('allocated-input inventory does not follow symlinks')
+    try:
+        path = path.resolve(strict=True)
+    except FileNotFoundError:
+        if not missing_ok:
+            raise
+        return {'path': str(path.resolve()), 'kind': 'not_created',
+                'bytes': '0', 'allocated_bytes': '0'}
     if path.is_file():
         info = path.stat()
         return {'path': str(path), 'kind': 'file', 'bytes': str(info.st_size),
@@ -1038,7 +1045,8 @@ def main(argv=None):
         'observed_existing_facts_bytes': facts['bytes'], 'facts_input': facts,
         'allocated_input_evidence': {
             'postgres_source': allocated(source), 'facts': allocated(args.facts) if args.facts.exists() else facts,
-            'capture': allocated(args.capture), 'decoded_spool': allocated(args.spool),
+            'capture': allocated(args.capture, missing_ok=True),
+            'decoded_spool': allocated(args.spool, missing_ok=True),
             'scope_cache': allocated(args.scope_cache), 'reconciliation_evidence': allocated(args.reconciliation_evidence),
             'target_volume': str(volume),
             'archive_storage': [group['archive'] for group in receipt['groups']] if receipt else []},
