@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import ast
 from pathlib import Path
 import tempfile
 import types
@@ -413,6 +414,87 @@ class TerminalV3Guards(unittest.TestCase):
         self.assertEqual(plan['archive_credit_bytes'], '0')
         self.assertTrue(plan['future_phase_requires_fresh_free_and_size_gate'])
 
+    def test_native_spool_budget_defaults_to_five_gib_only(self):
+        defaults = preflight.assess(100 * preflight.GIB, 10, 20, 30, 40)
+        four_gib = preflight.assess(100 * preflight.GIB, 10, 20, 30, 40,
+                                    spool_cap=4 * preflight.GIB)
+        self.assertEqual(
+            int(defaults['phase_additional_bounds_bytes']['all']) -
+            int(four_gib['phase_additional_bounds_bytes']['all']),
+            preflight.GIB)
+        for key in ('clock_output_cap_bytes', 'single_scope_cap_bytes',
+                    'reconciliation_evidence_cap_bytes',
+                    'planner_and_independent_oracle_scratch_cap_bytes'):
+            self.assertEqual(defaults[key], four_gib[key], key)
+        self.assertEqual(defaults['clock_output_cap_bytes'], str(4 * preflight.GIB))
+        self.assertEqual(defaults['single_scope_cap_bytes'], str(4 * preflight.GIB))
+        self.assertEqual(defaults['reconciliation_evidence_cap_bytes'], str(preflight.GIB))
+
+    def test_terminal_spool_cap_is_fixed_and_propagated_to_preflight(self):
+        args = types.SimpleNamespace(spool_cap_gib=5, facts_cap_gib=16,
+                                     capture=Path('/capture/capture.db'),
+                                     spool=Path('/spool/global.ndjson'))
+        for phase in ('all', 'retained_reconciliation'):
+            command = terminal.space_preflight_command(
+                args, Path('/sealed/migration-space-preflight.py'),
+                Path('/source'), Path('/facts.redb'), phase, 'fresh', Path('/report.json'))
+            option = command.index('--spool-cap-gib')
+            self.assertEqual(command[option + 1], '5')
+
+        argv = ['migration-terminal-handoff.py', 'prepare-terminal-inputs',
+                '--probe', '/probe', '--backend', '/backend', '--base-source', '/base',
+                '--base-facts', '/base/facts', '--source', '/source', '--facts', '/facts',
+                '--capture', '/capture', '--evidence', '/evidence', '--stop-report', '/stop',
+                '--tools-manifest', '/seal', '--spool-cap-gib', '4']
+        with mock.patch.object(os.sys, 'argv', argv):
+            with self.assertRaises(SystemExit) as raised:
+                terminal.main()
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_standalone_preflight_rejects_non_native_spool_cap_before_input_read(self):
+        argv = ['--source-directory', '/missing/source', '--facts', '/missing/facts',
+                '--target-volume', '/missing/volume', '--report', '/missing/report',
+                '--spool-cap-gib', '4']
+        with self.assertRaises(SystemExit) as raised:
+            preflight.main(argv)
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_only_global_spool_build_gets_child_file_limit(self):
+        source = (ROOT / 'scripts/migration-terminal-handoff.py').read_text()
+        tree = ast.parse(source)
+        main_node = next(node for node in tree.body
+                         if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        run_node = next(node for node in main_node.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'run')
+        call = next(node for node in ast.walk(run_node)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == 'subprocess' and node.func.attr == 'run')
+        kwargs = next(keyword.value for keyword in call.keywords if keyword.arg is None)
+        self.assertIsInstance(kwargs, ast.IfExp)
+        self.assertIsInstance(kwargs.test, ast.Name)
+        self.assertEqual(kwargs.test.id, 'spool_build')
+        self.assertTrue(any(isinstance(node, ast.Compare)
+                            and isinstance(node.left, ast.Name) and node.left.id == 'label'
+                            and any(isinstance(op, ast.Eq) for op in node.ops)
+                            and any(isinstance(item, ast.Constant)
+                                    and item.value == 'global-spool-build' for item in node.comparators)
+                            for node in ast.walk(run_node)))
+
+    def test_spool_file_limit_is_applied_only_in_child(self):
+        import resource
+        import subprocess
+        import sys
+
+        before = resource.getrlimit(resource.RLIMIT_FSIZE)
+        child = subprocess.run(
+            [sys.executable, '-c',
+             'import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])'],
+            capture_output=True, text=True, check=True,
+            preexec_fn=terminal.spool_child_limit)
+        self.assertEqual(int(child.stdout.strip()), 5 * 1024**3)
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_FSIZE), before)
+
     def test_archive_resolution_requires_exact_named_group_and_sha(self):
         expected = 'a' * 64
         receipt = {'files': {'/old/facts.redb': {
@@ -569,6 +651,10 @@ class TerminalV3Guards(unittest.TestCase):
                              'retired-original-pg-table-pairs')
             self.assertTrue(report['observed_canonical_source_bytes'] != '0')
             self.assertEqual(report['space_plan']['archive_credit_bytes'], '0')
+            self.assertEqual(report['space_plan']['global_spool_cap_bytes'], str(5 * preflight.GIB))
+            self.assertEqual(report['space_plan']['clock_output_cap_bytes'], str(4 * preflight.GIB))
+            self.assertEqual(report['space_plan']['single_scope_cap_bytes'], str(4 * preflight.GIB))
+            self.assertEqual(report['space_plan']['reconciliation_evidence_cap_bytes'], str(preflight.GIB))
             self.assertTrue(all(not item['archived'] for item in report['retained_raw_source_inputs']))
 
             for name in ('config.toml', 'raw.frames', 'mapping.json'):

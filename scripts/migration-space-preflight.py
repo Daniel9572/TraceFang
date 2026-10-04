@@ -12,6 +12,7 @@ import shutil
 from datetime import datetime, timezone
 
 GIB = 1024**3
+NATIVE_SPOOL_CAP_GIB = 5
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 RECEIPT_SCHEMA = 'tracefang-archived-input-adapter-v1'
 RESTORE_SCHEMA = 'tracefang-restore-manifest-v1'
@@ -883,7 +884,7 @@ def allocated(path):
 
 def assess(available, pg_bytes, canonical_bytes, facts_bytes, raw_delta_bytes,
            target_cap=16*GIB, reserve=4*GIB, growth_percent=20,
-           phase='all', clock_output_cap=4*GIB, spool_cap=4*GIB,
+           phase='all', clock_output_cap=4*GIB, spool_cap=NATIVE_SPOOL_CAP_GIB*GIB,
            scope_cap=4*GIB, scratch_cap=GIB, evidence_cap=GIB):
     if min(available, pg_bytes, canonical_bytes, facts_bytes, raw_delta_bytes,
            target_cap, reserve, growth_percent, clock_output_cap, spool_cap,
@@ -942,7 +943,9 @@ def main(argv=None):
     parser.add_argument('--phase', choices=('all', 'final_inputs', 'fresh_facts', 'retained_reconciliation'), default='all')
     parser.add_argument('--target-cap-gib', type=int, default=16)
     parser.add_argument('--clock-output-cap-gib', type=int, default=4)
-    parser.add_argument('--spool-cap-gib', type=int, default=4)
+    parser.add_argument('--spool-cap-gib', type=int, default=NATIVE_SPOOL_CAP_GIB,
+                        choices=(NATIVE_SPOOL_CAP_GIB,),
+                        help='fixed native spool physical file cap in GiB')
     parser.add_argument('--scope-cap-gib', type=int, default=4)
     parser.add_argument('--scratch-cap-mib', type=int, default=1024)
     parser.add_argument('--reconciliation-evidence-cap-gib', type=int, default=1)

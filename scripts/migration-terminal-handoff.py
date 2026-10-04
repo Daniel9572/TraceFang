@@ -17,6 +17,25 @@ import tempfile
 import time
 
 
+NATIVE_SPOOL_CAP_GIB = 5
+
+
+def spool_child_limit():
+    import resource
+    cap = NATIVE_SPOOL_CAP_GIB * 1024**3
+    resource.setrlimit(resource.RLIMIT_FSIZE, (cap, cap))
+
+
+def space_preflight_command(args, preflight_script, source_dir, facts_path,
+                            phase, facts_kind, report_path):
+    return [sys.executable, preflight_script, '--source-directory', source_dir,
+            '--facts', facts_path, '--facts-kind', facts_kind,
+            '--target-volume', args.capture.parent, '--phase', phase,
+            '--target-cap-gib', str(args.facts_cap_gib), '--capture', args.capture,
+            '--spool', args.spool, '--spool-cap-gib', str(args.spool_cap_gib),
+            '--report', report_path]
+
+
 def file_identity(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
@@ -1024,6 +1043,9 @@ def main():
     parser.add_argument('--spool', type=Path)
     parser.add_argument('--tools-manifest', type=Path, required=True)
     parser.add_argument('--facts-cap-gib', type=int, default=16)
+    parser.add_argument('--spool-cap-gib', type=int, default=NATIVE_SPOOL_CAP_GIB,
+                        choices=(NATIVE_SPOOL_CAP_GIB,),
+                        help='fixed native spool physical file cap in GiB')
     args = parser.parse_args()
     for key in ('backend', 'base_source', 'stop_report'):
         setattr(args, key, getattr(args, key).resolve(strict=True))
@@ -1110,11 +1132,15 @@ def main():
             raise ValueError('sealed whole-backend fingerprint changed before execution')
         pins = {Path(path).resolve(strict=True): expected for path, expected in input_paths}
         verify_pins(pins)
-        event(label, 'started')
+        spool_build = label == 'global-spool-build'
+        limit_details = ({'file_cap_bytes': NATIVE_SPOOL_CAP_GIB * 1024**3}
+                         if spool_build else {})
+        event(label, 'started', **limit_details)
         log = args.evidence / (f'{len(state["events"]):04d}-' + label + '.log')
         with os.fdopen(os.open(log, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), 'wb') as output:
             completed = subprocess.run([str(part) for part in command], cwd=args.backend,
-                                       stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
+                                       stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                       **({'preexec_fn': spool_child_limit} if spool_build else {}))
             output.flush(); os.fsync(output.fileno())
         event(label, 'complete' if completed.returncode == 0 else 'failed',
               exit_code=completed.returncode, log=str(log))
@@ -1124,11 +1150,8 @@ def main():
         report_path = args.evidence/(label + '.json')
         if report_path.exists() or report_path.is_symlink():
             raise FileExistsError(f'preflight receipt already exists; preserve it and select a fresh evidence directory: {report_path}')
-        command = [sys.executable, preflight_script, '--source-directory', source_dir,
-                   '--facts', facts_path, '--facts-kind', facts_kind,
-                   '--target-volume', args.capture.parent, '--phase', phase,
-                   '--target-cap-gib', str(args.facts_cap_gib), '--capture', args.capture,
-                   '--spool', args.spool, '--report', report_path]
+        command = space_preflight_command(args, preflight_script, source_dir, facts_path,
+                                          phase, facts_kind, report_path)
         if allow_archived:
             command.append('--allow-archived-base-source')
         if args.archived_input_receipt:

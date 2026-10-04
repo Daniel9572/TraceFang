@@ -12,7 +12,7 @@ const FRAMES:TableDefinition<u64,&[u8]>=TableDefinition::new("decoded_frames_v1"
 const TEMPLATES:TableDefinition<&str,&[u8]>=TableDefinition::new("decoded_row_templates_v1");
 const META:TableDefinition<&str,&[u8]>=TableDefinition::new("decoded_spool_manifest_v1");
 const SCHEMA:&str="retained-global-decoded-spool-v2";
-const MAX_FILE:u64=4*1024*1024*1024;
+const MAX_FILE:u64=5*1024*1024*1024;
 const MIN_FREE:u64=4*1024*1024*1024;
 const MAX_DECODED_FRAME:usize=256*1024*1024;
 #[derive(Clone,Serialize,Deserialize)]pub struct Manifest {
@@ -71,7 +71,7 @@ fn prepare(mut header:CapturedFrame,decoded:Result<(Vec<QuoteSnapshot>,Vec<Candl
 }
 fn budget(path:&Path)->Result<()> {
  ensure!(crate::capture::available_bytes(path.parent().context("spool parent missing")?)?>MIN_FREE,"decoded spool stopped below 4GiB free; original source/capture untouched");
- if path.is_file(){ensure!(std::fs::metadata(path)?.len()<MAX_FILE,"decoded spool exceeds 4GiB cache bound; incomplete evidence preserved");}Ok(())
+ if path.is_file(){ensure!(std::fs::metadata(path)?.len()<MAX_FILE,"decoded spool exceeds 5GiB cache bound; incomplete evidence preserved");}Ok(())
 }
 fn commit_entries(database:&Database,entries:Vec<Prepared>,manifest:&mut Manifest,hash:&mut Sha256,first_seq:u64,path:&Path)->Result<()> {
  budget(path)?;
